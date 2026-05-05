@@ -1,2 +1,44 @@
 __pycache__/
 *.pyc
+/Dockerfile
+Dockerfile
+/outputs_hf_dino2
+/outputs_real_sam2
+outputs_hf_dino2
+outputs_real_sam2
+weights/
+external/
+outputs/
+inputs/
+*.pt
+*.pth
+*.safetensors
+
+#정리위함 중복 있을 수 있음 
+# model weights / checkpoints
+weights/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# external cloned repos
+external/
+
+# runtime data
+inputs/
+outputs/
+outputs*/
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# docker/cache
+.cache/
