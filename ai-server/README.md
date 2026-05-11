@@ -9,9 +9,11 @@
 ```
 입력: 책상 사진 + 스타일 + 상품 이미지
 
-Step 1  /remove    책상 위 물체 제거    SAM-2 AutomaticMaskGenerator + LaMa
+Step 1  /remove    책상 위 물체 제거    Grounding DINO + SAM-2 + LaMa
 Step 2  /img2img   스타일 변환          SD v1.5 img2img + LoRA (JU_DeskStyle)
 Step 3  /place     상품 합성            cv2.seamlessClone (픽셀 정확도 보존, GPU 불필요)
+
+보조  /analyze    탑뷰 공간 분석       SAM-2 + 가용 영역 계산
 ```
 
 ---
@@ -20,7 +22,8 @@ Step 3  /place     상품 합성            cv2.seamlessClone (픽셀 정확도 
 
 | 역할 | 모델 |
 |---|---|
-| 물체 감지 | SAM-2 `facebook/sam2.1-hiera-large` |
+| 물체 감지 (텍스트 기반) | Grounding DINO `IDEA-Research/grounding-dino-tiny` |
+| 물체 세그멘테이션 | SAM-2 `facebook/sam2.1-hiera-large` |
 | 물체 제거 | LaMa `simple-lama-inpainting` |
 | 스타일 변환 | SD v1.5 img2img + LoRA (rank=8, alpha=32) |
 | 상품 합성 | OpenCV `cv2.seamlessClone` (GPU 불필요) |
@@ -63,19 +66,35 @@ outputs/models/lora_final/   ← 이 경로에 수동 배치
 
 ### `POST /remove` — Step 1: 물체 제거
 
+감지 방식은 요청 내용에 따라 자동 선택됨.
+
+| 조건 | 사용 방식 |
+|---|---|
+| `prompt` 있음 | Grounding DINO → SAM-2 (텍스트로 지정한 물체만) |
+| `top_view_image_base64` 있음 | 탑뷰 SAM-2 Auto |
+| 둘 다 없음 | SAM-2 Auto (전체 자동 감지) |
+
 **Request**
 ```json
 {
   "image_base64": "...",
+  "prompt": "keyboard. mouse. pen holder.",
   "max_area_ratio": 0.20
 }
 ```
+
+| 파라미터 | 기본값 | 설명 |
+|---|---|---|
+| `prompt` | `null` | 제거할 물체 텍스트. `"물체1. 물체2."` 형식 |
+| `top_view_image_base64` | `null` | 탑뷰 이미지 (prompt 없을 때 사용) |
+| `max_area_ratio` | `0.20` | 이 비율 초과 마스크는 책상/배경으로 간주해 제외 |
 
 **완료 후 (`GET /jobs/{job_id}`)**
 ```json
 {
   "status": "done",
   "cleaned_image": "...",
+  "mask_image": "...",
   "detection_overlay": "...",
   "num_objects": 3
 }
@@ -134,6 +153,40 @@ outputs/models/lora_final/   ← 이 경로에 수동 배치
 
 ---
 
+### `POST /analyze` — 탑뷰 공간 분석
+
+탑뷰 이미지에서 책상 위 점유/가용 영역을 분석하고 상품 배치 추천 좌표를 반환.
+
+**Request**
+```json
+{
+  "image_base64": "...",
+  "desk_width_cm": 120.0,
+  "desk_depth_cm": 60.0
+}
+```
+
+**완료 후 (`GET /jobs/{job_id}`)**
+```json
+{
+  "status": "done",
+  "metrics": {
+    "desk_area_cm2": 7200.0,
+    "occupied_area_cm2": 2100.0,
+    "available_area_cm2": 5100.0,
+    "occupancy_ratio": 0.29,
+    "available_ratio": 0.71,
+    "connected_available_regions_cm2": [3200.0, 1400.0, 500.0]
+  },
+  "available_mask": "...",
+  "occupied_mask": "...",
+  "placement_center": [320, 210],
+  "num_objects": 5
+}
+```
+
+---
+
 ## 호출 예시 (Python)
 
 ```python
@@ -172,17 +225,22 @@ ai-server/
 ├── api/
 │   ├── main.py                     # FastAPI 앱, 엔드포인트
 │   ├── models.py                   # Pydantic 모델
-│   ├── img2img_processor.py        # Step 2
-│   ├── place_processor.py          # Step 3
-│   ├── inpaint_processor.py        # 레거시 (IP-Adapter-Plus)
 │   ├── object_removal_processor.py # Step 1 오케스트레이터
-│   ├── sam2_processor.py           # SAM-2
-│   └── lama_processor.py           # LaMa
+│   ├── dino_processor.py           # Grounding DINO 텍스트 기반 감지
+│   ├── sam2_processor.py           # SAM-2 세그멘테이션
+│   ├── lama_processor.py           # LaMa 인페인팅
+│   ├── img2img_processor.py        # Step 2: SD img2img + LoRA
+│   ├── place_processor.py          # Step 3: cv2.seamlessClone
+│   ├── space_processor.py          # /analyze: 탑뷰 공간 분석
+│   └── inpaint_processor.py        # 레거시 (IP-Adapter-Plus)
 ├── configs/
 │   └── config.yaml
+├── data/
+│   └── test/                       # 테스트 이미지 (git 미포함, 직접 배치)
 ├── outputs/
-│   └── models/lora_final/          # LoRA 가중치 (별도 배포)
+│   └── models/lora_final/          # LoRA 가중치 (git 미포함, 별도 배포)
 ├── Dockerfile
 ├── docker-compose.yml
-└── requirements.txt
+├── requirements.txt
+└── test_pipeline.py                # 전체 파이프라인 통합 테스트
 ```
