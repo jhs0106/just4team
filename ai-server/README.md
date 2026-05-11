@@ -218,6 +218,50 @@ styled = step2["result_image"]
 
 ---
 
+## main 브랜치 병합 가이드
+
+`jms` 브랜치의 모든 파일을 main에 합치지 않고 필요한 기능만 선택해서 가져올 수 있음.
+
+```bash
+git checkout main
+git checkout jms -- <파일경로>
+git commit -m "..."
+```
+
+### img2img + inpainting 기능만 가져갈 경우
+
+**반드시 필요한 파일**
+
+| 파일 | 이유 |
+|---|---|
+| `api/main.py` | FastAPI 앱 + `/img2img`, `/inpaint` 엔드포인트 |
+| `api/models.py` | 요청/응답 모델 (Img2ImgRequest, InpaintRequest 등) |
+| `api/img2img_processor.py` | SD v1.5 img2img + LoRA 처리 |
+| `api/inpaint_processor.py` | IP-Adapter-Plus 인페인팅 처리 |
+| `api/__init__.py` | 패키지 초기화 |
+| `configs/config.yaml` | 서버 설정 (트리거워드, 네거티브 프롬프트 등) |
+| `Dockerfile` | 컨테이너 빌드 |
+| `docker-compose.yml` | 컨테이너 실행 |
+| `requirements.txt` | 의존성 |
+
+**불필요한 파일 (img2img + inpaint만 쓸 경우 제외 가능)**
+
+| 파일 | 이유 |
+|---|---|
+| `api/object_removal_processor.py` | Step 1 물체 제거 전용 |
+| `api/dino_processor.py` | Grounding DINO 전용 |
+| `api/sam2_processor.py` | SAM-2 전용 |
+| `api/lama_processor.py` | LaMa 인페인팅 전용 |
+| `api/place_processor.py` | Step 3 상품 합성 전용 |
+| `api/space_processor.py` | 탑뷰 공간 분석 전용 |
+| `test_pipeline.py` | 테스트 스크립트 |
+| `data/` | 테스트 이미지 |
+
+> `api/main.py`와 `api/models.py`는 모든 엔드포인트 코드가 함께 있어서 파일 전체를 가져와야 함.
+> 불필요한 엔드포인트(`/remove`, `/place`, `/analyze`)는 가져온 후 직접 제거하거나 그대로 두어도 동작에는 영향 없음 (해당 프로세서 파일이 없으면 호출 시에만 오류).
+
+---
+
 ## 프로젝트 구조
 
 ```
