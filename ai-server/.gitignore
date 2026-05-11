@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 모델 가중치 (별도 공유)
+outputs/models/**/*.safetensors
+outputs/models/**/*.pt
+outputs/models/**/*.pth
+outputs/models/**/*.ckpt
+outputs/models/**/*.bin
+
+# 테스트 결과물
+outputs/test_results/
+
+# 개인 테스트 이미지
+data/test/*.jpg
+data/test/*.jpeg
+data/test/*.png
+
+# 환경 변수
+.env
+
+# Claude Code 개인 설정
+CLAUDE.md
