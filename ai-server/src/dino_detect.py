@@ -1,9 +1,6 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
-from functools import lru_cache
-from typing import List, Tuple
 import inspect
+from dataclasses import dataclass
+from typing import List, Optional
 
 import cv2
 import numpy as np
@@ -11,280 +8,323 @@ import numpy as np
 
 @dataclass
 class Detection:
+    """
+    DINO 검출 결과 하나를 저장하는 자료구조.
+    """
     label: str
     score: float
-    box_xyxy: Tuple[int, int, int, int]
+    box_xyxy: List[int]  # [x1, y1, x2, y2]
 
 
-DEFAULT_HF_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+def normalize_label(label) -> str:
+    """label을 비교하기 쉬운 소문자 문자열로 정리한다."""
+    if isinstance(label, (list, tuple)):
+        label = " ".join(map(str, label))
+    return str(label).lower().strip()
 
 
-def _labels_from_prompt(prompt: str) -> list[str]:
-    return [token.strip() for token in prompt.split(".") if token.strip()]
+def box_area(box: List[int]) -> int:
+    """bbox 면적 계산."""
+    x1, y1, x2, y2 = box
+    return max(0, x2 - x1) * max(0, y2 - y1)
 
 
-@lru_cache(maxsize=2)
-def _load_hf_grounding_dino(model_id: str = DEFAULT_HF_MODEL_ID):
-    try:
-        import torch
-        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
-    except Exception as exc:
-        raise RuntimeError(
-            "Hugging Face Grounding DINO 로드에 필요한 패키지가 없습니다. "
-            "requirements.txt에 transformers, accelerate, safetensors를 추가하고 다시 설치하세요."
-        ) from exc
+def iou(a: List[int], b: List[int]) -> float:
+    """두 bbox의 IoU 계산. NMS에서 사용."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
 
-    processor = AutoProcessor.from_pretrained(model_id)
-    model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
-    model.to(device)
-    model.eval()
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    union = box_area(a) + box_area(b) - inter
 
-    return processor, model, device
+    if union <= 0:
+        return 0.0
+    return inter / union
 
 
-def _run_opencv_fallback(
-    image_bgr: np.ndarray,
-    prompt: str,
-    box_threshold: float = 0.25,
-) -> List[Detection]:
-    labels = _labels_from_prompt(prompt)
-    if not labels:
+def nms(detections: List[Detection], iou_threshold: float = 0.50) -> List[Detection]:
+    """
+    중복 bbox 제거.
+    같은 물체가 여러 label로 중복 검출되는 것을 줄인다.
+    """
+    if not detections:
         return []
 
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thr = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    contours, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    detections = sorted(detections, key=lambda d: d.score, reverse=True)
+    kept: List[Detection] = []
 
-    detections: List[Detection] = []
-    idx = 0
-    h, w = gray.shape
-    min_area = max(200, (h * w) // 800)
+    for det in detections:
+        duplicated = False
 
-    for cnt in sorted(contours, key=cv2.contourArea, reverse=True):
-        area = cv2.contourArea(cnt)
+        for old in kept:
+            if iou(det.box_xyxy, old.box_xyxy) >= iou_threshold:
+                duplicated = True
+                break
 
-        if area < min_area:
+        if not duplicated:
+            kept.append(det)
+
+    return kept
+
+
+def filter_object_detections(
+    detections: List[Detection],
+    image_shape,
+    max_box_area_ratio: float = 0.60,
+) -> List[Detection]:
+    """
+    일반 객체 검출 결과 후처리.
+    object/item 같은 일반 label과 과도하게 큰 bbox를 제거한다.
+    """
+    h, w = image_shape[:2]
+    image_area = h * w
+
+    blacklist_keywords = [
+        "object",
+        "item",
+        "office item",
+        "desktop object",
+        "desk object",
+    ]
+
+    large_allowed_keywords = [
+        "monitor",
+        "keyboard",
+        "mouse pad",
+        "mousepad",
+    ]
+
+    filtered: List[Detection] = []
+
+    for det in detections:
+        label = normalize_label(det.label)
+        area_ratio = box_area(det.box_xyxy) / max(1, image_area)
+
+        if any(k in label for k in blacklist_keywords):
             continue
 
-        x, y, bw, bh = cv2.boundingRect(cnt)
-
-        # fallback이 이미지 전체를 하나의 객체로 잡는 문제 방지
-        box_area_ratio = (bw * bh) / float(h * w)
-        if box_area_ratio > 0.35:
+        if area_ratio > max_box_area_ratio:
             continue
 
-        # 벽/책상 경계처럼 지나치게 길쭉한 contour 제거
-        aspect = bw / max(bh, 1)
-        if aspect > 8 or aspect < 0.12:
+        is_large_allowed = any(k in label for k in large_allowed_keywords)
+
+        if not is_large_allowed and area_ratio > 0.40:
             continue
 
-        score = float(min(0.99, max(0.5, area / (h * w) * 8)))
-        if score < box_threshold:
+        filtered.append(det)
+
+    return filtered
+
+
+def filter_desk_detections(
+    detections: List[Detection],
+    image_shape,
+    max_box_area_ratio: float = 0.98,
+    min_box_area_ratio: float = 0.05,
+) -> List[Detection]:
+    """
+    책상 상판 검출 결과 후처리.
+    책상은 크기 때문에 object와 다르게 큰 bbox를 허용한다.
+    """
+    h, w = image_shape[:2]
+    image_area = h * w
+
+    valid_keywords = [
+        "desk",
+        "table",
+        "tabletop",
+        "desk surface",
+        "table surface",
+        "desk top",
+    ]
+
+    filtered: List[Detection] = []
+
+    for det in detections:
+        label = normalize_label(det.label)
+        area_ratio = box_area(det.box_xyxy) / max(1, image_area)
+
+        if not any(k in label for k in valid_keywords):
             continue
 
-        label = labels[idx % len(labels)]
-        detections.append(
-            Detection(
-                label=label,
-                score=score,
-                box_xyxy=(x, y, x + bw, y + bh),
-            )
-        )
+        if area_ratio < min_box_area_ratio:
+            continue
 
-        idx += 1
-        if idx >= len(labels):
-            break
+        if area_ratio > max_box_area_ratio:
+            continue
 
-    return detections
+        filtered.append(det)
+
+    # 가장 큰 책상 후보가 보통 상판일 가능성이 높다.
+    filtered = sorted(filtered, key=lambda d: box_area(d.box_xyxy), reverse=True)
+
+    return filtered
 
 
 def _post_process_grounding_dino(
     processor,
     outputs,
     input_ids,
-    image_size_hw: tuple[int, int],
+    target_sizes,
     box_threshold: float,
     text_threshold: float,
 ):
     """
-    Transformers 버전마다 post_process_grounded_object_detection()의
-    인자명이 조금씩 달라서 현재 설치된 버전의 signature를 읽고 맞는 인자만 넣는다.
+    transformers 버전마다 post_process 함수 인자가 조금씩 달라서
+    현재 버전에 맞춰 안전하게 호출한다.
     """
-    if not hasattr(processor, "post_process_grounded_object_detection"):
-        return processor.post_process_object_detection(
-            outputs,
-            threshold=box_threshold,
-            target_sizes=[image_size_hw],
-        )[0]
+    fn = processor.post_process_grounded_object_detection
+    sig = inspect.signature(fn)
 
-    post_fn = processor.post_process_grounded_object_detection
-    sig = inspect.signature(post_fn)
+    kwargs = {
+        "outputs": outputs,
+        "input_ids": input_ids,
+        "target_sizes": target_sizes,
+    }
 
-    kwargs = {}
-
-    if "outputs" in sig.parameters:
-        kwargs["outputs"] = outputs
-
-    if "input_ids" in sig.parameters:
-        kwargs["input_ids"] = input_ids
-
-    if "target_sizes" in sig.parameters:
-        kwargs["target_sizes"] = [image_size_hw]
-
-    # Transformers 5.x 계열은 threshold를 쓰는 경우가 많고,
-    # 일부 예전 예제/버전은 box_threshold를 사용한다.
-    if "threshold" in sig.parameters:
-        kwargs["threshold"] = box_threshold
-    elif "box_threshold" in sig.parameters:
+    if "box_threshold" in sig.parameters:
         kwargs["box_threshold"] = box_threshold
 
     if "text_threshold" in sig.parameters:
         kwargs["text_threshold"] = text_threshold
 
-    # outputs가 positional-only 또는 signature에 안 잡히는 경우 대비
-    try:
-        results = post_fn(**kwargs)
-    except TypeError:
-        results = post_fn(
-            outputs,
-            input_ids,
-            threshold=box_threshold,
-            text_threshold=text_threshold,
-            target_sizes=[image_size_hw],
-        )
+    if "threshold" in sig.parameters:
+        kwargs["threshold"] = box_threshold
 
-    return results[0]
+    return fn(**kwargs)
 
 
 def run_grounding_dino(
     image_bgr: np.ndarray,
     prompt: str,
     box_threshold: float = 0.25,
-    text_threshold: float = 0.2,
-    config_path: str | None = None,
-    weights_path: str | None = None,
-    use_fallback: bool = False,
-    hf_model_id: str = DEFAULT_HF_MODEL_ID,
+    text_threshold: float = 0.20,
+    nms_iou_threshold: float = 0.50,
+    max_box_area_ratio: float = 0.60,
+    mode: str = "object",
+    config_path: Optional[str] = None,
+    weights_path: Optional[str] = None,
 ) -> List[Detection]:
     """
-    Hugging Face Transformers 기반 Grounding DINO detector.
+    Grounding DINO로 prompt에 해당하는 객체 bbox를 검출한다.
 
-    기존 IDEA-Research/GroundingDINO repo 방식은 CUDA extension 컴파일이 필요하고,
-    PyTorch nightly / RTX 5070 환경에서 충돌할 수 있어 사용하지 않는다.
-
-    config_path, weights_path는 기존 CLI 호환성을 위해 남겨두지만 HF 방식에서는 사용하지 않는다.
+    mode:
+    - object: 책상 위 물체 검출
+    - desk: 책상 상판 검출
     """
-    _ = config_path, weights_path
-
-    if use_fallback:
-        return _run_opencv_fallback(image_bgr, prompt, box_threshold)
-
-    labels = _labels_from_prompt(prompt)
-    if not labels:
-        return []
-
     try:
         import torch
         from PIL import Image
-    except Exception as exc:
-        raise RuntimeError("Pillow 또는 torch import 실패") from exc
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
-    try:
-        processor, model, device = _load_hf_grounding_dino(hf_model_id)
+        model_id = "IDEA-Research/grounding-dino-tiny"
 
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         image_pil = Image.fromarray(image_rgb)
 
-        text = prompt.strip()
-        if not text.endswith("."):
-            text += "."
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        processor = AutoProcessor.from_pretrained(model_id)
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
+        model.eval()
+
+        # DINO는 문장 끝에 마침표가 있는 prompt 형식을 선호
+        if not prompt.strip().endswith("."):
+            prompt = prompt.strip() + "."
 
         inputs = processor(
             images=image_pil,
-            text=text,
+            text=prompt,
             return_tensors="pt",
-        )
-
-        inputs = {
-            key: value.to(device) if hasattr(value, "to") else value
-            for key, value in inputs.items()
-        }
+        ).to(device)
 
         with torch.no_grad():
             outputs = model(**inputs)
 
-        h, w = image_bgr.shape[:2]
+        target_sizes = torch.tensor([image_pil.size[::-1]], device=device)
+
         results = _post_process_grounding_dino(
             processor=processor,
             outputs=outputs,
             input_ids=inputs.get("input_ids"),
-            image_size_hw=(h, w),
+            target_sizes=target_sizes,
             box_threshold=box_threshold,
             text_threshold=text_threshold,
-        )
-
-        detections: List[Detection] = []
+        )[0]
 
         boxes = results.get("boxes", [])
         scores = results.get("scores", [])
-        result_labels = results.get("labels", [])
+        labels = results.get("text_labels", results.get("labels", []))
 
-        for box, score, label in zip(boxes, scores, result_labels):
-            x1, y1, x2, y2 = [int(round(float(v))) for v in box.tolist()]
+        h, w = image_bgr.shape[:2]
+        raw: List[Detection] = []
 
-            x1 = max(0, min(w - 1, x1))
-            y1 = max(0, min(h - 1, y1))
-            x2 = max(0, min(w - 1, x2))
-            y2 = max(0, min(h - 1, y2))
+        for box, score, label in zip(boxes, scores, labels):
+            x1, y1, x2, y2 = box.detach().cpu().numpy().tolist()
+
+            x1 = int(max(0, min(w - 1, round(x1))))
+            y1 = int(max(0, min(h - 1, round(y1))))
+            x2 = int(max(0, min(w - 1, round(x2))))
+            y2 = int(max(0, min(h - 1, round(y2))))
 
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            detections.append(
+            raw.append(
                 Detection(
-                    label=str(label),
-                    score=float(score),
-                    box_xyxy=(x1, y1, x2, y2),
+                    label=normalize_label(label),
+                    score=float(score.detach().cpu().item()),
+                    box_xyxy=[x1, y1, x2, y2],
                 )
             )
 
-        return detections
+        if mode == "desk":
+            filtered = filter_desk_detections(
+                raw,
+                image_shape=image_bgr.shape,
+                max_box_area_ratio=0.98,
+                min_box_area_ratio=0.05,
+            )
+        else:
+            filtered = filter_object_detections(
+                raw,
+                image_shape=image_bgr.shape,
+                max_box_area_ratio=max_box_area_ratio,
+            )
+            filtered = nms(filtered, iou_threshold=nms_iou_threshold)
 
-    except Exception as exc:
-        print(f"[WARN] Hugging Face Grounding DINO 실행 실패, OpenCV fallback 사용: {exc}")
-        return _run_opencv_fallback(image_bgr, prompt, box_threshold)
+        print(f"[DINO:{mode}] raw={len(raw)}, filtered={len(filtered)}")
+        return filtered
+
+    except Exception as e:
+        print(f"[WARN] Grounding DINO 실행 실패: {e}")
+        return []
 
 
 def draw_detections(image_bgr: np.ndarray, detections: List[Detection]) -> np.ndarray:
+    """검출 bbox를 이미지 위에 그려 확인용 이미지를 만든다."""
     vis = image_bgr.copy()
 
     for det in detections:
         x1, y1, x2, y2 = det.box_xyxy
+        text = f"{det.label} {det.score:.2f}"
 
-        cv2.rectangle(vis, (x1, y1), (x2, y2), (80, 255, 80), 2)
-
-        txt = f"{det.label}: {det.score:.2f}"
+        cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
         cv2.putText(
             vis,
-            txt,
-            (x1, max(18, y1 - 6)),
+            text,
+            (x1, max(20, y1 - 6)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
-            (20, 20, 20),
-            3,
-        )
-        cv2.putText(
-            vis,
-            txt,
-            (x1, max(18, y1 - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (255, 255, 255),
-            1,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
         )
 
     return vis

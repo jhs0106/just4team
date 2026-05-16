@@ -1,307 +1,638 @@
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path
+from typing import Optional, Tuple
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
-import torch
 
-from dino_detect import draw_detections, run_grounding_dino
-from lama_inpaint import inpaint_with_lama_placeholder
-from mask_utils import make_full_image_desk_mask, postprocess_occupied_mask
-from sam2_segment import overlay_mask, segment_with_sam2_from_boxes
-from space_analysis import analyze_space, metrics_to_dict, placement_candidates_placeholder
+from dino_detect import box_area, draw_detections, run_grounding_dino
+from lama_inpaint import run_lama_inpaint, save_lama_inputs
+from sam2_segment import (
+    build_remove_mask_by_indices,
+    build_remove_mask_from_labels,
+    merge_instance_masks,
+    overlay_mask,
+    postprocess_instances,
+    postprocess_mask,
+    save_instance_masks,
+    segment_instances_with_sam2,
+)
+from space_analysis import (
+    analyze_space,
+    build_available_mask,
+    draw_available_overlay,
+    keep_largest_component,
+    make_full_desk_mask,
+    make_rect_desk_mask,
+)
 
 
-def load_and_optionally_resize(path: str, max_long_side: int | None) -> np.ndarray:
-    img = cv2.imread(path)
-    if img is None:
-        raise FileNotFoundError(f"이미지 로드 실패: {path}")
+DEFAULT_OBJECT_PROMPT = (
+    "monitor. keyboard. mouse. mouse pad. cup. mug. "
+    "book. notebook. speaker. lamp. cable."
+)
 
-    if max_long_side and max_long_side > 0:
-        h, w = img.shape[:2]
-        long_side = max(h, w)
+DEFAULT_DESK_PROMPT = (
+    "desk surface. tabletop. desk top. table surface. desk. table."
+)
 
-        if long_side > max_long_side:
-            scale = max_long_side / long_side
-            img = cv2.resize(
-                img,
-                (int(w * scale), int(h * scale)),
-                interpolation=cv2.INTER_AREA,
+
+def save(path: Path, image: np.ndarray):
+    """이미지 저장."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), image)
+    print(f"[SAVE] {path}")
+
+
+def parse_roi(roi_text: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
+    """x1,y1,x2,y2 문자열을 tuple로 변환."""
+    if not roi_text:
+        return None
+
+    parts = [p.strip() for p in roi_text.split(",")]
+
+    if len(parts) != 4:
+        raise ValueError("--desk-roi는 x1,y1,x2,y2 형식이어야 합니다.")
+
+    return tuple(map(int, parts))
+
+
+def parse_csv_list(text: Optional[str]):
+    """cup,book 같은 문자열을 리스트로 변환."""
+    if not text:
+        return []
+
+    return [x.strip() for x in text.split(",") if x.strip()]
+
+
+def parse_index_list(text: Optional[str]):
+    """0,2,3 같은 문자열을 정수 리스트로 변환."""
+    if not text:
+        return []
+
+    return [int(x.strip()) for x in text.split(",") if x.strip()]
+
+
+def instance_summary(instances):
+    """JSON 저장용 instance 요약. mask 배열은 제외한다."""
+    rows = []
+
+    for i, inst in enumerate(instances):
+        rows.append(
+            {
+                "index": i,
+                "label": inst["label"],
+                "score": round(float(inst["score"]), 4),
+                "box_xyxy": inst["box_xyxy"],
+                "mask_area_px": int(np.count_nonzero(inst["mask"])),
+            }
+        )
+
+    return rows
+
+
+def run_dino_sam2_for_view(
+    image: np.ndarray,
+    prompt: str,
+    view_name: str,
+    out_dir: Path,
+    sam2_checkpoint: str,
+    sam2_config: str,
+    box_threshold: float,
+    text_threshold: float,
+    nms_iou_threshold: float,
+    max_box_area_ratio: float,
+):
+    """
+    일반 객체 검출용 DINO + SAM2 실행.
+    top-view는 occupied_mask 생성에 사용되고,
+    front-view는 LaMa remove_mask 생성에 사용된다.
+    """
+    print(f"\n[{view_name.upper()}] Object DINO start")
+
+    detections = run_grounding_dino(
+        image_bgr=image,
+        prompt=prompt,
+        box_threshold=box_threshold,
+        text_threshold=text_threshold,
+        nms_iou_threshold=nms_iou_threshold,
+        max_box_area_ratio=max_box_area_ratio,
+        mode="object",
+    )
+
+    save(out_dir / f"{view_name}_detection_result.png", draw_detections(image, detections))
+
+    print(f"[{view_name.upper()}] Object SAM2 start")
+
+    sam2_result = segment_instances_with_sam2(
+        image_bgr=image,
+        detections=detections,
+        sam2_checkpoint=sam2_checkpoint,
+        sam2_config=sam2_config,
+    )
+
+    raw_merged_mask = sam2_result["merged_mask"]
+    raw_instances = sam2_result["instances"]
+
+    processed_instances = postprocess_instances(
+        raw_instances,
+        dilate_kernel=7,
+        dilate_iter=1,
+        close_kernel=5,
+    )
+
+    processed_merged_mask = merge_instance_masks(
+        processed_instances,
+        image_shape=image.shape,
+    )
+
+    if processed_merged_mask is None:
+        processed_merged_mask = postprocess_mask(raw_merged_mask)
+
+    if processed_merged_mask is None:
+        processed_merged_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+
+    save(out_dir / f"{view_name}_raw_occupied_mask.png", raw_merged_mask)
+    save(out_dir / f"{view_name}_processed_occupied_mask.png", processed_merged_mask)
+    save(out_dir / f"{view_name}_sam2_mask_overlay.png", overlay_mask(image, processed_merged_mask))
+
+    save_instance_masks(processed_instances, out_dir / f"{view_name}_instance_masks")
+
+    return {
+        "detections": detections,
+        "instances": processed_instances,
+        "raw_merged_mask": raw_merged_mask,
+        "processed_merged_mask": processed_merged_mask,
+    }
+
+
+def build_auto_desk_mask(
+    top_image: np.ndarray,
+    desk_prompt: str,
+    out_dir: Path,
+    sam2_checkpoint: str,
+    sam2_config: str,
+    box_threshold: float,
+    text_threshold: float,
+):
+    """
+    DINO + SAM2로 책상 상판 desk_mask를 자동 생성한다.
+
+    핵심:
+    DINO가 책상/상판 bbox 검출
+    → 가장 큰 desk 후보를 SAM2에 입력
+    → desk_mask 생성
+    """
+    print("\n[DESK] Auto desk mask start")
+
+    desk_detections = run_grounding_dino(
+        image_bgr=top_image,
+        prompt=desk_prompt,
+        box_threshold=box_threshold,
+        text_threshold=text_threshold,
+        nms_iou_threshold=0.50,
+        max_box_area_ratio=0.98,
+        mode="desk",
+    )
+
+    save(out_dir / "desk_detection_result.png", draw_detections(top_image, desk_detections))
+
+    if not desk_detections:
+        print("[WARN] 책상 상판 자동 검출 실패")
+        return None, [], "auto_failed"
+
+    # 책상 후보 중 가장 큰 bbox를 사용한다.
+    desk_detections = sorted(
+        desk_detections,
+        key=lambda d: box_area(d.box_xyxy),
+        reverse=True,
+    )
+
+    best_desk = desk_detections[0]
+
+    print(f"[DESK] selected: {best_desk.label}, score={best_desk.score:.3f}, box={best_desk.box_xyxy}")
+
+    desk_sam2_result = segment_instances_with_sam2(
+        image_bgr=top_image,
+        detections=[best_desk],
+        sam2_checkpoint=sam2_checkpoint,
+        sam2_config=sam2_config,
+    )
+
+    desk_mask = desk_sam2_result["merged_mask"]
+
+    desk_mask = postprocess_mask(
+        desk_mask,
+        dilate_kernel=3,
+        dilate_iter=1,
+        close_kernel=21,
+    )
+
+    if desk_mask is None or np.count_nonzero(desk_mask) == 0:
+        print("[WARN] SAM2 책상 mask 생성 실패")
+        return None, desk_detections, "auto_sam2_failed"
+
+    # 잡음 제거: 가장 큰 연결 영역만 책상으로 사용
+    desk_mask = keep_largest_component(desk_mask)
+
+    save(out_dir / "desk_mask.png", desk_mask)
+    save(out_dir / "desk_mask_overlay.png", overlay_mask(top_image, desk_mask, color=(0, 255, 255)))
+
+    return desk_mask, desk_detections, "auto_dino_sam2"
+
+
+def build_remove_mask_for_mode(
+    mode: str,
+    instances,
+    occupied_mask: np.ndarray,
+    remove_labels,
+    remove_indices,
+    image_shape,
+):
+    """
+    mode에 따라 remove_mask 생성.
+
+    own_desk/add:
+        기존 객체를 유지하므로 remove_mask 없음.
+
+    replace:
+        선택된 객체만 제거.
+
+    empty_desk:
+        전체 occupied_mask 제거.
+    """
+    if mode in ["add", "own_desk"]:
+        return None
+
+    if mode == "empty_desk":
+        return occupied_mask
+
+    if mode == "replace":
+        if remove_indices:
+            return build_remove_mask_by_indices(
+                instances,
+                remove_indices,
+                image_shape=image_shape,
             )
 
-    return img
+        if remove_labels:
+            return build_remove_mask_from_labels(
+                instances,
+                remove_labels,
+                image_shape=image_shape,
+            )
+
+        print("[WARN] replace 모드인데 remove 대상이 없습니다.")
+        return np.zeros(image_shape[:2], dtype=np.uint8)
+
+    return None
 
 
-def save(path: Path, img: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(path), img)
+def main():
+    parser = argparse.ArgumentParser(
+        description="DINO + SAM2 + 자동 desk_mask + 가용공간 분석 + LaMa 통합 파이프라인"
+    )
 
+    parser.add_argument("--front-image", required=True, help="front-view 이미지. 최종 합성/LaMa 기준")
+    parser.add_argument("--top-view-image", required=True, help="top-view 이미지. 가용공간 분석 기준")
 
-def compose_pipeline_summary(paths: list[Path], out_path: Path) -> None:
-    titles = [
-        "front",
-        "top",
-        "top_detection",
-        "top_mask",
-        "front_mask",
-        "available",
-    ]
+    parser.add_argument("--desk-width-cm", type=float, required=True, help="실제 책상 가로 길이(cm)")
+    parser.add_argument("--desk-depth-cm", type=float, required=True, help="실제 책상 세로 길이(cm)")
 
-    imgs = [
-        cv2.cvtColor(cv2.imread(str(p)), cv2.COLOR_BGR2RGB)
-        if p.exists()
-        else np.zeros((300, 300, 3), np.uint8)
-        for p in paths
-    ]
+    parser.add_argument(
+        "--prompt",
+        default=DEFAULT_OBJECT_PROMPT,
+        help="책상 위 객체 검출 prompt",
+    )
 
-    plt.figure(figsize=(24, 5), dpi=200)
+    parser.add_argument(
+        "--desk-prompt",
+        default=DEFAULT_DESK_PROMPT,
+        help="책상 상판 자동 검출 prompt",
+    )
 
-    for i, (title, img) in enumerate(zip(titles, imgs), 1):
-        plt.subplot(1, 6, i)
-        plt.imshow(img)
-        plt.title(title)
-        plt.axis("off")
+    parser.add_argument(
+        "--auto-desk-mask",
+        action="store_true",
+        help="DINO+SAM2로 책상 상판 desk_mask를 자동 생성한다.",
+    )
 
-    plt.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path)
-    plt.close()
+    parser.add_argument(
+        "--desk-roi",
+        default=None,
+        help="자동 desk mask 실패 시 사용할 수동 ROI. 형식: x1,y1,x2,y2",
+    )
 
-
-def print_gpu_info() -> None:
-    print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
-
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser()
-
-    ap.add_argument("--front-image", required=True)
-    ap.add_argument("--top-view-image", required=True)
-
-    ap.add_argument("--desk-width-cm", type=float, required=True)
-    ap.add_argument("--desk-depth-cm", type=float, required=True)
-
-    ap.add_argument("--prompt", type=str, required=True)
-
-    ap.add_argument(
+    parser.add_argument(
         "--mode",
-        choices=["empty_desk", "own_desk", "empty_space"],
         default="own_desk",
+        choices=["add", "own_desk", "replace", "empty_desk"],
+        help="own_desk/add: 유지, replace: 선택 객체 제거, empty_desk: 전체 제거",
     )
 
-    ap.add_argument("--outputs-dir", default="outputs")
-    ap.add_argument("--max-long-side", type=int, default=1280)
-
-    ap.add_argument("--dino-config", default=None)
-    ap.add_argument("--dino-weights", default=None)
-
-    ap.add_argument("--sam2-config", default=None)
-    ap.add_argument("--sam2-checkpoint", default=None)
-
-    ap.add_argument("--lama-model-dir", default=None)
-
-    args = ap.parse_args()
-
-    out = Path(args.outputs_dir)
-
-    print_gpu_info()
-
-    front = load_and_optionally_resize(
-        args.front_image,
-        args.max_long_side,
+    parser.add_argument(
+        "--remove-labels",
+        default=None,
+        help="replace 모드에서 제거할 label. 예: cup,book",
     )
 
-    top = load_and_optionally_resize(
-        args.top_view_image,
-        args.max_long_side,
+    parser.add_argument(
+        "--remove-indices",
+        default=None,
+        help="replace 모드에서 제거할 instance index. 예: 0,2",
     )
 
-    save(out / "front_input_copy.png", front)
-    save(out / "top_view_input_copy.png", top)
+    parser.add_argument("--sam2-config", required=True, help="SAM2 config. 예: configs/sam2.1/sam2.1_hiera_t.yaml")
+    parser.add_argument("--sam2-checkpoint", required=True, help="SAM2 checkpoint 경로")
 
-    if args.mode == "empty_space":
-        print("empty_space mode: 이미지 분석 생략")
-        return
+    parser.add_argument("--box-threshold", type=float, default=0.25)
+    parser.add_argument("--text-threshold", type=float, default=0.20)
+    parser.add_argument("--desk-box-threshold", type=float, default=0.20)
+    parser.add_argument("--desk-text-threshold", type=float, default=0.15)
 
-    # =========================================================
-    # Top-view : space analysis
-    # =========================================================
+    parser.add_argument("--nms-iou-threshold", type=float, default=0.50)
+    parser.add_argument("--max-box-area-ratio", type=float, default=0.60)
 
-    top_detections = run_grounding_dino(
-        top,
-        args.prompt,
-        config_path=args.dino_config,
-        weights_path=args.dino_weights,
+    parser.add_argument(
+        "--min-region-area-px",
+        type=int,
+        default=1000,
+        help="너무 작은 available region 제거 기준",
     )
 
-    top_detection_vis = draw_detections(top, top_detections)
+    parser.add_argument(
+        "--disable-lama",
+        action="store_true",
+        help="LaMa 실행 비활성화",
+    )
 
-    save(out / "detection_result.png", top_detection_vis)
-    save(out / "top_detection_result.png", top_detection_vis)
+    parser.add_argument(
+        "--no-lama-fallback",
+        action="store_true",
+        help="LaMa 실패 시 OpenCV fallback 사용 안 함",
+    )
 
-    top_raw_occ = segment_with_sam2_from_boxes(
-        top,
-        [d.box_xyxy for d in top_detections],
+    parser.add_argument("--outputs-dir", default="outputs_auto_space")
+
+    args = parser.parse_args()
+
+    out_dir = Path(args.outputs_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    front = cv2.imread(args.front_image)
+    top = cv2.imread(args.top_view_image)
+
+    if front is None:
+        raise FileNotFoundError(f"front image를 읽을 수 없습니다: {args.front_image}")
+
+    if top is None:
+        raise FileNotFoundError(f"top-view image를 읽을 수 없습니다: {args.top_view_image}")
+
+    save(out_dir / "front_input_copy.png", front)
+    save(out_dir / "top_view_input_copy.png", top)
+
+    # ------------------------------------------------------------
+    # 1. top-view 객체 검출 및 occupied_mask 생성
+    # ------------------------------------------------------------
+    top_result = run_dino_sam2_for_view(
+        image=top,
+        prompt=args.prompt,
+        view_name="top",
+        out_dir=out_dir,
         sam2_checkpoint=args.sam2_checkpoint,
         sam2_config=args.sam2_config,
+        box_threshold=args.box_threshold,
+        text_threshold=args.text_threshold,
+        nms_iou_threshold=args.nms_iou_threshold,
+        max_box_area_ratio=args.max_box_area_ratio,
     )
 
-    save(out / "raw_occupied_mask.png", top_raw_occ)
-    save(out / "top_raw_occupied_mask.png", top_raw_occ)
+    # 기존 출력 파일명 호환
+    save(out_dir / "detection_result.png", draw_detections(top, top_result["detections"]))
+    save(out_dir / "raw_occupied_mask.png", top_result["raw_merged_mask"])
+    save(out_dir / "processed_occupied_mask.png", top_result["processed_merged_mask"])
+    save(out_dir / "sam2_mask_overlay.png", overlay_mask(top, top_result["processed_merged_mask"]))
 
-    top_processed_occ = postprocess_occupied_mask(top_raw_occ)
-
-    save(out / "processed_occupied_mask.png", top_processed_occ)
-    save(out / "top_processed_occupied_mask.png", top_processed_occ)
-
-    top_overlay = overlay_mask(
-        top,
-        top_processed_occ,
-        color=(255, 50, 50),
-        alpha=0.45,
-    )
-
-    save(out / "sam2_mask_overlay.png", top_overlay)
-    save(out / "top_sam2_mask_overlay.png", top_overlay)
-
-    # =========================================================
-    # Front-view : synthesis helper
-    # =========================================================
-
-    front_detections = run_grounding_dino(
-        front,
-        args.prompt,
-        config_path=args.dino_config,
-        weights_path=args.dino_weights,
-    )
-
-    front_detection_vis = draw_detections(front, front_detections)
-
-    save(out / "front_detection_result.png", front_detection_vis)
-
-    front_raw_mask = segment_with_sam2_from_boxes(
-        front,
-        [d.box_xyxy for d in front_detections],
+    # ------------------------------------------------------------
+    # 2. front-view 객체 검출 및 mask 생성
+    # LaMa 객체 제거용으로 사용
+    # ------------------------------------------------------------
+    front_result = run_dino_sam2_for_view(
+        image=front,
+        prompt=args.prompt,
+        view_name="front",
+        out_dir=out_dir,
         sam2_checkpoint=args.sam2_checkpoint,
         sam2_config=args.sam2_config,
+        box_threshold=args.box_threshold,
+        text_threshold=args.text_threshold,
+        nms_iou_threshold=args.nms_iou_threshold,
+        max_box_area_ratio=args.max_box_area_ratio,
     )
 
-    save(out / "front_raw_object_mask.png", front_raw_mask)
+    # ------------------------------------------------------------
+    # 3. desk_mask 생성
+    # 최우선: 자동 desk_mask
+    # fallback 1: desk-roi
+    # fallback 2: full image
+    # ------------------------------------------------------------
+    desk_roi = parse_roi(args.desk_roi)
 
-    front_processed_mask = postprocess_occupied_mask(front_raw_mask)
+    desk_mask = None
+    desk_detections = []
+    desk_mask_mode = None
 
-    save(out / "front_processed_object_mask.png", front_processed_mask)
+    if args.auto_desk_mask:
+        desk_mask, desk_detections, desk_mask_mode = build_auto_desk_mask(
+            top_image=top,
+            desk_prompt=args.desk_prompt,
+            out_dir=out_dir,
+            sam2_checkpoint=args.sam2_checkpoint,
+            sam2_config=args.sam2_config,
+            box_threshold=args.desk_box_threshold,
+            text_threshold=args.desk_text_threshold,
+        )
 
-    front_overlay = overlay_mask(
-        front,
-        front_processed_mask,
-        color=(255, 50, 50),
-        alpha=0.45,
+    if desk_mask is None and desk_roi is not None:
+        print("[DESK] rect ROI fallback 사용")
+        desk_mask = make_rect_desk_mask(top.shape, desk_roi)
+        desk_mask_mode = "rect_roi"
+        save(out_dir / "desk_mask.png", desk_mask)
+        save(out_dir / "desk_mask_overlay.png", overlay_mask(top, desk_mask, color=(0, 255, 255)))
+
+    if desk_mask is None:
+        print("[DESK] full image fallback 사용")
+        desk_mask = make_full_desk_mask(top.shape)
+        desk_mask_mode = "full_image"
+        save(out_dir / "desk_mask.png", desk_mask)
+        save(out_dir / "desk_mask_overlay.png", overlay_mask(top, desk_mask, color=(0, 255, 255)))
+
+    # ------------------------------------------------------------
+    # 4. remove_mask 생성
+    # replace / empty_desk에서만 사용
+    # ------------------------------------------------------------
+    remove_labels = parse_csv_list(args.remove_labels)
+    remove_indices = parse_index_list(args.remove_indices)
+
+    top_remove_mask = build_remove_mask_for_mode(
+        mode=args.mode,
+        instances=top_result["instances"],
+        occupied_mask=top_result["processed_merged_mask"],
+        remove_labels=remove_labels,
+        remove_indices=remove_indices,
+        image_shape=top.shape,
     )
 
-    save(out / "front_sam2_mask_overlay.png", front_overlay)
-
-    # =========================================================
-    # Space analysis (TOP ONLY)
-    # =========================================================
-
-    desk_mask = make_full_image_desk_mask(top.shape)
-
-    save(out / "desk_mask.png", desk_mask)
-
-    metrics, available_mask = analyze_space(
-        desk_mask,
-        top_processed_occ,
-        args.desk_width_cm,
-        args.desk_depth_cm,
+    front_remove_mask = build_remove_mask_for_mode(
+        mode=args.mode,
+        instances=front_result["instances"],
+        occupied_mask=front_result["processed_merged_mask"],
+        remove_labels=remove_labels,
+        remove_indices=remove_indices,
+        image_shape=front.shape,
     )
 
-    save(out / "available_space_mask.png", available_mask)
+    if top_remove_mask is not None:
+        save(out_dir / "top_remove_mask.png", top_remove_mask)
+        save(out_dir / "top_remove_mask_overlay.png", overlay_mask(top, top_remove_mask, color=(0, 0, 255)))
 
-    available_overlay = overlay_mask(
-        top,
-        available_mask,
-        color=(50, 220, 50),
-        alpha=0.45,
+    if front_remove_mask is not None:
+        save(out_dir / "front_remove_mask.png", front_remove_mask)
+        save(out_dir / "front_remove_mask_overlay.png", overlay_mask(front, front_remove_mask, color=(0, 0, 255)))
+
+    # ------------------------------------------------------------
+    # 5. 가용공간 분석
+    # 핵심:
+    # available = desk_mask - occupied_mask
+    # replace에서는 remove_mask를 제외한 keep_mask 기준
+    # ------------------------------------------------------------
+    available_mask = build_available_mask(
+        occupied_mask=top_result["processed_merged_mask"],
+        desk_mask=desk_mask,
+        remove_mask=top_remove_mask,
+        min_region_area_px=args.min_region_area_px,
     )
 
-    save(out / "available_space_overlay.png", available_overlay)
+    save(out_dir / "available_space_mask.png", available_mask)
 
-    summary = metrics_to_dict(metrics)
-
-    summary["mode"] = args.mode
-
-    summary["placement_candidate"] = placement_candidates_placeholder(
-        available_mask,
-        10,
-        10,
+    available_overlay = draw_available_overlay(
+        image_bgr=top,
+        available_mask=available_mask,
+        desk_mask=desk_mask,
     )
 
-    (
-        out / "space_analysis_summary.json"
-    ).write_text(
-        json.dumps(summary, indent=2),
+    save(out_dir / "available_space_overlay.png", available_overlay)
+
+    space_summary = analyze_space(
+        occupied_mask=top_result["processed_merged_mask"],
+        desk_width_cm=args.desk_width_cm,
+        desk_depth_cm=args.desk_depth_cm,
+        desk_mask=desk_mask,
+        remove_mask=top_remove_mask,
+        min_region_area_px=args.min_region_area_px,
+    )
+
+    # ------------------------------------------------------------
+    # 6. LaMa 객체 제거
+    # own_desk/add에서는 보통 실행되지 않는다.
+    # replace/empty_desk에서 front_remove_mask가 있을 때 실행한다.
+    # ------------------------------------------------------------
+    lama_result_path = None
+
+    if not args.disable_lama and front_remove_mask is not None and np.count_nonzero(front_remove_mask) > 0:
+        lama_dir = out_dir / "lama_debug"
+        save_lama_inputs(lama_dir, front, front_remove_mask)
+
+        cleaned_front = run_lama_inpaint(
+            image_bgr=front,
+            remove_mask=front_remove_mask,
+            use_fallback=not args.no_lama_fallback,
+        )
+
+        lama_result_path = "front_lama_cleaned.png"
+        save(out_dir / lama_result_path, cleaned_front)
+
+    elif args.mode in ["replace", "empty_desk"]:
+        print("[WARN] LaMa 실행 대상 remove_mask가 없어 인페인팅을 건너뜁니다.")
+    else:
+        print("[INFO] own_desk/add 모드이므로 LaMa를 실행하지 않습니다.")
+
+    # ------------------------------------------------------------
+    # 7. summary JSON 저장
+    # 추천/합성 파트로 넘길 수 있는 결과
+    # ------------------------------------------------------------
+    summary = {
+        "mode": args.mode,
+        "object_prompt": args.prompt,
+        "desk_prompt": args.desk_prompt,
+        "desk_mask_mode": desk_mask_mode,
+        "desk_roi": desk_roi,
+        "thresholds": {
+            "box_threshold": args.box_threshold,
+            "text_threshold": args.text_threshold,
+            "desk_box_threshold": args.desk_box_threshold,
+            "desk_text_threshold": args.desk_text_threshold,
+            "nms_iou_threshold": args.nms_iou_threshold,
+            "max_box_area_ratio": args.max_box_area_ratio,
+        },
+        "remove": {
+            "remove_labels": remove_labels,
+            "remove_indices": remove_indices,
+            "has_top_remove_mask": top_remove_mask is not None and np.count_nonzero(top_remove_mask) > 0,
+            "has_front_remove_mask": front_remove_mask is not None and np.count_nonzero(front_remove_mask) > 0,
+        },
+        "desk_detections": [
+            {
+                "label": d.label,
+                "score": round(float(d.score), 4),
+                "box_xyxy": d.box_xyxy,
+                "area_px": box_area(d.box_xyxy),
+            }
+            for d in desk_detections
+        ],
+        "top_detections": instance_summary(top_result["instances"]),
+        "front_detections": instance_summary(front_result["instances"]),
+        "space_analysis": space_summary,
+        "outputs": {
+            "desk_detection_result": "desk_detection_result.png" if args.auto_desk_mask else None,
+            "desk_mask": "desk_mask.png",
+            "desk_mask_overlay": "desk_mask_overlay.png",
+            "occupied_mask": "processed_occupied_mask.png",
+            "available_space_mask": "available_space_mask.png",
+            "available_space_overlay": "available_space_overlay.png",
+            "front_lama_cleaned": lama_result_path,
+        },
+    }
+
+    summary_path = out_dir / "space_analysis_summary.json"
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    summary_canvas = np.full((460, 860, 3), 255, dtype=np.uint8)
+    print(f"[SAVE] {summary_path}")
 
-    y = 45
-
-    for k, v in summary.items():
-        txt = f"{k}: {v}"
-
-        cv2.putText(
-            summary_canvas,
-            txt[:100],
-            (20, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 0),
-            2,
-        )
-
-        y += 35
-
-    save(out / "space_analysis_summary.png", summary_canvas)
-
-    cleaned_path = out / "cleaned_result.png"
-
-    if args.mode == "empty_desk":
-        cleaned = inpaint_with_lama_placeholder(
-            top,
-            top_processed_occ,
-            args.lama_model_dir,
-        )
-
-        save(cleaned_path, cleaned)
-
-    else:
-        save(cleaned_path, top)
-
-    compose_pipeline_summary(
+    # ------------------------------------------------------------
+    # 8. 요약 이미지 저장
+    # 원본 / occupied / desk / available 순서
+    # ------------------------------------------------------------
+    summary_img = np.hstack(
         [
-            out / "front_input_copy.png",
-            out / "top_view_input_copy.png",
-            out / "top_detection_result.png",
-            out / "top_sam2_mask_overlay.png",
-            out / "front_sam2_mask_overlay.png",
-            out / "available_space_overlay.png",
-        ],
-        out / "pipeline_summary.png",
+            cv2.resize(top, (360, 240)),
+            cv2.resize(overlay_mask(top, top_result["processed_merged_mask"]), (360, 240)),
+            cv2.resize(overlay_mask(top, desk_mask, color=(0, 255, 255)), (360, 240)),
+            cv2.resize(available_overlay, (360, 240)),
+        ]
     )
 
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    save(out_dir / "pipeline_summary.png", summary_img)
 
-    print("완료:", out.resolve())
+    print("\n[DONE] Pipeline finished.")
+    print(f"- outputs: {out_dir}")
+    print(f"- mode: {args.mode}")
+    print(f"- desk_mask_mode: {desk_mask_mode}")
+    print(f"- available regions: {len(space_summary['available_regions'])}")
 
 
 if __name__ == "__main__":
