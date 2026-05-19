@@ -87,6 +87,38 @@ def make_box_mask(image_shape, box_xyxy) -> np.ndarray:
 
     return box_mask
 
+def clip_overextended_bottom(mask: np.ndarray, box_xyxy, max_bottom_ratio: float = 0.90) -> np.ndarray:
+    """
+    desk_mask가 DINO bbox 하단까지 과하게 확장된 경우에만 하단부를 제한한다.
+    고정 좌표가 아니라 bbox 내 mask 하단 비율을 기준으로 판단한다.
+    """
+    x1, y1, x2, y2 = map(int, box_xyxy)
+    bbox_h = max(y2 - y1, 1)
+
+    mask_bool = mask > 0
+    ys = np.where(mask_bool)[0]
+
+    if len(ys) == 0:
+        return mask
+
+    mask_bottom = int(ys.max())
+    bottom_ratio = (mask_bottom - y1) / bbox_h
+
+    if bottom_ratio > max_bottom_ratio:
+        surface_y2 = int(y1 + bbox_h * max_bottom_ratio)
+
+        clipped = mask.copy()
+        clipped[surface_y2:, :] = 0
+
+        print(
+            f"[DESK] auto bottom clip applied: "
+            f"bottom_ratio={bottom_ratio:.3f}, y<{surface_y2}"
+        )
+        return clipped
+
+    print(f"[DESK] auto bottom clip skipped: bottom_ratio={bottom_ratio:.3f}")
+    return mask
+
 def parse_roi(roi_text: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     """x1,y1,x2,y2 문자열을 tuple로 변환."""
     if not roi_text:
@@ -297,6 +329,18 @@ def build_auto_desk_mask(
     after_box_clip = int(np.count_nonzero(desk_mask))
 
     print(f"[DESK] bbox clip applied: {before_box_clip} -> {after_box_clip}")
+    
+    # DINO bbox가 책상 상판뿐 아니라 책상 전면부/아래쪽까지 포함하는 경우,
+    # mask가 bbox 하단까지 과하게 확장되었을 때만 조건부로 하단을 제한한다.
+    before_bottom_clip = int(np.count_nonzero(desk_mask))
+    desk_mask = clip_overextended_bottom(
+        desk_mask,
+        best_desk.box_xyxy,
+        max_bottom_ratio=0.90,
+    )
+    after_bottom_clip = int(np.count_nonzero(desk_mask))
+
+    print(f"[DESK] bottom clip result: {before_bottom_clip} -> {after_bottom_clip}")
 
     save(out_dir / "desk_mask.png", desk_mask)
     save(out_dir / "desk_mask_overlay.png", overlay_mask(top_image, desk_mask, color=(0, 255, 255)))
