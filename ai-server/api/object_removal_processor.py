@@ -15,12 +15,7 @@ def image_to_b64(image: Image.Image) -> str:
 
 
 def _dilate_mask(mask_pil: Image.Image, dilation_size: int) -> Image.Image:
-    """
-    MaxFilter(square) 대신 Ellipse kernel 팽창 사용.
-    - 커버리지 크기(반경)는 동일하게 유지
-    - 모서리가 자연스럽게 처리되어 LaMa 인페인팅 품질 향상
-    - 팽창 후 400px 미만 노이즈 스펙 제거
-    """
+    # Ellipse kernel 팽창 — 모서리 자연화 + 400px 미만 노이즈 제거
     arr = np.array(mask_pil)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size, dilation_size))
     dilated = cv2.dilate(arr, kernel, iterations=1)
@@ -42,7 +37,7 @@ class ObjectRemovalProcessor:
         print("[ObjectRemoval] 초기화 완료.")
 
     def _get_mask_generator(self):
-        """SAM2AutomaticMaskGenerator — SAM-2 모델 재사용 (중복 로드 없음)"""
+        # SAM2AutomaticMaskGenerator 싱글톤 — SAM-2 모델 재사용
         if self._mask_generator is None:
             from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
             sam_model = get_sam2_processor().predictor.model
@@ -64,20 +59,7 @@ class ObjectRemovalProcessor:
         y_min_ratio: float = 0.25,
         dilation_size: int = 21,
     ) -> dict:
-        """
-        SAM-2 Automatic으로 물체 감지 후 마스크 생성.
-
-        - 크기 필터: 너무 크거나(배경) 너무 작은(노이즈) 마스크 제외
-        - Y축 필터: 이미지 상단 y_min_ratio 이내 중심 마스크 제외 (모니터/벽)
-        - 정렬: 작은 물체부터 — 순차 제거 시 이미 정리된 책상 표면이 이후 맥락으로 사용됨
-
-        Returns
-        -------
-        mask             : 합산 팽창 마스크 (b64) — 오버레이 표시용
-        overlay          : 원본 + 마스크 오버레이 (b64)
-        num_objects      : 감지 물체 수
-        individual_masks : 개별 팽창 마스크 목록 (PIL L, 원본 크기, 작은 것부터)
-        """
+        # SAM-2 Auto 물체 감지 → 크기/Y축 필터 → 팽창 마스크 생성 (작은 것부터 정렬)
         orig_w, orig_h = image.size
         if orig_w > max_size or orig_h > max_size:
             scale = min(max_size / orig_w, max_size / orig_h)
@@ -156,13 +138,7 @@ class ObjectRemovalProcessor:
         max_area_ratio: float = 0.20,
         dilation_size: int = 21,
     ) -> dict:
-        """
-        Grounding DINO → SAM-2 박스 기반 세그멘테이션 → LaMa 제거용 마스크 생성.
-
-        SAM-2 Auto 대비 장점: 텍스트로 원하는 물체만 정확히 타겟팅.
-        max_area_ratio 초과 마스크(마우스패드·책상면)는 자동 제외.
-        prompt 예시: "keyboard. mouse. headset. desk lamp."
-        """
+        # DINO 텍스트 프롬프트 → SAM-2 박스 세그멘테이션 → 마스크 생성. max_area_ratio 초과 제외
         from .dino_processor import run_grounding_dino
         from .sam2_processor import get_sam2_processor
 
@@ -180,7 +156,11 @@ class ObjectRemovalProcessor:
         h, w = img_array.shape[:2]
         max_area_px = int(h * w * max_area_ratio)
 
-        detections = run_grounding_dino(img_bgr, prompt, box_threshold=box_threshold)
+        detections = run_grounding_dino(
+            img_bgr, prompt,
+            box_threshold=box_threshold,
+            max_area_ratio=max_area_ratio,
+        )
         print(f"[ObjectRemoval] DINO 감지: {len(detections)}개 / prompt='{prompt[:50]}'")
 
         if not detections:
@@ -256,13 +236,7 @@ class ObjectRemovalProcessor:
         max_area_ratio: float = 0.35,
         dilation_size: int = 15,
     ) -> dict:
-        """
-        탑뷰에서 SAM-2로 물체 감지 → 정면 뷰 크기로 마스크 스케일링.
-
-        탑뷰는 원근감 왜곡 없이 물체 경계가 명확하고 겹침이 적음.
-        Y축 필터 불필요 (모니터/벽이 이미지 상단에 걸리는 문제 없음).
-        마스크는 비율 리사이즈로 정면 뷰에 근사 적용.
-        """
+        # 탑뷰 SAM-2 물체 감지 → 정면 뷰 크기로 마스크 비율 스케일링
         tv_w, tv_h = top_view.size
         if tv_w > max_size or tv_h > max_size:
             scale = min(max_size / tv_w, max_size / tv_h)

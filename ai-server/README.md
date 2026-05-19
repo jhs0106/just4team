@@ -1,19 +1,33 @@
 # Deskterior AI Server
 
-사용자의 실제 책상 사진을 받아 원하는 스타일로 변환하고, 선택한 상품을 자연스럽게 합성하는 AI 서버.
+사용자의 실제 책상 사진(정면)을 받아, 예산·스타일 조건에 맞게 추천된 제품들이 책상 위에 배치된 데스크테리어 이미지를 생성하는 AI 서버.
+
+---
+
+## 서비스 흐름
+
+```
+사용자 입력: 책상 사진(정면) + 예산 + 스타일
+    ↓
+Spring Boot + Jina CLIP: 예산·스타일에 맞는 제품 추천 → 제품 목록 AI 서버로 전달
+    ↓
+AI 서버: 책상 위 기존 물체 제거 → 추천 제품 배치 이미지 생성
+    ↓
+사용자: 생성 이미지(레이아웃 시뮬레이션) + 실제 제품 카드(구매 링크) 나란히 표시
+```
+
+> 이미지는 "이 책상에 이 카테고리 제품들을 올려두면 이런 셋업이 됨"을 보여주는 레이아웃 시뮬레이션입니다.
+> 이미지 속 제품이 실제 DB 제품과 픽셀 단위로 동일할 필요는 없습니다. 실제 제품 정보는 별도 카드로 표시됩니다.
 
 ---
 
 ## 파이프라인
 
 ```
-입력: 책상 사진 + 스타일 + 상품 이미지
+Step 1  POST /remove         책상 위 기존 물체 제거    Grounding DINO + SAM-2 + LaMa
+Step 2  POST /product_place  제품 inpainting 배치      SD Inpainting (제품 수만큼 반복)
 
-Step 1  /remove    책상 위 물체 제거    Grounding DINO + SAM-2 + LaMa
-Step 2  /img2img   스타일 변환          SD v1.5 img2img + LoRA (JU_DeskStyle)
-Step 3  /place     상품 합성            cv2.seamlessClone (픽셀 정확도 보존, GPU 불필요)
-
-보조  /analyze    탑뷰 공간 분석       SAM-2 + 가용 영역 계산
+보조    POST /segment        마우스패드 세그멘테이션    SAM-2 (px/mm 스케일 계산용)
 ```
 
 ---
@@ -25,39 +39,33 @@ Step 3  /place     상품 합성            cv2.seamlessClone (픽셀 정확도 
 | 물체 감지 (텍스트 기반) | Grounding DINO `IDEA-Research/grounding-dino-tiny` |
 | 물체 세그멘테이션 | SAM-2 `facebook/sam2.1-hiera-large` |
 | 물체 제거 | LaMa `simple-lama-inpainting` |
-| 스타일 변환 | SD v1.5 img2img + LoRA (rank=8, alpha=32) |
-| 상품 합성 | OpenCV `cv2.seamlessClone` (GPU 불필요) |
+| 제품 배치 inpainting | SD Inpainting `runwayml/stable-diffusion-inpainting` |
 
 ---
 
 ## 실행
 
 ```bash
-docker compose up --build -d
-curl http://localhost:8000/health
-```
+# venv 활성화
+.\venv\Scripts\Activate.ps1   # Windows PowerShell
+# 또는
+.\venv\Scripts\activate.bat   # Windows CMD
 
-> 첫 실행 시 HuggingFace 모델 자동 다운로드 (10GB+, 수십 분 소요).
-> 이후 실행부터는 캐시(`huggingface_cache` 볼륨) 사용으로 빠름.
-
-**LoRA 모델 배치 필요** (git 미포함):
+# 서버 실행 (--reload: 코드 변경 시 자동 반영)
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-outputs/models/lora_final/   ← 이 경로에 수동 배치
-```
-없으면 LoRA 없이 실행됨 (에러 없음, 스타일 반영 약해짐).
 
 ---
 
 ## API
 
-모든 POST 요청은 비동기. `job_id`를 즉시 반환하고 `GET /jobs/{job_id}`로 결과를 폴링.
+모든 POST 요청은 비동기입니다. `job_id`를 즉시 반환하고 `GET /jobs/{job_id}`로 결과를 폴링합니다.
 
 ### `GET /health`
 서버 상태 확인.
 
 ### `GET /styles`
-사용 가능한 스타일 목록 반환.
-`white` `black` `modern` `gaming` `cozy` `nordic` `retro` `industrial`
+지원 스타일 목록: `white` `black` `modern` `gaming` `cozy` `nordic` `retro` `industrial`
 
 ### `GET /jobs/{job_id}`
 작업 상태 조회. `status`: `pending` → `running` → `done` / `failed`
@@ -66,11 +74,11 @@ outputs/models/lora_final/   ← 이 경로에 수동 배치
 
 ### `POST /remove` — Step 1: 물체 제거
 
-감지 방식은 요청 내용에 따라 자동 선택됨.
+감지 방식은 요청 내용에 따라 자동 선택됩니다.
 
 | 조건 | 사용 방식 |
 |---|---|
-| `prompt` 있음 | Grounding DINO → SAM-2 (텍스트로 지정한 물체만) |
+| `prompt` 있음 | Grounding DINO → SAM-2 (지정한 물체만) |
 | `top_view_image_base64` 있음 | 탑뷰 SAM-2 Auto |
 | 둘 다 없음 | SAM-2 Auto (전체 자동 감지) |
 
@@ -78,7 +86,7 @@ outputs/models/lora_final/   ← 이 경로에 수동 배치
 ```json
 {
   "image_base64": "...",
-  "prompt": "keyboard. mouse. pen holder.",
+  "prompt": "keyboard. mouse. monitor. headset.",
   "max_area_ratio": 0.20
 }
 ```
@@ -102,46 +110,24 @@ outputs/models/lora_final/   ← 이 경로에 수동 배치
 
 ---
 
-### `POST /img2img` — Step 2: 스타일 변환
+### `POST /product_place` — Step 2: 제품 배치
 
-**Request**
-```json
-{
-  "image_base64": "...",
-  "prompt": "clean minimal white desk setup, white peripherals, soft lighting",
-  "style": "white",
-  "strength": 0.7
-}
-```
-
-| 파라미터 | 기본값 | 설명 |
-|---|---|---|
-| `strength` | `0.7` | 0=원본 유지, 1=완전 재생성. 0.6~0.8 권장 |
-| `num_inference_steps` | `30` | |
-| `guidance_scale` | `7.5` | |
-
-**완료 후 (`GET /jobs/{job_id}`)**
-```json
-{
-  "status": "done",
-  "result_image": "..."
-}
-```
-
----
-
-### `POST /place` — Step 3: 상품 합성
+마스크 영역에 텍스트 프롬프트 기반으로 제품을 생성합니다. 제품 수만큼 반복 호출합니다.
 
 **Request**
 ```json
 {
   "image_base64": "...",
   "mask_base64": "...",
-  "product_image_base64": "..."
+  "prompt": "white mechanical keyboard on desk mat"
 }
 ```
 
-마스크 흰색 영역에 상품을 리사이즈 후 `cv2.seamlessClone`으로 합성. 상품 픽셀을 그대로 보존하면서 경계 조명/색상만 자연스럽게 보정. GPU 불필요.
+| 파라미터 | 기본값 | 설명 |
+|---|---|---|
+| `prompt` | 필수 | 제품 설명. 스타일 포함 권장 (예: `"white wireless mouse"`) |
+| `num_inference_steps` | `30` | |
+| `guidance_scale` | `12.0` | 높을수록 프롬프트 충실도 증가 |
 
 **완료 후 (`GET /jobs/{job_id}`)**
 ```json
@@ -153,16 +139,18 @@ outputs/models/lora_final/   ← 이 경로에 수동 배치
 
 ---
 
-### `POST /analyze` — 탑뷰 공간 분석
+### `POST /segment` — SAM-2 포인트 세그멘테이션
 
-탑뷰 이미지에서 책상 위 점유/가용 영역을 분석하고 상품 배치 추천 좌표를 반환.
+정규화 좌표(0~1)로 클릭 포인트를 지정하면 해당 물체의 마스크를 반환합니다.
+마우스패드를 클릭해 px/mm 스케일 계산에 사용합니다.
 
 **Request**
 ```json
 {
   "image_base64": "...",
-  "desk_width_cm": 120.0,
-  "desk_depth_cm": 60.0
+  "point_x": 0.30,
+  "point_y": 0.75,
+  "label": 1
 }
 ```
 
@@ -170,95 +158,97 @@ outputs/models/lora_final/   ← 이 경로에 수동 배치
 ```json
 {
   "status": "done",
-  "metrics": {
-    "desk_area_cm2": 7200.0,
-    "occupied_area_cm2": 2100.0,
-    "available_area_cm2": 5100.0,
-    "occupancy_ratio": 0.29,
-    "available_ratio": 0.71,
-    "connected_available_regions_cm2": [3200.0, 1400.0, 500.0]
-  },
-  "available_mask": "...",
-  "occupied_mask": "...",
-  "placement_center": [320, 210],
-  "num_objects": 5
+  "mask_base64": "...",
+  "overlay_base64": "..."
 }
 ```
+
+---
+
+### `POST /generate` — 전체 파이프라인 단일 호출 ⚠️ 임시 스펙
+
+> **Spring Boot 연동 형식이 아직 팀 내 합의되지 않았습니다.**
+> 아래 스펙은 파이프라인 테스트를 위해 임시로 정한 것으로, 실제 연동 시 변경될 수 있습니다.
+
+Step 1(물체 제거) → Step 2(제품 배치)를 한 번의 호출로 처리합니다.
+Spring Boot는 이 엔드포인트만 호출하면 됩니다.
+
+**Request**
+```json
+{
+  "image_base64": "...",
+  "style": "white",
+  "products": [
+    { "category": "KEYBOARD", "name": "로지텍 MX Keys Mini" },
+    { "category": "MOUSE",    "name": "로지텍 MX Master 3" },
+    { "category": "MONITOR",  "name": "LG 27인치 4K 모니터" }
+  ]
+}
+```
+
+| 파라미터 | 기본값 | 설명 |
+|---|---|---|
+| `style` | 필수 | 사용자 선택 스타일. `white` `black` `gaming` `cozy` `modern` `nordic` `retro` `industrial` |
+| `products` | 필수 | Spring Boot가 추천한 제품 목록. `category` + `name` |
+| `max_area_ratio` | `0.20` | 이 비율 초과 마스크는 책상/배경으로 간주해 제외 |
+
+**지원 카테고리 (`category` 값)**
+```
+KEYBOARD / MOUSE / MONITOR / SPEAKER / DESK_LAMP / DESK_SHELF / LAPTOP_STAND / DECO / CLOCK
+```
+
+**완료 후 (`GET /jobs/{job_id}`)**
+```json
+{
+  "status": "done",
+  "result_image": "..."
+}
+```
+
+> **미합의 사항 (팀 협의 필요)**
+> - `category` 값이 Spring Boot DB 카테고리명과 일치하는지 확인 필요
+> - `name`을 한국어로 받을지 영어로 받을지 결정 필요
 
 ---
 
 ## 호출 예시 (Python)
 
 ```python
-import requests, time
+import requests, time, base64
+from pathlib import Path
 
 BASE = "http://localhost:8000"
 
 def poll(job_id):
     while True:
         res = requests.get(f"{BASE}/jobs/{job_id}").json()
-        if res["status"] in ("done", "failed"):
+        if res["status"] == "done":
             return res
+        if res["status"] == "failed":
+            raise RuntimeError(res.get("error"))
         time.sleep(5)
 
-# Step 1
-r = requests.post(f"{BASE}/remove", json={"image_base64": desk_b64}).json()
-step1 = poll(r["job_id"])
-cleaned = step1["cleaned_image"]
+desk_b64 = base64.b64encode(Path("desk.jpg").read_bytes()).decode()
 
-# Step 2
-r = requests.post(f"{BASE}/img2img", json={
-    "image_base64": cleaned,
-    "prompt": "clean minimal white desk setup, white peripherals",
-    "style": "white",
+# Step 1: 물체 제거
+r = requests.post(f"{BASE}/remove", json={
+    "image_base64": desk_b64,
+    "prompt": "keyboard. mouse. monitor. headset.",
 }).json()
-step2 = poll(r["job_id"])
-styled = step2["result_image"]
+cleaned = poll(r["job_id"])["cleaned_image"]
+
+# Step 2: 제품 배치 (제품 수만큼 반복)
+current = cleaned
+for prompt, mask_b64 in products:  # Spring Boot에서 받은 제품 목록
+    r = requests.post(f"{BASE}/product_place", json={
+        "image_base64": current,
+        "mask_base64": mask_b64,
+        "prompt": prompt,
+    }).json()
+    current = poll(r["job_id"])["result_image"]
+
+# current = 최종 이미지 (base64)
 ```
-
----
-
-## main 브랜치 병합 가이드
-
-`jms` 브랜치의 모든 파일을 main에 합치지 않고 필요한 기능만 선택해서 가져올 수 있음.
-
-```bash
-git checkout main
-git checkout jms -- <파일경로>
-git commit -m "..."
-```
-
-### img2img + inpainting 기능만 가져갈 경우
-
-**반드시 필요한 파일**
-
-| 파일 | 이유 |
-|---|---|
-| `api/main.py` | FastAPI 앱 + `/img2img`, `/inpaint` 엔드포인트 |
-| `api/models.py` | 요청/응답 모델 (Img2ImgRequest, InpaintRequest 등) |
-| `api/img2img_processor.py` | SD v1.5 img2img + LoRA 처리 |
-| `api/inpaint_processor.py` | IP-Adapter-Plus 인페인팅 처리 |
-| `api/__init__.py` | 패키지 초기화 |
-| `configs/config.yaml` | 서버 설정 (트리거워드, 네거티브 프롬프트 등) |
-| `Dockerfile` | 컨테이너 빌드 |
-| `docker-compose.yml` | 컨테이너 실행 |
-| `requirements.txt` | 의존성 |
-
-**불필요한 파일 (img2img + inpaint만 쓸 경우 제외 가능)**
-
-| 파일 | 이유 |
-|---|---|
-| `api/object_removal_processor.py` | Step 1 물체 제거 전용 |
-| `api/dino_processor.py` | Grounding DINO 전용 |
-| `api/sam2_processor.py` | SAM-2 전용 |
-| `api/lama_processor.py` | LaMa 인페인팅 전용 |
-| `api/place_processor.py` | Step 3 상품 합성 전용 |
-| `api/space_processor.py` | 탑뷰 공간 분석 전용 |
-| `test_pipeline.py` | 테스트 스크립트 |
-| `data/` | 테스트 이미지 |
-
-> `api/main.py`와 `api/models.py`는 모든 엔드포인트 코드가 함께 있어서 파일 전체를 가져와야 함.
-> 불필요한 엔드포인트(`/remove`, `/place`, `/analyze`)는 가져온 후 직접 제거하거나 그대로 두어도 동작에는 영향 없음 (해당 프로세서 파일이 없으면 호출 시에만 오류).
 
 ---
 
@@ -268,23 +258,20 @@ git commit -m "..."
 ai-server/
 ├── api/
 │   ├── main.py                     # FastAPI 앱, 엔드포인트
-│   ├── models.py                   # Pydantic 모델
-│   ├── object_removal_processor.py # Step 1 오케스트레이터
-│   ├── dino_processor.py           # Grounding DINO 텍스트 기반 감지
+│   ├── models.py                   # Pydantic 요청/응답 모델
+│   ├── object_removal_processor.py # Step 1: DINO + SAM-2 + LaMa 오케스트레이터
+│   ├── dino_processor.py           # Grounding DINO 텍스트 기반 물체 검출
 │   ├── sam2_processor.py           # SAM-2 세그멘테이션
-│   ├── lama_processor.py           # LaMa 인페인팅
-│   ├── img2img_processor.py        # Step 2: SD img2img + LoRA
-│   ├── place_processor.py          # Step 3: cv2.seamlessClone
-│   ├── space_processor.py          # /analyze: 탑뷰 공간 분석
-│   └── inpaint_processor.py        # 레거시 (IP-Adapter-Plus)
+│   ├── lama_processor.py           # LaMa 물체 제거 inpainting
+│   └── product_inpaint_processor.py # Step 2: SD Inpainting 제품 배치
 ├── configs/
-│   └── config.yaml
+│   └── config.yaml                 # 서버 설정
 ├── data/
-│   └── test/                       # 테스트 이미지 (git 미포함, 직접 배치)
+│   └── test/                       # 테스트 데이터 (git 미포함, 직접 배치)
 ├── outputs/
-│   └── models/lora_final/          # LoRA 가중치 (git 미포함, 별도 배포)
-├── Dockerfile
-├── docker-compose.yml
+│   └── test_results/               # 파이프라인 테스트 결과
+├── logs/
+│   └── server_errors.log           # 서버 에러 로그
 ├── requirements.txt
 └── test_pipeline.py                # 전체 파이프라인 통합 테스트
 ```

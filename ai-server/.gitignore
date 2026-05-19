@@ -23,3 +23,13 @@ data/test/*.png
 
 # Claude Code 개인 설정
 CLAUDE.md
+
+# 데이터/이미지/로그
+*.csv
+*.png
+*.jpg
+*.jpeg
+logs/
+venv/
+3.8/
+outputs/test_*/

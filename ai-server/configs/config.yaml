@@ -3,6 +3,36 @@ project:
   base_model: 'runwayml/stable-diffusion-v1-5'
   trigger_word: 'JU_DeskStyle'
 
+style_lora:
+  trigger_word: 'JU_Style'
+  base_model: 'runwayml/stable-diffusion-v1-5'
+  train_styles: ['general', 'black', 'cozy', 'white', 'modern', 'gaming']
+
+  training:
+    output_dir: "outputs/models/style_lora"
+    num_train_epochs: 150
+    learning_rate: 1.0e-4
+    lr_scheduler: "cosine"
+    warmup_steps: 100
+    weight_decay: 0.01
+    lora_rank: 8
+    lora_alpha: 32
+    train_batch_size: 1
+    gradient_accumulation_steps: 4
+    mixed_precision: "fp16"
+    save_every_n_epochs: 25
+
+  preprocessing:
+    min_resolution: 512          # 단변 최소 해상도 (px)
+    max_aspect_ratio: 2.5        # 종횡비 상한 (가로:세로 또는 세로:가로)
+    blur_threshold: 100.0        # 라플라시안 분산값 하한 (이하 = 블러)
+    min_brightness: 40           # 평균 밝기 하한 (0~255)
+    max_brightness: 220          # 평균 밝기 상한 (0~255)
+    min_color_entropy: 6.0       # 색상 엔트로피 하한 (이하 = 단색/무채색)
+    phash_distance: 10           # pHash 해밍 거리 상한 (이하 = 중복)
+    clip_desk_threshold: 0.25    # CLIP 책상 스코어 최솟값
+    clip_non_desk_threshold: 0.40  # CLIP 비책상 스코어 상한 (초과 = 렌더링/아트)
+
 collection:
   settings:
     max_images_per_style: 300  # 스타일당 300장
