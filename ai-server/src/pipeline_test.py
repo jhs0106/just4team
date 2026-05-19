@@ -322,15 +322,25 @@ def build_auto_desk_mask(
     if occupied_mask is not None:
         occupied_mask_u8 = (occupied_mask > 0).astype(np.uint8) * 255
 
-        # desk bbox 내부의 객체만 사용한다.
+        # desk bbox 내부로 1차 제한
         desk_box_mask = make_box_mask(top_image.shape, best_desk.box_xyxy)
-        occupied_inside_desk_box = cv2.bitwise_and(occupied_mask_u8, desk_box_mask)
+
+        # 현재 SAM2 desk_mask 주변에 있는 객체만 책상 위 객체 seed로 사용한다.
+        # 너무 멀리 있는 배경/책장/병 객체가 desk surface seed로 들어가는 것을 방지한다.
+        desk_seed_area = cv2.dilate(
+            (desk_mask > 0).astype(np.uint8) * 255,
+            np.ones((35, 35), np.uint8),
+            iterations=1,
+        )
+
+        occupied_near_desk = cv2.bitwise_and(occupied_mask_u8, desk_box_mask)
+        occupied_near_desk = cv2.bitwise_and(occupied_near_desk, desk_seed_area)
 
         before_seed_merge = int(np.count_nonzero(desk_mask))
-        desk_mask = cv2.bitwise_or(desk_mask, occupied_inside_desk_box)
+        desk_mask = cv2.bitwise_or(desk_mask, occupied_near_desk)
         after_seed_merge = int(np.count_nonzero(desk_mask))
 
-        print(f"[DESK] occupied seed merge applied: {before_seed_merge} -> {after_seed_merge}")
+        print(f"[DESK] occupied near-desk seed merge applied: {before_seed_merge} -> {after_seed_merge}")
 
     before_fill = int(np.count_nonzero(desk_mask))
     desk_mask = fill_desk_surface_mask(desk_mask)
