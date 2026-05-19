@@ -69,6 +69,24 @@ def fill_desk_surface_mask(mask: np.ndarray) -> np.ndarray:
 
     return filled
 
+def make_box_mask(image_shape, box_xyxy) -> np.ndarray:
+    """
+    DINO가 검출한 bbox 영역을 mask로 만든다.
+    desk_mask가 convex hull 보정 후 과하게 확장되는 것을 막기 위해 사용한다.
+    """
+    h, w = image_shape[:2]
+    x1, y1, x2, y2 = map(int, box_xyxy)
+
+    x1 = max(0, min(x1, w - 1))
+    x2 = max(0, min(x2, w))
+    y1 = max(0, min(y1, h - 1))
+    y2 = max(0, min(y2, h))
+
+    box_mask = np.zeros((h, w), dtype=np.uint8)
+    box_mask[y1:y2, x1:x2] = 255
+
+    return box_mask
+
 def parse_roi(roi_text: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     """x1,y1,x2,y2 문자열을 tuple로 변환."""
     if not roi_text:
@@ -269,6 +287,16 @@ def build_auto_desk_mask(
     after_fill = int(np.count_nonzero(desk_mask))
 
     print(f"[DESK] fill_desk_surface_mask applied: {before_fill} -> {after_fill}")
+
+    # convex hull 보정 후 desk_mask가 책상 바깥으로 과하게 확장되는 것을 방지하기 위해
+    # DINO가 검출한 desk bbox 내부로 제한한다.
+    desk_box_mask = make_box_mask(top_image.shape, best_desk.box_xyxy)
+
+    before_box_clip = int(np.count_nonzero(desk_mask))
+    desk_mask = cv2.bitwise_and(desk_mask, desk_box_mask)
+    after_box_clip = int(np.count_nonzero(desk_mask))
+
+    print(f"[DESK] bbox clip applied: {before_box_clip} -> {after_box_clip}")
 
     save(out_dir / "desk_mask.png", desk_mask)
     save(out_dir / "desk_mask_overlay.png", overlay_mask(top_image, desk_mask, color=(0, 255, 255)))
@@ -651,22 +679,35 @@ def main():
     # 8. 요약 이미지 저장
     # 원본 / occupied / desk / available 순서
     # ------------------------------------------------------------
+
+    summary_top = cv2.imread(str(out_dir / "top_view_input_copy.png"))
+    summary_occ = cv2.imread(str(out_dir / "sam2_mask_overlay.png"))
+    summary_desk = cv2.imread(str(out_dir / "desk_mask_overlay.png"))
+    summary_avail = cv2.imread(str(out_dir / "available_space_overlay.png"))
+
+    summary_items = [
+        ("top_view_input_copy.png", summary_top),
+        ("sam2_mask_overlay.png", summary_occ),
+        ("desk_mask_overlay.png", summary_desk),
+        ("available_space_overlay.png", summary_avail),
+    ]
+
+    for name, img in summary_items:
+        if img is None:
+            raise FileNotFoundError(f"summary image를 읽을 수 없습니다: {out_dir / name}")
+
+        print(f"[SUMMARY] {name}: {img.shape}")
+
     summary_img = np.hstack(
         [
-            cv2.resize(top, (360, 240)),
-            cv2.resize(overlay_mask(top, top_result["processed_merged_mask"]), (360, 240)),
-            cv2.resize(overlay_mask(top, desk_mask, color=(0, 255, 255)), (360, 240)),
-            cv2.resize(available_overlay, (360, 240)),
+            cv2.resize(summary_top, (360, 240)),
+            cv2.resize(summary_occ, (360, 240)),
+            cv2.resize(summary_desk, (360, 240)),
+            cv2.resize(summary_avail, (360, 240)),
         ]
     )
 
     save(out_dir / "pipeline_summary.png", summary_img)
-    
-    print("\n[DONE] Pipeline finished.")
-    print(f"- outputs: {out_dir}")
-    print(f"- mode: {args.mode}")
-    print(f"- desk_mask_mode: {desk_mask_mode}")
-    print(f"- available regions: {len(space_summary['available_regions'])}")
 
 
 if __name__ == "__main__":
