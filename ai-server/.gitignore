@@ -1,35 +1,25 @@
-# Python
+# 가상환경
+venv/
+3.8/
+
+# Python 캐시
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
-# 모델 가중치 (별도 공유)
-outputs/models/**/*.safetensors
-outputs/models/**/*.pt
-outputs/models/**/*.pth
-outputs/models/**/*.ckpt
-outputs/models/**/*.bin
+# LoRA 학습 원본 데이터 (대용량)
+data/style_lora/raw/
+data/style_lora/processed/
 
-# 테스트 결과물
-outputs/test_results/
+# 테스트 결과 이미지 (생성물)
+outputs/test_*/
 
-# 개인 테스트 이미지
-data/test/*.jpg
-data/test/*.jpeg
-data/test/*.png
+# 로그
+logs/
 
-# 환경 변수
+# 환경변수
 .env
 
-# Claude Code 개인 설정
+# Claude 내부 파일
 CLAUDE.md
-
-# 데이터/이미지/로그
-*.csv
-*.png
-*.jpg
-*.jpeg
-logs/
-venv/
-3.8/
-outputs/test_*/

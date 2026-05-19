@@ -170,14 +170,19 @@ class ObjectRemovalProcessor:
                 "overlay": image_to_b64(image),
                 "num_objects": 0,
                 "individual_masks": [],
+                "detections": [],
             }
 
         predictor = get_sam2_processor().predictor
         predictor.set_image(img_array)
 
         individual_masks = []
+        used_detections = []  # 면적 필터 통과한 detection만 보존
         combined = np.zeros((h, w), dtype=bool)
         skipped = 0
+
+        # 축소 이미지 → 원본 크기 역스케일 비율
+        inv_scale = orig_w / image_resized.width
 
         with torch.inference_mode():
             for det in detections:
@@ -204,6 +209,17 @@ class ObjectRemovalProcessor:
                 mask_orig = mask_small.resize((orig_w, orig_h), Image.Resampling.NEAREST)
                 individual_masks.append(_dilate_mask(mask_orig, dilation_size))
 
+                # bbox를 원본 크기로 역변환해서 보존
+                from .dino_processor import Detection as DinoDetection
+                used_detections.append(DinoDetection(
+                    label=det.label,
+                    score=det.score,
+                    box_xyxy=(
+                        int(x1 * inv_scale), int(y1 * inv_scale),
+                        int(x2 * inv_scale), int(y2 * inv_scale),
+                    ),
+                ))
+
         print(f"[ObjectRemoval] 면적 필터({max_area_ratio*100:.0f}%) 후: {len(individual_masks)}개 사용, {skipped}개 제외")
 
         if not individual_masks:
@@ -213,6 +229,7 @@ class ObjectRemovalProcessor:
                 "overlay": image_to_b64(image),
                 "num_objects": 0,
                 "individual_masks": [],
+                "detections": [],
             }
 
         combined_img = Image.fromarray((combined * 255).astype(np.uint8), mode="L")
@@ -225,6 +242,7 @@ class ObjectRemovalProcessor:
             "overlay": image_to_b64(overlay),
             "num_objects": len(individual_masks),
             "individual_masks": individual_masks,
+            "detections": used_detections,
         }
 
     def detect_from_top_view(

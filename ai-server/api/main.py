@@ -35,6 +35,7 @@ from .models import (
 from .object_removal_processor import get_object_removal_processor
 from .lama_processor import get_lama_processor
 from .product_inpaint_processor import get_product_inpaint_processor
+from .controlnet_inpaint_processor import get_controlnet_inpaint_processor
 from .sam2_processor import get_sam2_processor
 
 
@@ -109,6 +110,81 @@ _CATEGORY_DIMS_MM = {
     "CLOCK":        (100, 100),
 }
 
+# 45도 앵글 뷰에서 제품의 높이/너비 비율
+# 수직 제품(모니터·스탠드·램프)은 크고, 수평 제품(키보드·마우스패드)은 작음
+_FRONT_HEIGHT_RATIO = {
+    "MONITOR":      0.70,
+    "KEYBOARD":     0.22,   # 45° 뷰에서 깊이 짧음
+    "MOUSE":        0.90,
+    "MOUSEPAD":     0.30,
+    "SPEAKER":      1.20,
+    "DESK_LAMP":    2.00,
+    "DESK_SHELF":   0.20,
+    "LAPTOP_STAND": 0.40,
+    "DECO":         0.90,
+    "CLOCK":        0.90,
+}
+
+# desk_width_mm 없을 때 책상 너비 대비 제품 너비 비율
+_DESK_W_RATIO = {
+    "KEYBOARD":     0.33,
+    "MOUSE":        0.07,
+    "MOUSEPAD":     0.55,
+    "MONITOR":      0.42,
+    "SPEAKER":      0.09,
+    "DESK_LAMP":    0.06,
+    "DESK_SHELF":   0.42,
+    "LAPTOP_STAND": 0.22,
+    "DECO":         0.07,
+    "CLOCK":        0.08,
+}
+
+# DINO가 반환하는 label 문자열 → 우리 카테고리 매핑
+_DINO_LABEL_TO_CATEGORY = {
+    "keyboard":     "KEYBOARD",
+    "mouse":        "MOUSE",
+    "mouse pad":    "MOUSEPAD",
+    "mousepad":     "MOUSEPAD",
+    "monitor":      "MONITOR",
+    "speaker":      "SPEAKER",
+    "desk lamp":    "DESK_LAMP",
+    "lamp":         "DESK_LAMP",
+    "headset":      "HEADSET",
+    "desk shelf":   "DESK_SHELF",
+    "monitor riser":"DESK_SHELF",
+    "laptop stand": "LAPTOP_STAND",
+    "clock":        "CLOCK",
+    "cup":          "DECO",
+    "mug":          "DECO",
+}
+
+
+def _match_products_to_detections(products, detections) -> list:
+    # 요청 제품과 DINO 감지 결과를 카테고리 기준으로 매칭 → [{"product", "region"}]
+    # 매칭된 detection은 재사용하지 않음 (1:1 매칭)
+    available = list(detections)
+    matched = []
+    unmatched = []
+
+    for p in products:
+        cat = p.category.upper()
+        found = None
+        for i, det in enumerate(available):
+            det_cat = _DINO_LABEL_TO_CATEGORY.get(det.label.lower(), "").upper()
+            if det_cat == cat:
+                found = i
+                break
+        if found is not None:
+            det = available.pop(found)
+            matched.append({"product": p, "region": det.box_xyxy})
+            print(f"[Match] {cat} → DINO '{det.label}' bbox={det.box_xyxy}")
+        else:
+            unmatched.append(p)
+            print(f"[Match] {cat} → 감지된 영역 없음, fallback 사용")
+
+    return matched, unmatched
+
+
 _CATEGORY_PROMPT = {
     "KEYBOARD":     "mechanical keyboard on desk mat, top view",
     "MOUSE":        "wireless mouse on desk, top view",
@@ -123,11 +199,46 @@ _CATEGORY_PROMPT = {
 
 
 def _make_rect_mask(img_w: int, img_h: int, x1: int, y1: int, x2: int, y2: int) -> Image.Image:
-    import numpy as np
     from PIL import ImageDraw
     mask = Image.new("L", (img_w, img_h), 0)
     ImageDraw.Draw(mask).rectangle([x1, y1, x2, y2], fill=255)
     return mask
+
+
+def _region_from_detection_center(
+    img_w: int, img_h: int,
+    det_box: tuple,
+    product,
+    desk_bbox: tuple | None,
+    desk_width_mm: int | None,
+) -> tuple:
+    # DINO bbox → 중심 위치만 참조, 크기는 제품 실제 치수(mm)로 재계산
+    x1, y1, x2, y2 = det_box
+    cx     = (x1 + x2) // 2
+    cy_bot = y2  # 하단 기준 정렬
+
+    cat  = product.category.upper()
+    w_mm = getattr(product, "width_mm", None) or _CATEGORY_DIMS_MM.get(cat, (200, 200))[0]
+
+    if desk_bbox and desk_width_mm:
+        DW        = desk_bbox[2] - desk_bbox[0]
+        px_per_mm = DW / desk_width_mm
+        pw = int(w_mm * px_per_mm)
+    else:
+        ref_w = _CATEGORY_DIMS_MM.get(cat, (200, 200))[0]
+        pw = int(max(x2 - x1, 1) * w_mm / ref_w)
+
+    # height: DINO 감지 높이의 3배 기준으로 잡되 최소 80px 보장
+    # (고정 비율보다 실제 이미지 스케일 기반이 더 안정적)
+    det_h = max(y2 - y1, 1)
+    ph    = max(det_h * 3, 80)
+    pw    = max(pw, 60)
+
+    new_x1 = max(0,     cx - pw // 2)
+    new_x2 = min(img_w, new_x1 + pw)
+    new_y2 = min(img_h, cy_bot)
+    new_y1 = max(0,     new_y2 - ph)
+    return new_x1, new_y1, new_x2, new_y2
 
 
 def _order_corners(pts: np.ndarray) -> np.ndarray:
@@ -228,8 +339,6 @@ def _calc_regions(
     desk_bbox: tuple | None = None,
     desk_width_mm: int | None = None,
 ) -> list:
-    # 실제 치수(mm) 기반 배치 계산: px_per_mm = DW / desk_width_mm → 제품 픽셀 크기
-    # desk_width_mm 없으면 카테고리 기본 비율로 fallback
     if desk_bbox:
         dx1, dy1, dx2, dy2 = desk_bbox
     else:
@@ -240,41 +349,30 @@ def _calc_regions(
     DH = dy2 - dy1
     cx = (dx1 + dx2) // 2
 
-    front_y = dy1 + int(DH * 0.72)
-    back_y  = dy1 + int(DH * 0.08)
+    # 전면(카메라 가까운 쪽): 책상 표면 78% 지점
+    front_y = dy1 + int(DH * 0.78)
+    # 후면(벽 쪽): 책상 상단 경계 — 후면 제품은 위쪽(벽)으로 솟아오름
+    back_top = dy1
 
     def clip(x1, y1, x2, y2):
-        return max(dx1, x1), max(dy1, y1), min(dx2 - 1, x2), min(dy2 - 1, y2)
+        return max(0, x1), max(0, y1), min(img_w - 1, x2), min(img_h - 1, y2)
 
     def perspective_scale(center_y: int) -> float:
         ratio = (center_y - dy1) / max(DH, 1)
         return 0.60 + 0.40 * ratio
 
     def product_pixel_size(p) -> tuple[int, int]:
-        # CSV metadata 치수 우선, 없으면 카테고리 기본값
-        cat = p.category.upper()
-        w_mm = getattr(p, "width_mm", None)
-        d_mm = getattr(p, "depth_mm", None)
-
-        if w_mm is None or d_mm is None:
-            dims = _CATEGORY_DIMS_MM.get(cat, (100, 100))
-            w_mm, d_mm = dims
+        cat     = p.category.upper()
+        w_mm    = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM.get(cat, (100, 100))[0]
+        h_ratio = _FRONT_HEIGHT_RATIO.get(cat, 0.80)
 
         if desk_width_mm and desk_width_mm > 0:
-            # 실제 치수 → 픽셀 변환
-            px_per_mm = DW / desk_width_mm
-            pw = int(w_mm * px_per_mm)
-            # 깊이 방향은 원근 보정: depth_mm / desk_depth 비율을 DH에 매핑
-            # desk depth는 통상 desk_width * 0.5 (1200x600mm 등)
-            desk_depth_mm = desk_width_mm * 0.5
-            ph = int(d_mm / desk_depth_mm * DH)
+            pw = int(w_mm * DW / desk_width_mm)
         else:
-            # fallback: 책상 픽셀 면적 대비 비율로 추정
-            ref_w = _CATEGORY_DIMS_MM.get(cat, (100, 100))[0]
-            ref_d = _CATEGORY_DIMS_MM.get(cat, (100, 100))[1]
-            pw = int(DW * w_mm / max(ref_w, 1) * 0.42)
-            ph = int(DH * d_mm / max(ref_d, 1) * 0.22)
+            # 책상 너비 대비 카테고리별 비율로 fallback
+            pw = int(DW * _DESK_W_RATIO.get(cat, 0.15))
 
+        ph = int(pw * h_ratio)
         return pw, ph
 
     regions = []
@@ -283,43 +381,48 @@ def _calc_regions(
         if cat not in _CATEGORY_DIMS_MM:
             continue
 
-        if cat in ("KEYBOARD", "MOUSE", "LAPTOP_STAND", "MOUSEPAD"):
-            center_y = front_y
-        else:
-            center_y = back_y + int(DH * 0.25)
-
-        ps = perspective_scale(center_y)
         base_pw, base_ph = product_pixel_size(p)
-        pw = int(base_pw * ps)
-        ph = int(base_ph * ps)
 
-        if cat == "KEYBOARD":
-            x1 = cx - pw // 2;              x2 = x1 + pw
-            y2 = front_y;                    y1 = y2 - ph
-        elif cat == "MOUSEPAD":
-            x1 = cx - pw // 2;              x2 = x1 + pw
-            y2 = front_y + int(DH * 0.05);  y1 = y2 - ph
-        elif cat == "MOUSE":
-            x1 = cx + int(DW * 0.22);       x2 = x1 + pw
-            y2 = front_y + int(DH * 0.03);  y1 = y2 - ph
-        elif cat == "MONITOR":
-            x1 = cx - pw // 2;              x2 = x1 + pw
-            y1 = back_y;                     y2 = y1 + ph
-        elif cat == "SPEAKER":
-            x2 = cx - int(DW * 0.28);       x1 = x2 - pw
-            y1 = back_y + int(DH * 0.05);   y2 = y1 + ph
-        elif cat == "DESK_LAMP":
-            x1 = cx + int(DW * 0.32);       x2 = x1 + pw
-            y1 = back_y;                     y2 = y1 + ph
-        elif cat == "DESK_SHELF":
-            x1 = cx - pw // 2;              x2 = x1 + pw
-            y1 = back_y + int(DH * 0.18);   y2 = y1 + ph
-        elif cat == "LAPTOP_STAND":
-            x2 = cx - int(DW * 0.14);       x1 = x2 - pw
-            y2 = front_y - int(DH * 0.05);  y1 = y2 - ph
+        if cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
+            # 전면 제품: 책상 앞쪽, 원근 적용
+            ps = perspective_scale(front_y)
+            pw = int(base_pw * ps)
+            ph = base_ph
+
+            if cat == "KEYBOARD":
+                x1 = cx - pw // 2;              x2 = x1 + pw
+                y2 = front_y;                    y1 = y2 - ph
+            elif cat == "MOUSEPAD":
+                x1 = cx - pw // 2;              x2 = x1 + pw
+                y2 = front_y + int(DH * 0.05);  y1 = y2 - ph
+            else:  # MOUSE
+                x1 = cx + int(DW * 0.22);       x2 = x1 + pw
+                y2 = front_y + int(DH * 0.03);  y1 = y2 - ph
         else:
-            x1 = cx + int(DW * 0.36);       x2 = x1 + pw
-            y1 = back_y + int(DH * 0.18);   y2 = y1 + ph
+            # 후면 제품: 책상 뒤쪽, 위로 솟아오름 (y1은 책상 위 벽 방향)
+            ps = perspective_scale(back_top + int(DH * 0.15))
+            pw = int(base_pw * ps)
+            ph = base_ph
+
+            if cat == "MONITOR":
+                # 스탠드는 책상 위에, 화면은 위로 솟아오름
+                x1 = cx - pw // 2;               x2 = x1 + pw
+                y2 = back_top + int(DH * 0.12);  y1 = max(0, y2 - ph)
+            elif cat == "SPEAKER":
+                x2 = cx - int(DW * 0.20);        x1 = x2 - pw
+                y2 = back_top + int(DH * 0.28);  y1 = max(0, y2 - ph)
+            elif cat == "DESK_LAMP":
+                x1 = cx + int(DW * 0.32);        x2 = x1 + pw
+                y2 = back_top + int(DH * 0.22);  y1 = max(0, y2 - ph)
+            elif cat == "DESK_SHELF":
+                x1 = cx - pw // 2;               x2 = x1 + pw
+                y2 = back_top + int(DH * 0.32);  y1 = max(0, y2 - ph)
+            elif cat == "LAPTOP_STAND":
+                x2 = cx - int(DW * 0.10);        x1 = x2 - pw
+                y2 = front_y - int(DH * 0.10);   y1 = y2 - ph
+            else:  # DECO, CLOCK
+                x1 = cx + int(DW * 0.36);        x2 = x1 + pw
+                y2 = back_top + int(DH * 0.30);  y1 = max(0, y2 - ph)
 
         x1, y1, x2, y2 = clip(x1, y1, x2, y2)
         if x2 > x1 and y2 > y1:
@@ -455,9 +558,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         # ── Step 1: 기존 물체 제거 ──────────────────────────────
         _REMOVAL_PROMPT = (
-            "monitor. keyboard. mouse. mouse pad. mousepad. headset. "
-            "cup. mug. book. notebook. speaker. desk lamp. lamp. cable. "
-            "pen. pencil. phone. tablet. controller. box. bottle."
+            "laptop. laptop computer. notebook computer. monitor. keyboard. mouse. "
+            "mouse pad. mousepad. headset. cup. mug. book. notebook. speaker. "
+            "desk lamp. lamp. cable. pen. pencil. phone. tablet. controller. box. bottle."
         )
         remover = get_object_removal_processor()
         detection = remover.detect_with_prompt(
@@ -478,110 +581,81 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         job_store[job_id].cleaned_image = image_to_b64(current)
 
-        # ── Step 2: 제품 합성 ─────────────────────────────────────────
-        inpainter = get_product_inpaint_processor()
-        inpainter.pipe.to("cuda")
+        # ── Step 2+3: ControlNet Depth/Canny + IP-Adapter-Plus로 제품 생성 ──
+        cn_proc = get_controlnet_inpaint_processor()
 
-        if req.top_view_image_base64:
-            # ── 탑뷰 Homography 기반 배치 ──────────────────────────────
-            top_img       = b64_to_image(req.top_view_image_base64)
-            top_corners   = _detect_desk_corners(top_img)
-            front_corners = _detect_desk_corners(current)
+        step1_detections = detection.get("detections", [])
+        matched, unmatched = _match_products_to_detections(req.products, step1_detections)
+        print(f"[Generate] 매칭: {len(matched)}개 감지위치, {len(unmatched)}개 fallback")
 
-            if top_corners is not None and front_corners is not None:
-                print(f"[Generate] 탑뷰 코너: {top_corners.tolist()}")
-                print(f"[Generate] 프론트뷰 코너: {front_corners.tolist()}")
+        num_placed = 0
 
-                H, _  = cv2.findHomography(top_corners, front_corners)
-                top_regions = _calc_top_view_regions(top_corners, req.products)
+        def _run_cn(p, x1, y1, x2, y2):
+            nonlocal current, num_placed
+            if p.image_id is None:
+                return
+            prod_path = PRODUCT_IMAGE_DIR / f"{p.image_id}.png"
+            if not prod_path.exists():
+                return
+            prod_img = Image.open(prod_path).convert("RGB")
+            mask = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
 
-                composite_items = []
-                for item in top_regions:
-                    p = item["product"]
-                    if p.image_id is None:
-                        continue
-                    path = PRODUCT_IMAGE_DIR / f"{p.image_id}.png"
-                    if not path.exists():
-                        continue
-                    top_c   = item["top_rect_corners"].reshape(1, -1, 2)
-                    front_c = cv2.perspectiveTransform(top_c, H).reshape(-1, 2)
-                    composite_items.append({
-                        "image_path":    str(path),
-                        "front_corners": front_c,
-                        "category":      p.category,
-                    })
-
-                composited = inpainter.composite_products_homography(current, composite_items)
-                print(f"[Generate] Homography 합성 완료 — 제품 {len(composite_items)}개")
+            # 전면 제품: 이미지 하단 절반을 context로 사용 → 제품 영역이 512에서 더 크게 표현됨
+            # 후면 제품: 전체 이미지 사용 → LoRA가 장면 전체 보고 스타일 적용
+            cat = p.category.upper()
+            if cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
+                context_region = (0, img_h // 2, img_w, img_h)
             else:
-                print("[Generate] 코너 감지 실패 → 비율 기반 배치 fallback")
-                regions = _calc_regions(img_w, img_h, req.products, None, req.desk_width_mm)
-                composite_items = []
-                for item in regions:
-                    p = item["product"]
-                    if p.image_id is not None:
-                        path = PRODUCT_IMAGE_DIR / f"{p.image_id}.png"
-                        if path.exists():
-                            composite_items.append({
-                                "image_path": str(path),
-                                "region":     item["region"],
-                                "category":   p.category,
-                            })
-                composited = inpainter.composite_products(current, composite_items)
-        else:
-            # ── bbox 기반 배치 fallback ────────────────────────────────
-            desk_bbox = _detect_desk_bbox(current)
-            if desk_bbox:
-                print(f"[Generate] 책상 감지 성공: {desk_bbox}")
-            else:
-                desk_bbox = None
-                print("[Generate] 책상 감지 실패 → fallback 사용")
+                context_region = None
 
-            regions = _calc_regions(img_w, img_h, req.products, desk_bbox, req.desk_width_mm)
-            composite_items = []
-            for item in regions:
-                p = item["product"]
-                if p.image_id is not None:
-                    path = PRODUCT_IMAGE_DIR / f"{p.image_id}.png"
-                    if path.exists():
-                        composite_items.append({
-                            "image_path": str(path),
-                            "region":     item["region"],
-                            "category":   p.category,
-                        })
-            composited = inpainter.composite_products(current, composite_items)
-
-        job_store[job_id].composited_image = image_to_b64(composited)
-
-        # ── Step 3: 제품 영역별 SD img2img + LoRA 자연화 ──────────────
-        # composite_items에서 영역 정보 추출 (region 또는 front_corners)
-        refine_regions = []
-        for item in composite_items:
-            cat = item.get("category", "")
-            if "region" in item:
-                refine_regions.append({"region": item["region"], "category": cat})
-            elif "front_corners" in item:
-                fc = np.array(item["front_corners"])
-                bbox = (
-                    int(fc[:, 0].min()), int(fc[:, 1].min()),
-                    int(fc[:, 0].max()), int(fc[:, 1].max()),
-                )
-                refine_regions.append({"region": bbox, "category": cat})
-
-        if refine_regions:
-            print(f"[Generate] Step 3 — 영역별 SD refinement {len(refine_regions)}개 시작")
-            current = inpainter.refine_per_region(
-                image=composited,
-                regions=refine_regions,
+            current = cn_proc.generate_product(
+                image=current,
+                mask=mask,
+                product_image=prod_img,
+                category=p.category,
                 style=req.style.value,
+                context_region=context_region,
             )
+            num_placed += 1
+
+        desk_bbox = _detect_desk_bbox(current)
+        if desk_bbox:
+            print(f"[Generate] 책상 감지 성공: {desk_bbox}")
         else:
-            current = composited
+            print("[Generate] 책상 감지 실패 → 이미지 비율 fallback")
 
-        inpainter.pipe.to("cpu")
-        torch.cuda.empty_cache()
+        # 전면/후면 카테고리 분류
+        _FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
+        _BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK"}
 
-        job_store[job_id].num_placed   = len(composite_items)
+        # 후면 제품: DINO 매칭 위치 사용 (있으면)
+        matched_back   = [i for i in matched   if i["product"].category.upper() in _BACK_CATS]
+        unmatched_back = [p for p in unmatched if p.category.upper()            in _BACK_CATS]
+
+        # 전면 제품: DINO 위치 무시 → 항상 _calc_regions() front_y 사용
+        matched_front_prods  = [i["product"] for i in matched   if i["product"].category.upper() in _FRONT_CATS]
+        unmatched_front_prods= [p            for p in unmatched if p.category.upper()            in _FRONT_CATS]
+        all_front_prods = matched_front_prods + unmatched_front_prods
+
+        # ── 후면 먼저 생성 ─────────────────────────────────────────
+        for item in matched_back:
+            p = item["product"]
+            region = _region_from_detection_center(
+                img_w, img_h, item["region"], p, desk_bbox, req.desk_width_mm,
+            )
+            print(f"  [Resize] {p.category} DINO={item['region']} → {region}")
+            _run_cn(p, *region)
+
+        if unmatched_back:
+            for item in _calc_regions(img_w, img_h, unmatched_back, desk_bbox, req.desk_width_mm):
+                _run_cn(item["product"], *item["region"])
+
+        # ── 전면 나중에 생성 (책상 앞줄 고정 위치) ────────────────
+        if all_front_prods:
+            for item in _calc_regions(img_w, img_h, all_front_prods, desk_bbox, req.desk_width_mm):
+                _run_cn(item["product"], *item["region"])
+
+        job_store[job_id].num_placed   = num_placed
         job_store[job_id].result_image = image_to_b64(current)
         job_store[job_id].status       = JobStatus.done
 

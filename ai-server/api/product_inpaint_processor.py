@@ -3,7 +3,8 @@ import numpy as np
 import cv2
 from pathlib import Path
 from PIL import Image
-from diffusers import StableDiffusionImg2ImgPipeline, DPMSolverMultistepScheduler
+from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionInpaintPipeline, DPMSolverMultistepScheduler
+from PIL import ImageOps
 import yaml
 
 
@@ -31,30 +32,59 @@ class ProductInpaintProcessor:
         print("[ProductInpaint] 로드 완료.")
 
     def _load_pipeline(self):
-        pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+        # img2img: 스타일 전체 보정용 (필요 시 사용)
+        img2img = StableDiffusionImg2ImgPipeline.from_pretrained(
             "runwayml/stable-diffusion-v1-5",
             torch_dtype=self.dtype,
         )
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
-            pipe.scheduler.config,
+        img2img.scheduler = DPMSolverMultistepScheduler.from_config(
+            img2img.scheduler.config,
             algorithm_type="dpmsolver++",
             use_karras_sigmas=True,
         )
-        pipe.safety_checker = None
-        pipe.vae.enable_slicing()
+        img2img.safety_checker = None
+        img2img.vae.enable_slicing()
+
+        # inpaint: 제품 경계 자연화 전용
+        inpaint = StableDiffusionInpaintPipeline.from_pretrained(
+            "runwayml/stable-diffusion-inpainting",
+            torch_dtype=self.dtype,
+        )
+        inpaint.scheduler = DPMSolverMultistepScheduler.from_config(
+            inpaint.scheduler.config,
+            algorithm_type="dpmsolver++",
+            use_karras_sigmas=True,
+        )
+        inpaint.safety_checker = None
+        inpaint.vae.enable_slicing()
+
+        # IP-Adapter-Plus: inpaint 파이프에만 로드 (generate_product에서 사용)
+        inpaint.load_ip_adapter(
+            "h94/IP-Adapter",
+            subfolder="models",
+            weight_name="ip-adapter-plus_sd15.bin",
+        )
+        inpaint.set_ip_adapter_scale(0.7)
 
         lora_path = (
             Path(__file__).parent.parent
             / "outputs" / "models" / "style_lora"
             / "style_lora_final" / "unet_lora"
         )
+        for p in (img2img, inpaint):
+            if lora_path.exists():
+                try:
+                    p.load_lora_weights(str(lora_path), weight_name="adapter_model.safetensors")
+                except Exception:
+                    pass  # inpaint 모델 아키텍처 불일치 시 스킵
+
         if lora_path.exists():
-            pipe.load_lora_weights(str(lora_path), weight_name="adapter_model.safetensors")
             print("[ProductInpaint] style LoRA 로드 완료.")
         else:
             print("[ProductInpaint] style LoRA 없음, 스킵.")
 
-        self.pipe = pipe.to(self.device)
+        self.pipe         = img2img.to(self.device)
+        self.inpaint_pipe = inpaint.to(self.device)
 
     def composite_products(self, image: Image.Image, products: list) -> Image.Image:
         # products: [{"image_path", "region": (x1,y1,x2,y2), "category"}]
@@ -247,8 +277,90 @@ class ProductInpaintProcessor:
         return result_resized
 
 
+    def generate_product(
+        self,
+        image: Image.Image,
+        mask: Image.Image,
+        category: str,
+        style: str,
+        product_image: Image.Image | None = None,
+        ip_adapter_scale: float = 0.7,
+        num_inference_steps: int = 30,
+        guidance_scale: float = 7.5,
+        lora_scale: float = 0.65,
+        context_pad: int = 80,
+    ) -> Image.Image:
+        # LaMa가 지운 영역(mask)에 SD Inpainting으로 제품 직접 생성
+        # image: LaMa-cleaned PIL RGB, mask: PIL L (흰색=생성할 영역)
+        _CAT_PROMPT = {
+            "KEYBOARD":     "mechanical keyboard on desk mat, natural lighting, sharp",
+            "MOUSE":        "wireless mouse on desk, natural lighting, sharp",
+            "MOUSEPAD":     "mouse pad on desk surface, natural lighting",
+            "MONITOR":      "monitor on desk, natural lighting, sharp screen",
+            "SPEAKER":      "desktop speaker on desk, natural lighting",
+            "DESK_LAMP":    "desk lamp on desk, warm lighting",
+            "DESK_SHELF":   "monitor riser shelf on desk, natural lighting",
+            "LAPTOP_STAND": "laptop stand on desk, natural lighting",
+            "DECO":         "desk decoration, natural lighting",
+            "CLOCK":        "desk clock, natural lighting",
+        }
+
+        iw, ih = image.size
+        mask_arr = np.array(mask.convert("L"))
+        ys, xs = np.where(mask_arr > 127)
+        if len(xs) == 0:
+            return image
+
+        # 마스크 bbox + 주변 맥락 패딩
+        x1, y1 = int(xs.min()), int(ys.min())
+        x2, y2 = int(xs.max()), int(ys.max())
+        px1 = max(0, x1 - context_pad);  py1 = max(0, y1 - context_pad)
+        px2 = min(iw, x2 + context_pad); py2 = min(ih, y2 + context_pad)
+
+        crop_img  = image.crop((px1, py1, px2, py2))
+        crop_mask = mask.crop((px1, py1, px2, py2))
+        cw, ch    = crop_img.size
+
+        crop_512 = crop_img.resize((512, 512), Image.Resampling.LANCZOS).convert("RGB")
+        mask_512 = crop_mask.resize((512, 512), Image.Resampling.NEAREST).convert("L")
+
+        cat      = category.upper()
+        cat_desc = _CAT_PROMPT.get(cat, "product on desk, natural lighting")
+        prompt   = f"JU_Style, {style} style desk setup, {cat_desc}, photorealistic"
+
+        self.inpaint_pipe.to(self.device)
+        if product_image is not None:
+            self.inpaint_pipe.set_ip_adapter_scale(ip_adapter_scale)
+            prod_512 = product_image.resize((512, 512), Image.Resampling.LANCZOS).convert("RGB")
+        else:
+            self.inpaint_pipe.set_ip_adapter_scale(0.0)
+            prod_512 = None
+
+        pipe_kwargs = dict(
+            prompt=prompt,
+            negative_prompt=self.negative_prompt,
+            image=crop_512,
+            mask_image=mask_512,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            cross_attention_kwargs={"scale": lora_scale},
+        )
+        if prod_512 is not None:
+            pipe_kwargs["ip_adapter_image"] = prod_512
+
+        result = self.inpaint_pipe(**pipe_kwargs).images[0]
+        self.inpaint_pipe.to("cpu")
+        torch.cuda.empty_cache()
+
+        output = image.copy()
+        output.paste(result.resize((cw, ch), Image.Resampling.LANCZOS), (px1, py1))
+        print(f"  [SD Inpaint] {cat} 생성 완료 ({cw}×{ch}px)")
+        return output
+
+
 def _remove_white_bg(img: Image.Image, threshold: int = 240) -> Image.Image:
-    # RGB 세 채널 모두 threshold 이상이면 투명 처리
+    # EXIF 회전 적용 후 흰 배경 투명 처리
+    img = ImageOps.exif_transpose(img)
     data = np.array(img.convert("RGBA"))
     r, g, b = data[:, :, 0], data[:, :, 1], data[:, :, 2]
     data[(r >= threshold) & (g >= threshold) & (b >= threshold), 3] = 0
