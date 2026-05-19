@@ -240,7 +240,6 @@ def run_dino_sam2_for_view(
         "processed_merged_mask": processed_merged_mask,
     }
 
-
 def build_auto_desk_mask(
     top_image: np.ndarray,
     desk_prompt: str,
@@ -249,6 +248,7 @@ def build_auto_desk_mask(
     sam2_config: str,
     box_threshold: float,
     text_threshold: float,
+    occupied_mask: Optional[np.ndarray] = None,
 ):
     """
     DINO + SAM2로 책상 상판 desk_mask를 자동 생성한다.
@@ -307,13 +307,23 @@ def build_auto_desk_mask(
         print("[WARN] SAM2 책상 mask 생성 실패")
         return None, desk_detections, "auto_sam2_failed"
 
-    # 잡음 제거: 가장 큰 연결 영역만 책상으로 사용
-    # 잡음 제거: 가장 큰 연결 영역만 책상으로 사용
     desk_mask = keep_largest_component(desk_mask)
 
-    # desk_mask 보정:
-    # SAM2가 물체가 올라간 부분을 책상 상판에서 제외하는 경우가 있어,
-    # 책상 상판 외곽 기준으로 내부를 채워 전체 책상 상판 영역에 가깝게 보정한다.
+    # 책/노트북/마우스 등 책상 위 객체가 SAM2 desk_mask에서 제외될 수 있으므로,
+    # desk_mask 복원 단계에서는 occupied_mask도 책상 상판 seed로 함께 사용한다.
+    if occupied_mask is not None:
+        occupied_mask_u8 = (occupied_mask > 0).astype(np.uint8) * 255
+
+        # desk bbox 내부의 객체만 사용한다.
+        desk_box_mask = make_box_mask(top_image.shape, best_desk.box_xyxy)
+        occupied_inside_desk_box = cv2.bitwise_and(occupied_mask_u8, desk_box_mask)
+
+        before_seed_merge = int(np.count_nonzero(desk_mask))
+        desk_mask = cv2.bitwise_or(desk_mask, occupied_inside_desk_box)
+        after_seed_merge = int(np.count_nonzero(desk_mask))
+
+        print(f"[DESK] occupied seed merge applied: {before_seed_merge} -> {after_seed_merge}")
+
     before_fill = int(np.count_nonzero(desk_mask))
     desk_mask = fill_desk_surface_mask(desk_mask)
     after_fill = int(np.count_nonzero(desk_mask))
@@ -329,7 +339,7 @@ def build_auto_desk_mask(
     after_box_clip = int(np.count_nonzero(desk_mask))
 
     print(f"[DESK] bbox clip applied: {before_box_clip} -> {after_box_clip}")
-    
+
     # DINO bbox가 책상 상판뿐 아니라 책상 전면부/아래쪽까지 포함하는 경우,
     # mask가 bbox 하단까지 과하게 확장되었을 때만 조건부로 하단을 제한한다.
     before_bottom_clip = int(np.count_nonzero(desk_mask))
