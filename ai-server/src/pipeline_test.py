@@ -110,6 +110,14 @@ def clip_overextended_bottom(mask: np.ndarray, box_xyxy, max_bottom_ratio: float
         clipped = mask.copy()
         clipped[surface_y2:, :] = 0
 
+        # 하단 과확장 제거 후 남은 상판 외곽 기준으로 다시 내부를 채움
+        clipped = fill_desk_surface_mask(clipped)
+
+        # fill 과정에서 bbox 밖 또는 하단 컷 아래로 다시 퍼지는 것을 방지
+        box_mask = make_box_mask(mask.shape, box_xyxy)
+        clipped = cv2.bitwise_and(clipped, box_mask)
+        clipped[surface_y2:, :] = 0
+
         print(
             f"[DESK] auto bottom clip applied: "
             f"bottom_ratio={bottom_ratio:.3f}, y<{surface_y2}"
@@ -568,6 +576,7 @@ def main():
             sam2_config=args.sam2_config,
             box_threshold=args.desk_box_threshold,
             text_threshold=args.desk_text_threshold,
+            occupied_mask=top_result["processed_merged_mask"],
         )
 
     if desk_mask is None and desk_roi is not None:
