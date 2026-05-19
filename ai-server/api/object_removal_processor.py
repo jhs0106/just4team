@@ -316,6 +316,68 @@ class ObjectRemovalProcessor:
         }
 
 
+    def detect_desk_mask(
+        self,
+        image: Image.Image,
+        desk_prompt: str = "desk surface. tabletop. desk top. table surface. desk. table.",
+        max_size: int = 512,
+        box_threshold: float = 0.20,
+    ):
+        """DINO+SAM2로 책상 영역 mask 생성 (numpy uint8). 실패 시 None."""
+        from .dino_processor import run_grounding_dino
+        from .sam2_processor import get_sam2_processor
+
+        orig_w, orig_h = image.size
+        scale = min(max_size / orig_w, max_size / orig_h, 1.0)
+        img_resized = image.resize((int(orig_w * scale), int(orig_h * scale)), Image.Resampling.LANCZOS)
+
+        img_array = np.array(img_resized.convert("RGB"))
+        img_bgr   = img_array[:, :, ::-1].copy()
+
+        desk_dets = run_grounding_dino(
+            img_bgr, desk_prompt,
+            box_threshold=box_threshold,
+            text_threshold=0.15,
+            max_area_ratio=0.98,
+            mode="desk",
+        )
+        if not desk_dets:
+            print("[ObjectRemoval] 책상 mask 자동 생성 실패 → None")
+            return None
+
+        best = desk_dets[0]  # 이미 면적 내림차순 정렬됨
+        predictor = get_sam2_processor().predictor
+        predictor.set_image(img_array)
+
+        with torch.inference_mode():
+            box_np = np.array(best.box_xyxy, dtype=np.float32)
+            masks, scores, _ = predictor.predict(
+                point_coords=None, point_labels=None,
+                box=box_np, multimask_output=True,
+            )
+
+        if masks is None or len(masks) == 0:
+            return None
+
+        best_mask = masks[int(np.argmax(scores))].astype(np.uint8) * 255
+
+        # 닫기 연산 + 가장 큰 connected component만 유지
+        k = np.ones((21, 21), np.uint8)
+        best_mask = cv2.morphologyEx(best_mask, cv2.MORPH_CLOSE, k)
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(best_mask, connectivity=8)
+        if num_labels > 1:
+            largest = max(range(1, num_labels), key=lambda i: stats[i, cv2.CC_STAT_AREA])
+            clean = np.zeros_like(best_mask)
+            clean[labels == largest] = 255
+            best_mask = clean
+
+        # 원본 크기로 복원
+        mask_pil = Image.fromarray(best_mask).resize((orig_w, orig_h), Image.Resampling.NEAREST)
+        print(f"[ObjectRemoval] 책상 mask 생성 완료 (bbox={best.box_xyxy})")
+        return np.array(mask_pil)
+
+
 def _make_overlay(image: Image.Image, mask: Image.Image) -> Image.Image:
     overlay = image.copy().convert("RGBA")
     mask_arr = np.array(mask)

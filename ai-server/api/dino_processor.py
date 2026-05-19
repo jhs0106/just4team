@@ -95,6 +95,30 @@ def _filter_detections(
     return result
 
 
+_DESK_VALID = {"desk", "table", "tabletop", "desk surface", "table surface", "desk top"}
+
+
+def _filter_desk_detections(
+    detections: List[Detection],
+    image_shape,
+    max_area_ratio: float = 0.98,
+    min_area_ratio: float = 0.05,
+) -> List[Detection]:
+    # 책상/테이블 label만 통과. 크기 범위 필터. 가장 큰 것 우선 정렬.
+    h, w = image_shape[:2]
+    image_area = h * w
+    result = []
+    for det in detections:
+        label = _normalize_label(det.label)
+        if not any(k in label for k in _DESK_VALID):
+            continue
+        area_ratio = _box_area(det.box_xyxy) / max(1, image_area)
+        if not (min_area_ratio <= area_ratio <= max_area_ratio):
+            continue
+        result.append(det)
+    return sorted(result, key=lambda d: _box_area(d.box_xyxy), reverse=True)
+
+
 # ── Post-process (transformers 버전 대응) ────────────────────────────────────
 
 def _post_process(processor, outputs, input_ids, image_size_hw, box_threshold, text_threshold):
@@ -174,6 +198,7 @@ def run_grounding_dino(
     text_threshold: float = 0.20,
     max_area_ratio: float = 0.60,
     nms_iou_threshold: float = 0.50,
+    mode: str = "object",  # "object" | "desk"
 ) -> List[Detection]:
     # DINO 텍스트 프롬프트 물체 검출 → NMS → 면적 필터. 실패 시 OpenCV fallback
     if not prompt.strip():
@@ -220,10 +245,13 @@ def run_grounding_dino(
                 continue
             raw.append(Detection(_normalize_label(label), float(score), (x1, y1, x2, y2)))
 
-        # NMS → 필터
-        deduped  = _nms(raw, iou_threshold=nms_iou_threshold)
-        filtered = _filter_detections(deduped, image_bgr.shape, max_area_ratio)
-        print(f"[DINO] raw={len(raw)} → NMS={len(deduped)} → filter={len(filtered)}")
+        # NMS → mode별 필터
+        deduped = _nms(raw, iou_threshold=nms_iou_threshold)
+        if mode == "desk":
+            filtered = _filter_desk_detections(deduped, image_bgr.shape)
+        else:
+            filtered = _filter_detections(deduped, image_bgr.shape, max_area_ratio)
+        print(f"[DINO:{mode}] raw={len(raw)} → NMS={len(deduped)} → filter={len(filtered)}")
         return filtered
 
     except Exception as e:

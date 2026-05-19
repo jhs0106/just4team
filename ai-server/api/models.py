@@ -15,6 +15,13 @@ class StyleName(str, Enum):
     general = "general"
 
 
+class RemoveMode(str, Enum):
+    add        = "add"        # 기존 물체 유지, 제품 추가
+    own_desk   = "own_desk"   # 기존 물체 모두 제거 후 추가 (기본)
+    replace    = "replace"    # 선택 물체만 제거 후 교체
+    empty_desk = "empty_desk" # 전체 제거 후 빈 책상에 배치
+
+
 class JobStatus(str, Enum):
     pending = "pending"
     running = "running"
@@ -88,8 +95,10 @@ class GenerateRequest(BaseModel):
     style:                 StyleName         = Field(..., description="사용자 선택 스타일")
     products:              List[ProductItem] = Field(..., description="배치할 제품 목록")
     desk_width_mm:         Optional[int]     = Field(None, description="책상 실제 가로 치수 (mm) — 제품 픽셀 크기 계산 기준")
+    desk_depth_mm:         Optional[int]     = Field(None, description="책상 실제 세로 치수 (mm) — top-view 공간 분석 기준")
     max_area_ratio:        float             = Field(0.20, ge=0.05, le=0.60, description="이 비율 초과 마스크는 배경으로 간주해 제외")
-    top_view_image_base64: Optional[str]     = Field(None, description="탑뷰 이미지 (base64) — 제공 시 Homography 기반 배치")
+    top_view_image_base64: Optional[str]     = Field(None, description="탑뷰 이미지 (base64) — 제공 시 공간 분석 기반 배치")
+    mode:                  RemoveMode        = Field(RemoveMode.own_desk, description="물체 제거 정책")
 
 
 class GenerateResult(BaseModel):

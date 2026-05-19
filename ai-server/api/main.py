@@ -1,3 +1,5 @@
+import ast
+import csv
 import uuid
 import asyncio
 import base64
@@ -26,12 +28,17 @@ logging.basicConfig(
 log = logging.getLogger("ai-server")
 
 from .models import (
-    StyleName, JobStatus,
+    StyleName, RemoveMode, JobStatus,
     ObjectRemovalRequest, ObjectRemovalResult,
     ProductPlaceRequest, ProductPlaceResult,
     SegmentRequest, SegmentResult,
     GenerateRequest, GenerateResult,
 )
+from .space_analysis import (
+    analyze_space,
+    make_full_desk_mask, keep_largest_component,
+)
+from .mask_utils import postprocess_occupied_mask
 from .object_removal_processor import get_object_removal_processor
 from .lama_processor import get_lama_processor
 from .product_inpaint_processor import get_product_inpaint_processor
@@ -95,6 +102,54 @@ async def get_job(job_id: str):
 
 
 PRODUCT_IMAGE_DIR = Path("data/test/processed_images")
+_CATALOG_CSV      = Path("data/test/products.csv")
+
+# ── products.csv 임시 DB ─────────────────────────────────────────────────────
+
+_product_catalog: dict = {}
+
+
+def load_product_catalog() -> dict:
+    global _product_catalog
+    if _product_catalog:
+        return _product_catalog
+    try:
+        with open(_CATALOG_CSV, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                try:
+                    image_id = int(row["id"])
+                    meta     = ast.literal_eval(row.get("metadata", "{}"))
+                    _product_catalog[image_id] = {
+                        "category": row.get("category", ""),
+                        "title":    row.get("title", ""),
+                        "width_mm": int(meta.get("width_mm", 0)) or None,
+                        "depth_mm": int(meta.get("depth_mm", 0)) or None,
+                    }
+                except Exception:
+                    continue
+        print(f"[Catalog] {len(_product_catalog)}개 제품 로드")
+    except FileNotFoundError:
+        print(f"[Catalog] {_CATALOG_CSV} 없음 — fallback 치수 사용")
+    return _product_catalog
+
+
+def enrich_products_from_csv(products: list) -> list:
+    """req.products에 width_mm/depth_mm가 없으면 products.csv 값으로 보완."""
+    catalog = load_product_catalog()
+    enriched = []
+    for p in products:
+        if p.image_id is not None and p.image_id in catalog:
+            meta    = catalog[p.image_id]
+            updates = {}
+            if p.width_mm is None and meta["width_mm"]:
+                updates["width_mm"] = meta["width_mm"]
+            if p.depth_mm is None and meta["depth_mm"]:
+                updates["depth_mm"] = meta["depth_mm"]
+            if updates:
+                p = p.model_copy(update=updates)
+        enriched.append(p)
+    return enriched
+
 
 # 카테고리별 기본 치수 (mm) — products.csv metadata 없을 때 fallback
 _CATEGORY_DIMS_MM = {
@@ -113,8 +168,8 @@ _CATEGORY_DIMS_MM = {
 # 45도 앵글 뷰에서 제품의 높이/너비 비율
 # 수직 제품(모니터·스탠드·램프)은 크고, 수평 제품(키보드·마우스패드)은 작음
 _FRONT_HEIGHT_RATIO = {
-    "MONITOR":      0.70,
-    "KEYBOARD":     0.22,   # 45° 뷰에서 깊이 짧음
+    "MONITOR":      0.50,   # 가로 이미지→512 압축 보정: pw 기준 비율
+    "KEYBOARD":     0.22,
     "MOUSE":        0.90,
     "MOUSEPAD":     0.30,
     "SPEAKER":      1.20,
@@ -130,10 +185,10 @@ _DESK_W_RATIO = {
     "KEYBOARD":     0.33,
     "MOUSE":        0.07,
     "MOUSEPAD":     0.55,
-    "MONITOR":      0.42,
+    "MONITOR":      0.55,   # 넓게 잡아야 512×512 압축 후에도 가로 모니터로 보임
     "SPEAKER":      0.09,
     "DESK_LAMP":    0.06,
-    "DESK_SHELF":   0.42,
+    "DESK_SHELF":   0.45,
     "LAPTOP_STAND": 0.22,
     "DECO":         0.07,
     "CLOCK":        0.08,
@@ -185,18 +240,6 @@ def _match_products_to_detections(products, detections) -> list:
     return matched, unmatched
 
 
-_CATEGORY_PROMPT = {
-    "KEYBOARD":     "mechanical keyboard on desk mat, top view",
-    "MOUSE":        "wireless mouse on desk, top view",
-    "MONITOR":      "monitor on desk, front view",
-    "SPEAKER":      "desktop speaker on desk",
-    "DESK_LAMP":    "modern desk lamp on desk",
-    "DESK_SHELF":   "monitor riser shelf on desk",
-    "LAPTOP_STAND": "laptop stand on desk",
-    "DECO":         "small desk decoration",
-    "CLOCK":        "minimalist desk clock",
-}
-
 
 def _make_rect_mask(img_w: int, img_h: int, x1: int, y1: int, x2: int, y2: int) -> Image.Image:
     from PIL import ImageDraw
@@ -241,74 +284,134 @@ def _region_from_detection_center(
     return new_x1, new_y1, new_x2, new_y2
 
 
-def _order_corners(pts: np.ndarray) -> np.ndarray:
-    # 4개 코너를 TL → TR → BR → BL 순으로 정렬
-    rect = np.zeros((4, 2), dtype=np.float32)
-    s    = pts.sum(axis=1)
-    diff = np.diff(pts, axis=1).flatten()
-    rect[0] = pts[np.argmin(s)]     # TL: x+y 최소
-    rect[2] = pts[np.argmax(s)]     # BR: x+y 최대
-    rect[1] = pts[np.argmin(diff)]  # TR: y-x 최소
-    rect[3] = pts[np.argmax(diff)]  # BL: y-x 최대
-    return rect
 
+def calc_placements_from_available_space(
+    front_image: Image.Image,
+    top_view_image: Image.Image,
+    products: list,
+    desk_width_mm: int | None,
+    desk_depth_mm: int | None,
+    remover=None,
+) -> list[dict]:
+    """
+    top-view available space 분석 → front-view 배치 좌표 리스트.
+    실패/가용 영역 없으면 빈 리스트 → _calc_regions() fallback.
+    반환: [{"product": p, "region": (x1, y1, x2, y2)}, ...]
+    """
+    if remover is None:
+        remover = get_object_removal_processor()
 
-def _detect_desk_corners(image: Image.Image) -> np.ndarray | None:
-    # DINO bbox → 4코너(TL,TR,BR,BL) 반환. bbox 코너를 그대로 사용 (프로토타입)
-    bbox = _detect_desk_bbox(image)
-    if bbox is None:
-        return None
-    x1, y1, x2, y2 = bbox
-    pts = np.array([[x1,y1],[x2,y1],[x2,y2],[x1,y2]], dtype=np.float32)
-    return _order_corners(pts)
+    tv_w, tv_h = top_view_image.size
+    fv_w, fv_h = front_image.size
 
+    # 1. top-view occupied_mask
+    top_det    = remover.detect_with_prompt(
+        image=top_view_image, prompt=_REMOVAL_PROMPT, max_area_ratio=0.40,
+    )
+    occupied_np = _build_occupied_mask_from_detection(top_det, tv_w, tv_h)
+    occupied_np = postprocess_occupied_mask(occupied_np)
 
-def _calc_top_view_regions(top_corners: np.ndarray, products) -> list:
-    # 탑뷰 코너 기준 카테고리별 배치 사각형 계산 → [{"product", "top_rect_corners": (4×2)}]
-    import cv2
-    tl, tr, br, bl = top_corners
+    # 2. desk_mask (DINO+SAM2, 실패 시 full image)
+    desk_mask_np = remover.detect_desk_mask(top_view_image)
+    if desk_mask_np is None:
+        print("[AvailSpace] desk_mask 실패 → full image")
+        desk_mask_np = make_full_desk_mask((tv_h, tv_w))
+    else:
+        desk_mask_np = keep_largest_component(desk_mask_np)
 
-    desk_w = float(np.linalg.norm(tr - tl) + np.linalg.norm(br - bl)) / 2
-    desk_h = float(np.linalg.norm(bl - tl) + np.linalg.norm(br - tr)) / 2
+    # 3. available space 분석
+    desk_width_cm = (desk_width_mm / 10) if desk_width_mm else 120.0
+    desk_depth_cm = (desk_depth_mm / 10) if desk_depth_mm else desk_width_cm * 0.55
 
-    # 카테고리별 배치 (cx_비율, cy_비율, w_비율, h_비율) — 탑뷰 기준
-    _TOP_POS = {
-        "MONITOR":      (0.50, 0.12, 0.48, 0.14),
-        "KEYBOARD":     (0.38, 0.52, 0.38, 0.14),
-        "MOUSE":        (0.66, 0.53, 0.08, 0.11),
-        "SPEAKER":      (0.15, 0.18, 0.10, 0.15),
-        "DESK_LAMP":    (0.82, 0.12, 0.07, 0.18),
-        "DESK_SHELF":   (0.50, 0.28, 0.50, 0.10),
-        "LAPTOP_STAND": (0.35, 0.38, 0.22, 0.16),
-        "DECO":         (0.18, 0.50, 0.07, 0.09),
-        "CLOCK":        (0.85, 0.48, 0.08, 0.10),
-    }
+    space_info        = analyze_space(
+        occupied_mask=occupied_np,
+        desk_width_cm=desk_width_cm,
+        desk_depth_cm=desk_depth_cm,
+        desk_mask=desk_mask_np,
+        remove_mask=occupied_np,
+    )
+    available_regions = space_info.get("available_regions", [])
+    cm_per_px         = space_info.get("cm_per_px", {"x": 0.1, "y": 0.1})
+    mm_per_px_x       = cm_per_px["x"] * 10
+    mm_per_px_y       = cm_per_px["y"] * 10
 
-    def _interp(r_x, r_y):
-        # 탑뷰 정규화 좌표(0~1) → 실제 픽셀 (4코너 보간)
-        top  = tl + r_x * (tr - tl)
-        bot  = bl + r_x * (br - bl)
-        return top + r_y * (bot - top)
+    if not available_regions:
+        print("[AvailSpace] 가용 영역 없음 → fallback")
+        return []
 
-    regions = []
+    # 4. top-view desk bbox (정규화 기준)
+    ys, xs = np.where(desk_mask_np > 0)
+    if len(xs) == 0:
+        return []
+    tv_dx1, tv_dy1 = int(xs.min()), int(ys.min())
+    tv_dx2, tv_dy2 = int(xs.max()), int(ys.max())
+    tv_dw = max(1, tv_dx2 - tv_dx1)
+    tv_dh = max(1, tv_dy2 - tv_dy1)
+
+    # 5. front-view desk bbox
+    fv_bbox = _detect_desk_bbox(front_image)
+    if fv_bbox:
+        fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox
+    else:
+        fv_dx1, fv_dy1 = 0, int(fv_h * 0.45)
+        fv_dx2, fv_dy2 = fv_w, fv_h
+    fv_dw = max(1, fv_dx2 - fv_dx1)
+    fv_dh = max(1, fv_dy2 - fv_dy1)
+
+    placements = []
+    used_ids   = set()
+
     for p in products:
-        cat = p.category.upper()
-        pos = _TOP_POS.get(cat)
-        if pos is None:
+        cat   = p.category.upper()
+        if cat not in _CATEGORY_DIMS_MM:
             continue
-        cx_r, cy_r, w_r, h_r = pos
-        hw = w_r / 2
-        hh = h_r / 2
-        # 4코너를 정규화 좌표로 정의
-        corners = np.array([
-            _interp(cx_r - hw, cy_r - hh),
-            _interp(cx_r + hw, cy_r - hh),
-            _interp(cx_r + hw, cy_r + hh),
-            _interp(cx_r - hw, cy_r + hh),
-        ], dtype=np.float32)
-        regions.append({"product": p, "top_rect_corners": corners})
 
-    return regions
+        w_mm  = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
+        d_mm  = getattr(p, "depth_mm", None) or _CATEGORY_DIMS_MM[cat][1]
+        pw_px = w_mm / mm_per_px_x if mm_per_px_x > 0 else 50
+        pd_px = d_mm / mm_per_px_y if mm_per_px_y > 0 else 50
+
+        # 크기 맞는 region 우선, 없으면 가장 큰 미사용 region
+        target = next(
+            (r for r in available_regions
+             if r["region_id"] not in used_ids
+             and r["bbox_px"]["width"]  >= pw_px * 0.7
+             and r["bbox_px"]["height"] >= pd_px * 0.7),
+            None,
+        )
+        if target is None:
+            target = next(
+                (r for r in available_regions if r["region_id"] not in used_ids),
+                None,
+            )
+        if target is None:
+            continue
+
+        used_ids.add(target["region_id"])
+
+        # top-view 중심 → 0~1 정규화
+        tv_cx = target["center_px"]["x"]
+        tv_cy = target["center_px"]["y"]
+        rx    = max(0.0, min(1.0, (tv_cx - tv_dx1) / tv_dw))
+        ry    = max(0.0, min(1.0, (tv_cy - tv_dy1) / tv_dh))
+
+        # front-view 좌표 (원근 스케일 포함)
+        ps       = 0.60 + 0.40 * ry
+        fv_pw    = max(40, int(w_mm * fv_dw / (desk_width_mm or 1200) * ps))
+        fv_ph    = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
+        fv_cx    = fv_dx1 + rx * fv_dw
+        fv_cy    = fv_dy1 + ry * fv_dh
+        x1 = max(0,    int(fv_cx - fv_pw // 2))
+        x2 = min(fv_w, x1 + fv_pw)
+        y2 = min(fv_h, int(fv_cy))
+        y1 = max(0,    y2 - fv_ph)
+
+        if x2 > x1 and y2 > y1:
+            placements.append({"product": p, "region": (x1, y1, x2, y2)})
+            print(f"  [AvailSpace] {cat} tv({tv_cx:.0f},{tv_cy:.0f}) "
+                  f"rx={rx:.2f} ry={ry:.2f} → fv({x1},{y1},{x2},{y2})")
+
+    return placements
 
 
 def _detect_desk_bbox(image: Image.Image) -> tuple | None:
@@ -381,13 +484,13 @@ def _calc_regions(
         if cat not in _CATEGORY_DIMS_MM:
             continue
 
-        base_pw, base_ph = product_pixel_size(p)
+        base_pw, _ = product_pixel_size(p)
 
         if cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
             # 전면 제품: 책상 앞쪽, 원근 적용
             ps = perspective_scale(front_y)
             pw = int(base_pw * ps)
-            ph = base_ph
+            ph = int(pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80))  # pw 기준 비율
 
             if cat == "KEYBOARD":
                 x1 = cx - pw // 2;              x2 = x1 + pw
@@ -402,7 +505,7 @@ def _calc_regions(
             # 후면 제품: 책상 뒤쪽, 위로 솟아오름 (y1은 책상 위 벽 방향)
             ps = perspective_scale(back_top + int(DH * 0.15))
             pw = int(base_pw * ps)
-            ph = base_ph
+            ph = int(pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80))  # pw 기준 비율
 
             if cat == "MONITOR":
                 # 스탠드는 책상 위에, 화면은 위로 솟아오름
@@ -550,30 +653,58 @@ async def run_generate(req: GenerateRequest):
     return job_store[job_id]
 
 
+_REMOVAL_PROMPT = (
+    "laptop. laptop computer. notebook computer. monitor. keyboard. mouse. "
+    "mouse pad. mousepad. headset. cup. mug. book. notebook. speaker. "
+    "desk lamp. lamp. cable. pen. pencil. phone. tablet. controller. box. bottle."
+)
+
+_FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
+_BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK"}
+
+
+def _build_occupied_mask_from_detection(detection: dict, img_w: int, img_h: int) -> np.ndarray:
+    """detect_with_prompt 결과 → numpy occupied_mask (uint8)."""
+    occupied = np.zeros((img_h, img_w), dtype=np.uint8)
+    for mask_pil in detection.get("individual_masks", []):
+        arr = np.array(mask_pil.convert("L"))
+        occupied = cv2.bitwise_or(occupied, (arr > 127).astype(np.uint8) * 255)
+    return occupied
+
+
 def _run_generate(job_id: str, req: GenerateRequest):
     job_store[job_id].status = JobStatus.running
     try:
         image = b64_to_image(req.image_base64)
         img_w, img_h = image.size
+        mode = req.mode  # RemoveMode enum
 
-        # ── Step 1: 기존 물체 제거 ──────────────────────────────
-        _REMOVAL_PROMPT = (
-            "laptop. laptop computer. notebook computer. monitor. keyboard. mouse. "
-            "mouse pad. mousepad. headset. cup. mug. book. notebook. speaker. "
-            "desk lamp. lamp. cable. pen. pencil. phone. tablet. controller. box. bottle."
-        )
         remover = get_object_removal_processor()
+
+        # ── Step 1: front-view 물체 감지 ───────────────────────────
         detection = remover.detect_with_prompt(
             image=image,
             prompt=_REMOVAL_PROMPT,
             max_area_ratio=0.40,
         )
+        front_instances   = detection.get("individual_masks", [])
+        front_detections  = detection.get("detections", [])
         job_store[job_id].num_removed = detection["num_objects"]
 
-        if detection["num_objects"] > 0:
+        # ── mode별 LaMa 제거 정책 ───────────────────────────────────
+        # add: 제거 안 함
+        # own_desk: 감지된 물체 모두 제거 (기본)
+        # replace: 지정 물체만 제거 (현재는 own_desk와 동일, 추후 UI에서 indices 전달)
+        # empty_desk: 모두 제거 (own_desk와 동일)
+        if mode == RemoveMode.add:
+            masks_to_remove = []
+        else:
+            masks_to_remove = front_instances
+
+        if masks_to_remove:
             lama = get_lama_processor()
             current = image
-            for mask_pil in detection["individual_masks"]:
+            for mask_pil in masks_to_remove:
                 current = lama.inpaint(image=current, mask=mask_pil)
             torch.cuda.empty_cache()
         else:
@@ -581,79 +712,162 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         job_store[job_id].cleaned_image = image_to_b64(current)
 
-        # ── Step 2+3: ControlNet Depth/Canny + IP-Adapter-Plus로 제품 생성 ──
+        # ── Step 2: top-view 공간 분석 (제공된 경우) ───────────────
+        desk_mask_np: np.ndarray | None = None
+        space_info: dict | None = None
+
+        if req.top_view_image_base64:
+            top_image = b64_to_image(req.top_view_image_base64)
+            tv_w, tv_h = top_image.size
+
+            # top-view 물체 감지 → occupied_mask
+            top_detection = remover.detect_with_prompt(
+                image=top_image,
+                prompt=_REMOVAL_PROMPT,
+                max_area_ratio=0.40,
+            )
+            occupied_np = _build_occupied_mask_from_detection(top_detection, tv_w, tv_h)
+            occupied_np = postprocess_occupied_mask(occupied_np)
+
+            # mode별 remove_mask (top-view 기준)
+            if mode == RemoveMode.empty_desk:
+                top_remove_mask = occupied_np
+            elif mode == RemoveMode.add:
+                top_remove_mask = None
+            else:
+                top_remove_mask = occupied_np  # own_desk/replace: 전체 제거
+
+            # desk_mask 자동 생성
+            desk_mask_np = remover.detect_desk_mask(top_image)
+            if desk_mask_np is None:
+                print("[Generate] desk_mask 자동 생성 실패 → full image fallback")
+                desk_mask_np = make_full_desk_mask((tv_h, tv_w))
+            else:
+                desk_mask_np = keep_largest_component(desk_mask_np)
+
+            # 가용 공간 분석
+            desk_width_cm = (req.desk_width_mm / 10) if req.desk_width_mm else 120.0
+            desk_depth_cm = 60.0
+            space_info = analyze_space(
+                occupied_mask=occupied_np,
+                desk_width_cm=desk_width_cm,
+                desk_depth_cm=desk_depth_cm,
+                desk_mask=desk_mask_np,
+                remove_mask=top_remove_mask,
+            )
+            n_regions = len(space_info.get("available_regions", []))
+            print(f"[Generate] 공간 분석 완료: 가용 영역 {n_regions}개, "
+                  f"가용 면적 {space_info['available_area_cm2']:.0f}cm²")
+
+        # ── Step 3: ControlNet 제품 생성 ───────────────────────────
         cn_proc = get_controlnet_inpaint_processor()
 
-        step1_detections = detection.get("detections", [])
-        matched, unmatched = _match_products_to_detections(req.products, step1_detections)
-        print(f"[Generate] 매칭: {len(matched)}개 감지위치, {len(unmatched)}개 fallback")
+        # products.csv로 width_mm/depth_mm 보완
+        products = enrich_products_from_csv(req.products)
 
         num_placed = 0
 
         def _run_cn(p, x1, y1, x2, y2):
             nonlocal current, num_placed
             if p.image_id is None:
+                print(f"  [_run_cn SKIP] {p.category}: image_id=None")
+                log.error("_run_cn SKIP %s: image_id=None", p.category)
                 return
             prod_path = PRODUCT_IMAGE_DIR / f"{p.image_id}.png"
             if not prod_path.exists():
+                print(f"  [_run_cn SKIP] {p.category}: 파일 없음 → {prod_path.resolve()}")
+                log.error("_run_cn SKIP %s: 파일 없음 %s", p.category, prod_path.resolve())
                 return
-            prod_img = Image.open(prod_path).convert("RGB")
-            mask = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
+            try:
+                prod_img       = Image.open(prod_path).convert("RGB")
+                mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
+                cat            = p.category.upper()
+                context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
+                print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ctx={context_region is not None}")
+                current = cn_proc.generate_product(
+                    image=current, mask=mask, product_image=prod_img,
+                    category=p.category, style=req.style.value,
+                    context_region=context_region,
+                    ip_adapter_scale=0.8,
+                )
+                num_placed += 1
+                print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
+            except Exception as _e:
+                print(f"  [_run_cn ERROR] {p.category}: {_e}")
+                log.error("_run_cn ERROR %s: %s\n%s", p.category, _e, traceback.format_exc())
 
-            # 전면 제품: 이미지 하단 절반을 context로 사용 → 제품 영역이 512에서 더 크게 표현됨
-            # 후면 제품: 전체 이미지 사용 → LoRA가 장면 전체 보고 스타일 적용
-            cat = p.category.upper()
-            if cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
-                context_region = (0, img_h // 2, img_w, img_h)
+        # ── 배치 위치 결정: top-view available space 우선, 없으면 _calc_regions ──
+        placement_items: list[dict] = []
+
+        if req.top_view_image_base64:
+            top_image_for_place = b64_to_image(req.top_view_image_base64)
+            placement_items = calc_placements_from_available_space(
+                front_image=current,
+                top_view_image=top_image_for_place,
+                products=products,
+                desk_width_mm=req.desk_width_mm,
+                desk_depth_mm=req.desk_depth_mm,
+                remover=remover,
+            )
+            if placement_items:
+                print(f"[Generate] available_space 배치: {len(placement_items)}개")
+
+        if not placement_items:
+            # fallback: 기존 _calc_regions + DINO 매칭
+            desk_bbox = _detect_desk_bbox(current)
+            if desk_bbox:
+                print(f"[Generate] fallback desk_bbox: {desk_bbox}")
             else:
-                context_region = None
+                print("[Generate] desk 감지 실패 → 이미지 비율 fallback")
 
-            current = cn_proc.generate_product(
-                image=current,
-                mask=mask,
-                product_image=prod_img,
-                category=p.category,
-                style=req.style.value,
-                context_region=context_region,
-            )
-            num_placed += 1
+            print(f"[Generate] fallback 시작: products={len(products)}개")
+            for _p in products:
+                print(f"  product: {_p.category} id={_p.image_id}")
+            matched, unmatched = _match_products_to_detections(products, front_detections)
+            print(f"[Generate] fallback 매칭: matched={len(matched)}개, unmatched={len(unmatched)}개")
 
-        desk_bbox = _detect_desk_bbox(current)
-        if desk_bbox:
-            print(f"[Generate] 책상 감지 성공: {desk_bbox}")
-        else:
-            print("[Generate] 책상 감지 실패 → 이미지 비율 fallback")
+            matched_back          = [i for i in matched   if i["product"].category.upper() in _BACK_CATS]
+            unmatched_back        = [p for p in unmatched if p.category.upper()            in _BACK_CATS]
+            matched_front_prods   = [i["product"] for i in matched   if i["product"].category.upper() in _FRONT_CATS]
+            unmatched_front_prods = [p            for p in unmatched if p.category.upper()            in _FRONT_CATS]
+            all_front_prods       = matched_front_prods + unmatched_front_prods
 
-        # 전면/후면 카테고리 분류
-        _FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
-        _BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK"}
+            # 후면: DINO 위치 기반
+            for item in matched_back:
+                p = item["product"]
+                region = _region_from_detection_center(
+                    img_w, img_h, item["region"], p, desk_bbox, req.desk_width_mm,
+                )
+                placement_items.append({"product": p, "region": region})
 
-        # 후면 제품: DINO 매칭 위치 사용 (있으면)
-        matched_back   = [i for i in matched   if i["product"].category.upper() in _BACK_CATS]
-        unmatched_back = [p for p in unmatched if p.category.upper()            in _BACK_CATS]
-
-        # 전면 제품: DINO 위치 무시 → 항상 _calc_regions() front_y 사용
-        matched_front_prods  = [i["product"] for i in matched   if i["product"].category.upper() in _FRONT_CATS]
-        unmatched_front_prods= [p            for p in unmatched if p.category.upper()            in _FRONT_CATS]
-        all_front_prods = matched_front_prods + unmatched_front_prods
-
-        # ── 후면 먼저 생성 ─────────────────────────────────────────
-        for item in matched_back:
-            p = item["product"]
-            region = _region_from_detection_center(
-                img_w, img_h, item["region"], p, desk_bbox, req.desk_width_mm,
-            )
-            print(f"  [Resize] {p.category} DINO={item['region']} → {region}")
-            _run_cn(p, *region)
-
-        if unmatched_back:
+            # 후면 fallback
             for item in _calc_regions(img_w, img_h, unmatched_back, desk_bbox, req.desk_width_mm):
-                _run_cn(item["product"], *item["region"])
+                placement_items.append(item)
 
-        # ── 전면 나중에 생성 (책상 앞줄 고정 위치) ────────────────
-        if all_front_prods:
+            # 전면
             for item in _calc_regions(img_w, img_h, all_front_prods, desk_bbox, req.desk_width_mm):
-                _run_cn(item["product"], *item["region"])
+                placement_items.append(item)
+
+        # ── 생성 실행 ─────────────────────────────────────────────────
+        print(f"[Generate] placement_items={len(placement_items)}개")
+
+        # 배치 위치 시각화 저장 (디버그용)
+        if placement_items:
+            from PIL import ImageDraw as _ID
+            _dbg = current.copy()
+            _draw = _ID.Draw(_dbg)
+            for _item in placement_items:
+                _x1, _y1, _x2, _y2 = _item["region"]
+                _draw.rectangle([_x1, _y1, _x2, _y2], outline=(255, 0, 0), width=4)
+                _draw.text((_x1 + 4, _y1 + 4), _item["product"].category, fill=(255, 0, 0))
+            Path("outputs/debug").mkdir(parents=True, exist_ok=True)
+            _dbg.save("outputs/debug/placement_debug.png")
+            print("[Generate] 배치 시각화 저장: outputs/debug/placement_debug.png")
+
+        for item in placement_items:
+            p = item["product"]
+            print(f"  [Generate] 처리: {p.category} image_id={p.image_id} region={item['region']}")
+            _run_cn(p, *item["region"])
 
         job_store[job_id].num_placed   = num_placed
         job_store[job_id].result_image = image_to_b64(current)
