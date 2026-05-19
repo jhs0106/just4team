@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 from typing import Optional, Tuple
 
-import os
 import cv2
 import numpy as np
 
@@ -45,29 +44,6 @@ def save(path: Path, image: np.ndarray):
     cv2.imwrite(str(path), image)
     print(f"[SAVE] {path}")
 
-def fill_desk_surface_mask(mask: np.ndarray) -> np.ndarray:
-    """
-    SAM2가 책상 위 객체가 올라간 부분을 desk_mask에서 제외하는 경우가 있어,
-    책상 상판 외곽선을 기준으로 내부를 채워 desk_mask를 보정한다.
-    """
-    mask_u8 = (mask > 0).astype(np.uint8) * 255
-
-    contours, _ = cv2.findContours(
-        mask_u8,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE,
-    )
-
-    if not contours:
-        return mask_u8
-
-    largest_contour = max(contours, key=cv2.contourArea)
-
-    filled = np.zeros_like(mask_u8)
-    hull = cv2.convexHull(largest_contour)
-    cv2.fillConvexPoly(filled, hull, 255)
-
-    return filled
 
 def parse_roi(roi_text: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     """x1,y1,x2,y2 문자열을 tuple로 변환."""
@@ -258,17 +234,7 @@ def build_auto_desk_mask(
         return None, desk_detections, "auto_sam2_failed"
 
     # 잡음 제거: 가장 큰 연결 영역만 책상으로 사용
-    # 잡음 제거: 가장 큰 연결 영역만 책상으로 사용
     desk_mask = keep_largest_component(desk_mask)
-
-    # desk_mask 보정:
-    # SAM2가 물체가 올라간 부분을 책상 상판에서 제외하는 경우가 있어,
-    # 책상 상판 외곽 기준으로 내부를 채워 전체 책상 상판 영역에 가깝게 보정한다.
-    before_fill = int(np.count_nonzero(desk_mask))
-    desk_mask = fill_desk_surface_mask(desk_mask)
-    after_fill = int(np.count_nonzero(desk_mask))
-
-    print(f"[DESK] fill_desk_surface_mask applied: {before_fill} -> {after_fill}")
 
     save(out_dir / "desk_mask.png", desk_mask)
     save(out_dir / "desk_mask_overlay.png", overlay_mask(top_image, desk_mask, color=(0, 255, 255)))
@@ -661,7 +627,7 @@ def main():
     )
 
     save(out_dir / "pipeline_summary.png", summary_img)
-    
+
     print("\n[DONE] Pipeline finished.")
     print(f"- outputs: {out_dir}")
     print(f"- mode: {args.mode}")
