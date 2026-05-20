@@ -1417,6 +1417,17 @@ def _run_generate(job_id: str, req: GenerateRequest):
         # top-view 공간 분석은 calc_placements_from_available_space() 내부에서 수행
         cn_proc = get_controlnet_inpaint_processor()
 
+        import json as _jmeta
+        _lora_ext_dir = Path(__file__).parent.parent / "outputs" / "models" / "lora_external"
+        (_debug_dir / "generation_meta.json").write_text(
+            _jmeta.dumps({
+                "has_lora":            cn_proc._has_lora,
+                "lora_path_exists":    _lora_ext_dir.exists(),
+                "generation_mode":     getattr(req, "generation_mode", "controlnet"),
+                "fixed_test_products": req.fixed_test_products,
+            }, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
         # products.csv로 width_mm/depth_mm 보완 + category 정규화
         products = enrich_products_from_csv(req.products)
 
@@ -1548,7 +1559,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 }
                 _record(_route, "done", ar=_ar, ar_valid=_ar_valid)
                 _mon_variants = req.fixed_test_products and cat == "MONITOR"
-                _pre_generate = current.copy() if _mon_variants else None
+                _pre_generate = current.copy() if req.fixed_test_products else None
                 _vprefix = "MONITOR_A_current" if _mon_variants else None
                 current = cn_proc.generate_product(
                     image=current, mask=mask, product_image=prod_alpha,
@@ -1601,6 +1612,26 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         print("  [MONITOR variant C] 저장 완료")
                     except Exception as _ve:
                         print(f"  [MONITOR variant C ERROR] {_ve}")
+                # LoRA scale sweep: MONITOR 제외, fixed_test 조건에서만
+                if req.fixed_test_products and cat != "MONITOR" and _pre_generate is not None:
+                    _pdir = _debug_dir / "products"
+                    current.save(_pdir / f"{cat}_lora_0.65.png")
+                    for _ls_name, _ls_val in [("no_lora", 0.0), ("lora_0.35", 0.35), ("lora_0.9", 0.9)]:
+                        try:
+                            _ls_r = cn_proc.generate_product(
+                                image=_pre_generate, mask=mask, product_image=prod_alpha,
+                                category=p.category, style=req.style.value,
+                                context_region=context_region, ip_adapter_scale=ip_scale,
+                                debug_dir=_pdir, debug_meta=_debug_meta,
+                                variant_prefix=f"{cat}_{_ls_name}",
+                                lora_scale_override=_ls_val,
+                            )
+                            _add_contact_shadow(_ls_r, (x1, y1, x2, y2), cat, prod_alpha=prod_alpha).save(
+                                _pdir / f"{cat}_{_ls_name}.png"
+                            )
+                            print(f"  [lora sweep] {cat} {_ls_name} 저장 완료")
+                        except Exception as _lse:
+                            print(f"  [lora sweep ERROR] {cat} {_ls_name}: {_lse}")
             except Exception as _e:
                 msg = f"{p.category}: ControlNet generation failed: {_e}"
                 run_errors.append(msg)

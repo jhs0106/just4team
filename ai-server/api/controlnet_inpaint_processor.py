@@ -232,6 +232,7 @@ class ControlNetInpaintProcessor:
         debug_meta: dict | None = None,
         variant_prefix: str | None = None,
         cn_scales_override: list | None = None,
+        lora_scale_override: float | None = None,
     ) -> Image.Image:
         iw, ih = image.size
         cat = category.upper()
@@ -281,6 +282,14 @@ class ControlNetInpaintProcessor:
         if cat == "KEYBOARD" and _fpw < bw * 0.80:
             _fpw = max(8, int(bw * 0.90))
             print(f"  [KEYBOARD stretch] width → {_fpw} (bbox_w={bw:.0f}, fill={_fpw/max(bw,1):.2f})")
+
+        # MONITOR 최소 fill 0.80: 가로가 너무 좁으면 aspect ratio 유지하며 확장
+        if cat == "MONITOR" and _fpw < bw * 0.80:
+            _mon_w = max(8, int(bw * 0.85))
+            _mon_h = int(prod_rgba.height * _mon_w / max(prod_rgba.width, 1))
+            if _mon_h <= bh:
+                _fpw, _fph = _mon_w, _mon_h
+                print(f"  [MONITOR min fill] width → {_fpw} (fill={_fpw/max(bw,1):.2f})")
 
         _prod_fit = prod_rgba.resize((_fpw, _fph), Image.Resampling.LANCZOS)
 
@@ -345,8 +354,9 @@ class ControlNetInpaintProcessor:
         else:
             cn_scales = [0.10, 0.22]
 
+        _effective_lora_scale = lora_scale if lora_scale_override is None else lora_scale_override
         cat_desc = _CAT_PROMPT.get(cat, "product on desk, natural lighting")
-        lora_token = "JU_Style, " if self._has_lora else ""
+        lora_token = "JU_Style, " if (self._has_lora and _effective_lora_scale > 0) else ""
         prompt   = (
             f"{lora_token}{cat_desc}, {style} color scheme, "
             "placed on desk surface, drop shadow, realistic product photo, "
@@ -372,12 +382,33 @@ class ControlNetInpaintProcessor:
             width=sd_w,
             height=sd_h,
         )
-        if self._has_lora:
-            pipe_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
+        if self._has_lora and _effective_lora_scale > 0:
+            pipe_kwargs["cross_attention_kwargs"] = {"scale": _effective_lora_scale}
 
         # Pass 1: single-pass (pass2는 hallucination 유발 — 비활성화)
         result_sd_pass1 = self.pipe(**pipe_kwargs).images[0]
         result_sd = result_sd_pass1
+
+        # Inner detail preservation: 제품 중심부는 composite(원본 디테일) 70%, 경계/배경은 SD 결과
+        if _has_alpha and _pc2x > _pc1x and _pc2y > _pc1y:
+            _min_dim = max(1, min(_fpw, _fph))
+            _ek_size = max(3, min(9, _min_dim // 7))
+            if _ek_size % 2 == 0:
+                _ek_size += 1
+            _ia = np.array(_prod_fit.getchannel("A")).astype(np.float32) / 255.0
+            _sil_w = np.zeros((sd_h, sd_w), dtype=np.float32)
+            _sil_w[_pc1y:_pc2y, _pc1x:_pc2x] = _ia[_src1y:_src2y, _src1x:_src2x]
+            _ek = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ek_size, _ek_size))
+            _inner = cv2.erode((_sil_w * 255).astype(np.uint8), _ek).astype(np.float32) / 255.0
+            _blur_k = max(3, _ek_size * 2 + 1)
+            if _blur_k % 2 == 0:
+                _blur_k += 1
+            _blend_w = cv2.GaussianBlur(_inner, (_blur_k, _blur_k), 0) * 0.70
+            _ca = np.array(composite_sd).astype(np.float32)
+            _ra = np.array(result_sd).astype(np.float32)
+            result_sd = Image.fromarray(
+                np.clip(_ca * _blend_w[:, :, np.newaxis] + _ra * (1 - _blend_w[:, :, np.newaxis]), 0, 255).astype(np.uint8)
+            )
 
         # refine mask: pass2 비활성화 상태에서도 debug/paste용으로 silhouette 확장만
         _refine_mask_arr = np.array(mask_sd)
@@ -437,6 +468,13 @@ class ControlNetInpaintProcessor:
                     "mask_type":                    mask_type,
                     "final_paste_mask_type":        "silhouette_blur_r3",
                     "pass2_enabled":                False,
+                    "has_lora":                     self._has_lora,
+                    "lora_scale_applied":           _effective_lora_scale if self._has_lora else None,
+                    "prompt_has_lora_token":        bool(lora_token),
+                    "ip_adapter_scale":             ip_adapter_scale,
+                    "cn_scales":                    cn_scales,
+                    "prompt":                       prompt,
+                    "negative_prompt":              negative_prompt,
                 }
                 (_ddir / f"{_prefix}_debug.json").write_text(
                     json.dumps(_dbg_json, indent=2, ensure_ascii=False), encoding="utf-8"
