@@ -1412,22 +1412,23 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"  [WARNING] {cat} id={p.image_id}: alpha_coverage={_alpha_cov:.2f}"
                           f" — multi-object/lifestyle 이미지 의심, 단품 이미지로 교체 필요")
 
-                # aspect ratio validation: 잘못된 제품 이미지 조기 차단
+                # aspect ratio validation: 범위 밖이면 warning + CV fallback (skip 아님)
                 _ar = prod_alpha.width / max(prod_alpha.height, 1)
                 _ar_range = _CAT_ASPECT_VALID.get(cat)
+                _ar_invalid = False
                 if _ar_range is not None:
                     _ar_min, _ar_max = _ar_range
                     if not (_ar_min <= _ar <= _ar_max):
                         msg = (f"{cat} id={p.image_id}: aspect_ratio={_ar:.2f} "
-                               f"out of [{_ar_min}, {_ar_max}] — 잘못된 제품 이미지, skip")
+                               f"out of [{_ar_min}, {_ar_max}] — 잘못된 제품 이미지, CV fallback")
                         run_errors.append(msg)
-                        print(f"  [_run_cn SKIP] {msg}")
-                        return
+                        print(f"  [WARNING] {msg}")
+                        _ar_invalid = True
 
                 # cv_composite 모드: _CV_ONLY_CATS 전체 CV 합성
-                # controlnet 모드: 전 카테고리 generate_product() 경유
+                # controlnet 모드: 전 카테고리 generate_product() 경유 (단, ar invalid → CV fallback)
                 _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else set()
-                if cat in _cv_only_set:
+                if cat in _cv_only_set or _ar_invalid:
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
                     current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
                     num_placed += 1
