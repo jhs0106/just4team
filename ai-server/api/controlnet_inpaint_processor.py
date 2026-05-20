@@ -278,6 +278,13 @@ class ControlNetInpaintProcessor:
         _sc  = min(bw / max(prod_rgba.width, 1), bh / max(prod_rgba.height, 1), _cat_max_scale)
         _fpw = max(8, int(prod_rgba.width * _sc))
         _fph = max(8, int(prod_rgba.height * _sc))
+
+        # KEYBOARD: 실제 배치 이미지 ar이 bbox ar보다 작을 때 horizontal stretch
+        # 키보드는 책상에서 가로로 길게 보여야 하므로 비율보다 bbox 채우기를 우선
+        if cat == "KEYBOARD" and _fpw < bw * 0.80:
+            _fpw = max(8, int(bw * 0.90))
+            print(f"  [KEYBOARD stretch] width → {_fpw} (bbox_w={bw:.0f}, fill={_fpw/max(bw,1):.2f})")
+
         _prod_fit = prod_rgba.resize((_fpw, _fph), Image.Resampling.LANCZOS)
 
         _ppx  = bx1 + (bw - _fpw) // 2   # center x

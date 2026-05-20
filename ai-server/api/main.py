@@ -1508,8 +1508,24 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     debug_dir=_debug_dir / "products",
                     debug_meta=_debug_meta,
                 )
-                _dbg_json_path = _debug_dir / "products" / f"{cat}_debug.json"
-                _gen_results[cat]["debug_json_created"] = _dbg_json_path.exists()
+                _dbg_json_path  = _debug_dir / "products" / f"{cat}_debug.json"
+                _dbg_exists     = _dbg_json_path.exists()
+                _gen_results[cat]["debug_json_created"] = _dbg_exists
+                if _dbg_exists:
+                    try:
+                        import json as _j
+                        _dbg_data = _j.loads(_dbg_json_path.read_text(encoding="utf-8"))
+                        _act_w = _dbg_data.get("actual_composite_width_px")
+                        _act_h = _dbg_data.get("actual_composite_height_px")
+                        _tgt_w, _tgt_h = x2 - x1, y2 - y1
+                        _gen_results[cat]["actual_composite_width_px"]  = _act_w
+                        _gen_results[cat]["actual_composite_height_px"] = _act_h
+                        _gen_results[cat]["target_bbox_width_px"]       = _tgt_w
+                        _gen_results[cat]["target_bbox_height_px"]      = _tgt_h
+                        _gen_results[cat]["fit_fill_ratio_w"] = round(_act_w / max(_tgt_w, 1), 3) if _act_w else None
+                        _gen_results[cat]["fit_fill_ratio_h"] = round(_act_h / max(_tgt_h, 1), 3) if _act_h else None
+                    except Exception:
+                        pass
                 current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
@@ -1792,7 +1808,13 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _entry["aspect_ratio"]       = _gr.get("aspect_ratio")
             _entry["aspect_ratio_valid"] = _gr.get("aspect_ratio_valid")
             _entry["aspect_ratio_range"] = _gr.get("aspect_ratio_range")
-            _entry["debug_json_created"] = _gr.get("debug_json_created", False)
+            _entry["debug_json_created"]          = _gr.get("debug_json_created", False)
+            _entry["actual_composite_width_px"]   = _gr.get("actual_composite_width_px")
+            _entry["actual_composite_height_px"]  = _gr.get("actual_composite_height_px")
+            _entry["target_bbox_width_px"]        = _gr.get("target_bbox_width_px")
+            _entry["target_bbox_height_px"]       = _gr.get("target_bbox_height_px")
+            _entry["fit_fill_ratio_w"]            = _gr.get("fit_fill_ratio_w")
+            _entry["fit_fill_ratio_h"]            = _gr.get("fit_fill_ratio_h")
         (_debug_dir / "products_list.json").write_text(
             _json.dumps(_products_list_meta, indent=2, ensure_ascii=False), encoding="utf-8"
         )
