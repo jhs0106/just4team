@@ -34,8 +34,8 @@ USE_FIXED_PRODUCTS = True
 # 직접 검증된 단품 이미지 ID (find_valid_products.py 실행 후 채울 것)
 # None이면 해당 카테고리는 해당 phase에서 제외됨
 TEST_FIXED_PRODUCTS: dict[str, int | None] = {
-    "MONITOR":  233,   # ar=1.37 ✓  (화면 콘텐츠 있음 — 교체 권장)
-    "KEYBOARD": None,  # TODO: find_valid_products.py --cat KEYBOARD 로 유효 ID 확인 후 입력
+    "MONITOR":  300,   # 검정화면 단품 이미지
+    "KEYBOARD": 477,  # TODO: find_valid_products.py --cat KEYBOARD 로 유효 ID 확인 후 입력
     "MOUSE":    560,   # ar=1.01 ✓  (031709 실행 확인됨)
 }
 
