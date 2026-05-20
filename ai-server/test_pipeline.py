@@ -60,15 +60,16 @@ CATEGORY_PROMPT = {
 }
 
 # 카테고리별 수량 규칙 (min, max)
+# 1차: MONITOR+KEYBOARD+MOUSE / 2차: SPEAKER (0,1) / 3차: DESK_LAMP (1,1)
 CATEGORY_COUNTS = {
     "KEYBOARD":     (1, 1),
     "MOUSE":        (1, 1),
     "MONITOR":      (1, 1),
-    "DESK_LAMP":    (1, 1),
-    "SPEAKER":      (0, 2),
-    "DESK_SHELF":   (0, 1),
-    "LAPTOP_STAND": (0, 1),
-    "DECO":         (0, 1),
+    "DESK_LAMP":    (0, 0),
+    "SPEAKER":      (0, 0),
+    "DESK_SHELF":   (0, 0),
+    "LAPTOP_STAND": (0, 0),
+    "DECO":         (0, 0),
 }
 
 STYLE_KEYWORDS = {
