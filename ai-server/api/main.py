@@ -275,6 +275,16 @@ _PLACEMENT_ORDER = {
 # CV 합성 전용 카테고리 (ControlNet 생성 금지)
 _CV_ONLY_CATS = {"MONITOR", "DESK_SHELF", "KEYBOARD", "DESK_LAMP"}
 
+# cv_composite 모드에서 composite_product_simple에 적용할 카테고리별 최대 scale
+_CV_CAT_MAX_SCALE: dict[str, float] = {
+    "KEYBOARD":   4.0,
+    "MOUSE":      3.0,
+    "MONITOR":    2.5,
+    "SPEAKER":    2.5,
+    "DESK_LAMP":  2.5,
+    "DESK_SHELF": 2.0,
+}
+
 # top-view 기준 선호 위치 (rx=0 좌/1 우, ry=0 뒤/1 앞)
 _PREFERRED_POS = {
     "MONITOR":      {"rx": 0.50, "ry": 0.20},
@@ -937,6 +947,7 @@ def composite_product_simple(
     product_img: Image.Image,
     region: tuple,
     edge_feather: int = 4,
+    category: str = "",
 ) -> Image.Image:
     x1, y1, x2, y2 = region
     target_w = max(1, x2 - x1)
@@ -944,8 +955,9 @@ def composite_product_simple(
 
     prod = prepare_product_image_for_composite(product_img)
 
-    # 비율 유지 리사이즈, 최소 시각 크기 30px 보장
-    scale = min(target_w / max(prod.width, 1), target_h / max(prod.height, 1), 1.0)
+    # 비율 유지 리사이즈, 최소 시각 크기 30px 보장 — category_max_scale까지 확대 허용
+    _max_sc = _CV_CAT_MAX_SCALE.get(category, 1.0)
+    scale = min(target_w / max(prod.width, 1), target_h / max(prod.height, 1), _max_sc)
     new_w = max(30, int(prod.width * scale))
     new_h = max(30, int(prod.height * scale))
     if (new_w, new_h) != (prod.width, prod.height):
@@ -1416,7 +1428,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 # controlnet 모드: 전 카테고리 generate_product() 경유
                 _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else set()
                 if cat in _cv_only_set:
-                    current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2))
+                    current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
                     current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
                     num_placed += 1
                     print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
@@ -1619,7 +1631,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 continue
             try:
                 _cv_img  = Image.open(_cv_path)
-                _cv_base = composite_product_simple(_cv_base, _cv_img, _cv_item["region"])
+                _cv_base = composite_product_simple(_cv_base, _cv_img, _cv_item["region"], category=_cv_cat)
             except Exception:
                 pass
         _cv_base.save(_debug_dir / "cv_composite_result.png")
@@ -1700,7 +1712,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     run_errors.append(f"{cat}: image not found id={p.image_id}")
                     continue
                 prod_img = Image.open(prod_path)
-                current  = composite_product_simple(current, prod_img, item["region"])
+                current  = composite_product_simple(current, prod_img, item["region"], category=cat)
                 num_placed += 1
                 print(f"  [cv_composite] {cat} 합성 완료 (num_placed={num_placed})")
 
