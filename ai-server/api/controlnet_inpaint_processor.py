@@ -279,11 +279,13 @@ class ControlNetInpaintProcessor:
         _fpw = max(8, int(prod_rgba.width * _sc))
         _fph = max(8, int(prod_rgba.height * _sc))
 
-        # KEYBOARD: 실제 배치 이미지 ar이 bbox ar보다 작을 때 horizontal stretch
-        # 키보드는 책상에서 가로로 길게 보여야 하므로 비율보다 bbox 채우기를 우선
+        # KEYBOARD/MOUSE: 가로 폭이 bbox 80% 미만이면 horizontal stretch
         if cat == "KEYBOARD" and _fpw < bw * 0.80:
             _fpw = max(8, int(bw * 0.90))
             print(f"  [KEYBOARD stretch] width → {_fpw} (bbox_w={bw:.0f}, fill={_fpw/max(bw,1):.2f})")
+        elif cat == "MOUSE" and _fpw < bw * 0.80:
+            _fpw = max(8, int(bw * 0.90))
+            print(f"  [MOUSE stretch] width → {_fpw} (bbox_w={bw:.0f}, fill={_fpw/max(bw,1):.2f})")
 
         _prod_fit = prod_rgba.resize((_fpw, _fph), Image.Resampling.LANCZOS)
 
@@ -376,7 +378,7 @@ class ControlNetInpaintProcessor:
         result_crop = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
         output = image.copy()
         final_paste_mask = mask_sd.resize((cw, ch), Image.Resampling.LANCZOS).filter(
-            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=3)
+            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=8)
         )
         output.paste(result_crop, (cx1, cy1), mask=final_paste_mask)
 
