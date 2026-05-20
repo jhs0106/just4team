@@ -1688,7 +1688,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
         ]
         _products_list_meta = {
             "fixed_test_products": req.fixed_test_products,
-            "generation_mode":     gen_mode,
+            "generation_mode":     req.generation_mode,
             "products":            _products_info,
         }
         (_debug_dir / "products_list.json").write_text(
