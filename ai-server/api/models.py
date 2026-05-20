@@ -101,6 +101,7 @@ class GenerateRequest(BaseModel):
     mode:                  RemoveMode        = Field(RemoveMode.own_desk, description="물체 제거 정책")
     generation_mode:       str               = Field("controlnet", description="생성 모드: placement_only | cv_composite | controlnet")
     removal_strategy:      str               = Field("combined",   description="제거 방식: none | sequential | combined")
+    fixed_test_products:   bool              = Field(False, description="True 시 고정 테스트 제품 세트 — products_list.json에 기록")
 
 
 class GenerateResult(BaseModel):

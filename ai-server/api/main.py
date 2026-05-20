@@ -1686,8 +1686,13 @@ def _run_generate(job_id: str, req: GenerateRequest):
             }
             for _it in _unplaced_for_json
         ]
+        _products_list_meta = {
+            "fixed_test_products": req.fixed_test_products,
+            "generation_mode":     gen_mode,
+            "products":            _products_info,
+        }
         (_debug_dir / "products_list.json").write_text(
-            _json.dumps(_products_info, indent=2, ensure_ascii=False), encoding="utf-8"
+            _json.dumps(_products_list_meta, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
         gen_mode = getattr(req, "generation_mode", "controlnet")
