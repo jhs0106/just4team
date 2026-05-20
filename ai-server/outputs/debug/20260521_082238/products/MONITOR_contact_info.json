@@ -1,0 +1,12 @@
+{
+  "contact_y": 285,
+  "contact_x1": 479,
+  "contact_x2": 594,
+  "shadow_strength": 0.38,
+  "shadow_bbox": [
+    479,
+    260,
+    594,
+    310
+  ]
+}
