@@ -384,6 +384,9 @@ class ControlNetInpaintProcessor:
                 final_paste_mask.save(_ddir / f"{cat}_final_paste_mask.png")
                 prod_ip.save(_ddir / f"{cat}_prod_ip.png")
                 _m = debug_meta or {}
+                # actual_composite: 원본 이미지 좌표계로 변환 (target_bbox와 직접 비교 가능)
+                _actual_img_w = int(_fpw * cw / max(sd_w, 1))
+                _actual_img_h = int(_fph * ch / max(sd_h, 1))
                 _dbg_json = {
                     "category":                     cat,
                     "image_id":                     _m.get("image_id"),
@@ -396,8 +399,12 @@ class ControlNetInpaintProcessor:
                     "product_original_height_px":   _m.get("product_raw_h"),
                     "product_tight_crop_width_px":  _prod_orig_w,
                     "product_tight_crop_height_px": _prod_orig_h,
-                    "actual_composite_width_px":    _fpw,
-                    "actual_composite_height_px":   _fph,
+                    "actual_composite_width_px":    _actual_img_w,
+                    "actual_composite_height_px":   _actual_img_h,
+                    "actual_sd_width_px":           _fpw,
+                    "actual_sd_height_px":          _fph,
+                    "sd_input_size":                f"{sd_w}x{sd_h}",
+                    "context_crop_size":            f"{cw}x{ch}",
                     "scale_to_bbox":                round(_sc, 4),
                     "category_max_scale":           _cat_max_scale,
                     "mask_type":                    mask_type,

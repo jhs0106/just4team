@@ -300,6 +300,15 @@ _MIN_FRONT_SIZE = {
     "CLOCK":     (55, 40),
 }
 
+# 카테고리별 tight_crop aspect ratio (w/h) 허용 범위 — 범위 밖이면 잘못된 제품 이미지
+_CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
+    "KEYBOARD":  (3.0, 99.0),   # 키보드는 가로로 매우 긴 형태여야 함
+    "MOUSE":     (0.6, 1.8),    # 마우스는 정방형에 가까운 형태여야 함
+    "MONITOR":   (1.2, 3.0),    # 모니터는 가로가 세로보다 넓어야 함
+    "SPEAKER":   (0.4, 2.0),
+    "DESK_LAMP": (0.3, 2.5),
+}
+
 # scoring으로 선택된 anchor → front-view bbox 변환 시 카테고리별 y 보정 (px)
 _CONTACT_Y_OFFSET = {
     "KEYBOARD": 32,
@@ -1390,6 +1399,18 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if _alpha_cov > 0.80:
                     print(f"  [WARNING] {cat} id={p.image_id}: alpha_coverage={_alpha_cov:.2f}"
                           f" — multi-object/lifestyle 이미지 의심, 단품 이미지로 교체 필요")
+
+                # aspect ratio validation: 잘못된 제품 이미지 조기 차단
+                _ar = prod_alpha.width / max(prod_alpha.height, 1)
+                _ar_range = _CAT_ASPECT_VALID.get(cat)
+                if _ar_range is not None:
+                    _ar_min, _ar_max = _ar_range
+                    if not (_ar_min <= _ar <= _ar_max):
+                        msg = (f"{cat} id={p.image_id}: aspect_ratio={_ar:.2f} "
+                               f"out of [{_ar_min}, {_ar_max}] — 잘못된 제품 이미지, skip")
+                        run_errors.append(msg)
+                        print(f"  [_run_cn SKIP] {msg}")
+                        return
 
                 # cv_composite 모드: _CV_ONLY_CATS 전체 CV 합성
                 # controlnet 모드: 전 카테고리 generate_product() 경유
