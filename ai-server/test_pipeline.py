@@ -71,6 +71,16 @@ CATEGORY_COUNTS = {
     "DECO":         (0, 1),
 }
 
+# generate 1/2/3 phase 제품 구성
+_PHASE_COUNTS = {
+    1: {"KEYBOARD": (1,1), "MOUSE": (1,1), "MONITOR": (1,1),
+        "DESK_LAMP": (0,0), "SPEAKER": (0,0), "DESK_SHELF": (0,0), "LAPTOP_STAND": (0,0), "DECO": (0,0)},
+    2: {"KEYBOARD": (1,1), "MOUSE": (1,1), "MONITOR": (1,1),
+        "DESK_LAMP": (0,0), "SPEAKER": (0,1), "DESK_SHELF": (0,0), "LAPTOP_STAND": (0,0), "DECO": (0,0)},
+    3: {"KEYBOARD": (1,1), "MOUSE": (1,1), "MONITOR": (1,1),
+        "DESK_LAMP": (1,1), "SPEAKER": (0,1), "DESK_SHELF": (0,0), "LAPTOP_STAND": (0,0), "DECO": (0,0)},
+}
+
 STYLE_KEYWORDS = {
     "white": ["화이트", "white", "흰"],
     "black": ["블랙", "black", "검정", "다크"],
@@ -158,10 +168,10 @@ def select_desk(style: str) -> dict | None:
     return random.choice(candidates) if candidates else None
 
 
-def select_products(style: str) -> list[dict]:
+def select_products(style: str, counts: dict | None = None) -> list[dict]:
     by_cat = load_products_by_style(style)
     selected = []
-    for cat, (mn, mx) in CATEGORY_COUNTS.items():
+    for cat, (mn, mx) in (counts or CATEGORY_COUNTS).items():
         pool  = by_cat.get(cat, [])
         count = random.randint(mn, mx)
         if count == 0 or not pool:
@@ -361,9 +371,10 @@ def main():
     print(f"결과물 위치: {OUT.resolve()}")
 
 
-def test_generate():
+def test_generate(phase: int | None = None):
     # POST /generate 단일 호출 테스트
-    print("\n=== /generate 엔드포인트 테스트 ===")
+    counts = _PHASE_COUNTS.get(phase) if phase else None
+    print(f"\n=== /generate 엔드포인트 테스트 {'(phase ' + str(phase) + ')' if phase else ''} ===")
     print(f"결과 저장 위치: {OUT.resolve()}")
 
     if not DESK_IMAGE.exists():
@@ -384,7 +395,7 @@ def test_generate():
     else:
         print("책상: 스타일 매칭 없음 — 치수 미지정")
 
-    products = select_products(STYLE)
+    products = select_products(STYLE, counts)
     print(f"\n선택된 제품 {len(products)}개:")
     for p in products:
         m = parse_metadata(p.get("metadata", ""))
@@ -460,8 +471,9 @@ if __name__ == "__main__":
         elif cmd == "place":
             step2_place_products(to_b64(DESK_IMAGE))
         elif cmd == "generate":
-            test_generate()
+            phase = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None
+            test_generate(phase)
         else:
-            print("사용법: python test_pipeline.py [remove|place|generate]")
+            print("사용법: python test_pipeline.py [remove|place|generate [1|2|3]]")
     else:
         main()
