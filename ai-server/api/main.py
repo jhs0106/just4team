@@ -258,21 +258,35 @@ _CATEGORY_DIMS_MM = {
     "CLOCK":        (100, 100),
 }
 
-# 생성 순서: 큰/뒤쪽 제품 먼저, 작은/앞쪽 제품 나중
+# MONITOR→KEYBOARD→MOUSE 순서여야 관계 기반 배치가 작동함
 _PLACEMENT_ORDER = {
     "MONITOR":      10,
     "DESK_SHELF":   20,
-    "SPEAKER":      30,
-    "DESK_LAMP":    40,
-    "CLOCK":        50,
-    "DECO":         60,
-    "MOUSEPAD":     70,
-    "KEYBOARD":     80,
-    "MOUSE":        90,
+    "KEYBOARD":     30,
+    "MOUSEPAD":     40,
+    "MOUSE":        50,
+    "SPEAKER":      60,
+    "DESK_LAMP":    70,
+    "CLOCK":        80,
+    "DECO":         90,
 }
 
 # CV 합성 전용 카테고리 (ControlNet 생성 금지)
 _CV_ONLY_CATS = {"MONITOR", "DESK_SHELF", "KEYBOARD", "DESK_LAMP"}
+
+# top-view 기준 선호 위치 (rx=0 좌/1 우, ry=0 뒤/1 앞)
+_PREFERRED_POS = {
+    "MONITOR":      {"rx": 0.50, "ry": 0.20},
+    "DESK_SHELF":   {"rx": 0.50, "ry": 0.20},
+    "KEYBOARD":     {"rx": 0.50, "ry": 0.62},
+    "MOUSEPAD":     {"rx": 0.50, "ry": 0.65},
+    "MOUSE":        {"rx": 0.70, "ry": 0.62},
+    "SPEAKER":      {"rx": 0.25, "ry": 0.25},
+    "DESK_LAMP":    {"rx": 0.12, "ry": 0.30},
+    "DECO":         {"rx": 0.75, "ry": 0.35},
+    "CLOCK":        {"rx": 0.80, "ry": 0.30},
+    "LAPTOP_STAND": {"rx": 0.50, "ry": 0.45},
+}
 
 # 제품별 최소 front-view bbox 크기 (px)
 _MIN_FRONT_SIZE = {
@@ -413,12 +427,8 @@ def calc_placements_from_available_space(
     desk_depth_mm: int | None,
     mode: RemoveMode = RemoveMode.own_desk,
     remover=None,
+    debug_dir: Path | None = None,
 ) -> list[dict]:
-    """
-    top-view available space 분석 → front-view 배치 좌표 리스트.
-    실패/가용 영역 없으면 빈 리스트 → _calc_regions() fallback.
-    반환: [{"product": p, "region": (x1, y1, x2, y2)}, ...]
-    """
     if remover is None:
         remover = get_object_removal_processor()
 
@@ -483,57 +493,47 @@ def calc_placements_from_available_space(
     fv_dw = max(1, fv_dx2 - fv_dx1)
     fv_dh = max(1, fv_dy2 - fv_dy1)
 
-    placements = []
-    used_ids   = set()
-    skip_reasons: list[str] = []
-
+    # _PLACEMENT_ORDER 순으로 정렬 후 scoring 기반 배치
+    sorted_products = sorted(
+        [p for p in products if normalize_category(p.category) in _CATEGORY_DIMS_MM],
+        key=lambda p: _PLACEMENT_ORDER.get(normalize_category(p.category), 999),
+    )
     for p in products:
-        cat = normalize_category(p.category)
-        if cat not in _CATEGORY_DIMS_MM:
-            msg = f"unsupported category: raw={p.category}, normalized={cat}"
-            skip_reasons.append(msg)
-            print(f"[Placement SKIP] {msg}")
+        if normalize_category(p.category) not in _CATEGORY_DIMS_MM:
+            print(f"[Placement SKIP] unsupported: {p.category}")
+
+    unused_regions: list  = list(available_regions)
+    relation_state: dict  = {}
+    placed_norm:    list  = []
+    placements:     list  = []
+
+    for p in sorted_products:
+        cat  = normalize_category(p.category)
+        w_mm = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
+
+        # 모든 미사용 region에 score 계산 → 최고 점수 선택
+        best_region, best_score, best_rx, best_ry = None, -999.0, 0.5, 0.5
+        for region in unused_regions:
+            tv_cx = region["center_px"]["x"]
+            tv_cy = region["center_px"]["y"]
+            rx = max(0.0, min(1.0, (tv_cx - tv_dx1) / tv_dw))
+            ry = max(0.0, min(1.0, (tv_cy - tv_dy1) / tv_dh))
+            s  = score_region_for_product(cat, rx, ry, placed_norm, relation_state)
+            if s > best_score:
+                best_score, best_region, best_rx, best_ry = s, region, rx, ry
+
+        if best_region is None:
+            print(f"[Placement SKIP] no region for {cat}")
             continue
+        unused_regions.remove(best_region)
 
-        w_mm  = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
-        d_mm  = getattr(p, "depth_mm", None) or _CATEGORY_DIMS_MM[cat][1]
-        pw_px = w_mm / mm_per_px_x if mm_per_px_x > 0 else 50
-        pd_px = d_mm / mm_per_px_y if mm_per_px_y > 0 else 50
+        # front-view bbox 계산 (원근 스케일 포함)
+        ps      = 0.60 + 0.40 * best_ry
+        _raw_pw = w_mm * fv_dw / (desk_width_mm or 1200) * ps
+        fv_pw   = max(40, min(int(_raw_pw), int(fv_dw * 0.65)))
+        fv_ph   = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
+        fv_cx   = fv_dx1 + best_rx * fv_dw
 
-        # 크기 맞는 region 우선, 없으면 가장 큰 미사용 region
-        target = next(
-            (r for r in available_regions
-             if r["region_id"] not in used_ids
-             and r["bbox_px"]["width"]  >= pw_px * 0.7
-             and r["bbox_px"]["height"] >= pd_px * 0.7),
-            None,
-        )
-        if target is None:
-            target = next(
-                (r for r in available_regions if r["region_id"] not in used_ids),
-                None,
-            )
-        if target is None:
-            continue
-
-        used_ids.add(target["region_id"])
-
-        # top-view 중심 → 0~1 정규화
-        tv_cx = target["center_px"]["x"]
-        tv_cy = target["center_px"]["y"]
-        rx    = max(0.0, min(1.0, (tv_cx - tv_dx1) / tv_dw))
-        ry    = max(0.0, min(1.0, (tv_cy - tv_dy1) / tv_dh))
-
-        # front-view 좌표 (원근 스케일 포함)
-        ps       = 0.60 + 0.40 * ry
-        _raw_pw  = w_mm * fv_dw / (desk_width_mm or 1200) * ps
-        fv_pw    = max(40, min(int(_raw_pw), int(fv_dw * 0.65)))  # 책상 너비 65% cap
-        fv_ph    = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
-        fv_cx    = fv_dx1 + rx * fv_dw
-        fv_cy    = fv_dy1 + ry * fv_dh
-        print(f"  [AvailSpace-DBG] {cat} w_mm={w_mm} fv_dw={fv_dw} dsk_w={desk_width_mm} ps={ps:.2f} raw_pw={_raw_pw:.0f} fv_pw={fv_pw}")
-
-        # 카테고리별 크기/위치 보정
         min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
         fv_pw = max(fv_pw, min_w)
         fv_ph = max(fv_ph, min_h)
@@ -554,11 +554,11 @@ def calc_placements_from_available_space(
         elif cat == "DESK_LAMP":
             fv_pw = max(fv_pw, 90)
             fv_ph = max(fv_ph, 130)
-            if rx < 0.5:
-                rx = max(rx, 0.12)
+            if best_rx < 0.5:
+                best_rx = max(best_rx, 0.12)
             else:
-                rx = min(rx, 0.88)
-            fv_cx = fv_dx1 + rx * fv_dw
+                best_rx = min(best_rx, 0.88)
+            fv_cx = fv_dx1 + best_rx * fv_dw
             y2 = int(fv_dy1 + fv_dh * 0.45)
             y1 = y2 - fv_ph
             _y_override = True
@@ -573,20 +573,43 @@ def calc_placements_from_available_space(
         elif cat == "MOUSEPAD":
             fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
 
-        x1 = max(0,    int(fv_cx - fv_pw // 2))
+        x1 = max(0, int(fv_cx - fv_pw // 2))
         x2 = min(fv_w, x1 + fv_pw)
         if not _y_override:
-            # fv_dy2로 cap → 의자 영역 침범 방지
-            y2 = min(fv_dy2, int(fv_cy))
-            y1 = max(0,    y2 - fv_ph)
+            y2 = min(fv_dy2, int(fv_dy1 + best_ry * fv_dh))
+            y1 = max(0, y2 - fv_ph)
         else:
             y1 = max(0, y1)
             y2 = min(fv_h, y2)
 
         if x2 > x1 and y2 > y1:
-            placements.append({"product": p, "region": (x1, y1, x2, y2)})
-            print(f"  [AvailSpace] {cat} tv({tv_cx:.0f},{tv_cy:.0f}) "
-                  f"rx={rx:.2f} ry={ry:.2f} → fv({x1},{y1},{x2},{y2})")
+            print(f"  [Score] {cat} rx={best_rx:.2f} ry={best_ry:.2f} "
+                  f"score={best_score:.2f} region_id={best_region['region_id']} "
+                  f"→ fv({x1},{y1},{x2},{y2})")
+            placements.append({
+                "product":             p,
+                "region":              (x1, y1, x2, y2),
+                "score":               round(best_score, 3),
+                "available_region_id": best_region["region_id"],
+                "placement_source":    "available_space_scoring",
+            })
+            relation_state[f"{cat.lower()}_rx"] = best_rx
+            relation_state[f"{cat.lower()}_ry"] = best_ry
+            placed_norm.append({"rx": best_rx, "ry": best_ry, "cat": cat})
+
+    # top-view 디버그 overlay 저장
+    if debug_dir is not None:
+        try:
+            _save_topview_overlays(
+                top_view_image=top_view_image,
+                available_regions=available_regions,
+                placements=placements,
+                placed_norm=placed_norm,
+                tv_dx1=tv_dx1, tv_dy1=tv_dy1, tv_dw=tv_dw, tv_dh=tv_dh,
+                debug_dir=debug_dir,
+            )
+        except Exception as _e:
+            print(f"[AvailSpace] top-view overlay 저장 실패: {_e}")
 
     return placements
 
@@ -601,6 +624,90 @@ def bbox_iou(a, b) -> float:
     area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
     area_b = max(1, (bx2 - bx1) * (by2 - by1))
     return inter / (area_a + area_b - inter + 1e-6)
+
+
+def score_region_for_product(
+    cat: str,
+    rx: float,
+    ry: float,
+    placed_norm: list,
+    relation_state: dict,
+) -> float:
+    # 관계 기반 선호 위치 조정
+    if cat == "KEYBOARD" and "monitor_rx" in relation_state:
+        pref_rx = relation_state["monitor_rx"]
+        pref_ry = 0.62
+    elif cat == "MOUSE":
+        pref_rx = min(1.0, relation_state.get("keyboard_rx", 0.50) + 0.20)
+        pref_ry = relation_state.get("keyboard_ry", 0.62)
+    elif cat == "SPEAKER":
+        pref_rx = 0.20 if rx <= 0.50 else 0.80
+        pref_ry = relation_state.get("monitor_ry", 0.25)
+    else:
+        pos = _PREFERRED_POS.get(cat, {"rx": 0.50, "ry": 0.50})
+        pref_rx, pref_ry = pos["rx"], pos["ry"]
+
+    dist = ((rx - pref_rx) ** 2 + (ry - pref_ry) ** 2) ** 0.5
+    score = max(0.0, 1.0 - dist * 2.0)
+
+    # 하드 제약 penalty
+    if cat == "MONITOR" and ry > 0.40:
+        score -= 2.0
+    if cat == "KEYBOARD" and ry < 0.45:
+        score -= 1.5
+    if cat == "DESK_LAMP" and 0.20 <= rx <= 0.80:
+        score -= 1.5
+    if cat in ("DECO", "CLOCK") and 0.30 <= rx <= 0.70 and ry > 0.40:
+        score -= 1.0
+
+    # 이미 배치된 제품과의 거리 penalty
+    for prev in placed_norm:
+        d = ((rx - prev["rx"]) ** 2 + (ry - prev["ry"]) ** 2) ** 0.5
+        if d < 0.15:
+            score -= 2.0
+        elif d < 0.25:
+            score -= 0.5
+
+    # 책상 가장자리 너무 가까우면 소폭 penalty
+    if min(rx, 1 - rx, ry, 1 - ry) < 0.05:
+        score -= 0.3
+
+    return score
+
+
+def _save_topview_overlays(
+    top_view_image: Image.Image,
+    available_regions: list,
+    placements: list,
+    placed_norm: list,
+    tv_dx1: int, tv_dy1: int, tv_dw: int, tv_dh: int,
+    debug_dir: Path,
+) -> None:
+    from PIL import ImageDraw as _IDraw
+    tv_w, tv_h = top_view_image.size
+
+    # available space overlay
+    av_base = top_view_image.copy().convert("RGBA")
+    overlay = Image.new("RGBA", (tv_w, tv_h), (0, 0, 0, 0))
+    d = _IDraw.Draw(overlay)
+    for r in available_regions:
+        bx = r["bbox_px"]
+        rx1, ry1 = int(bx["x"]), int(bx["y"])
+        rx2, ry2 = rx1 + int(bx["width"]), ry1 + int(bx["height"])
+        d.rectangle([rx1, ry1, rx2, ry2], fill=(0, 255, 0, 60), outline=(0, 200, 0, 200))
+        d.text((rx1 + 2, ry1 + 2), str(r["region_id"]), fill=(0, 180, 0, 255))
+    av_base.alpha_composite(overlay)
+    av_base.convert("RGB").save(debug_dir / "top_available_space_overlay.png")
+
+    # product placement debug on top-view
+    pl_img = top_view_image.copy()
+    d2 = _IDraw.Draw(pl_img)
+    for pn in placed_norm:
+        px = int(tv_dx1 + pn["rx"] * tv_dw)
+        py = int(tv_dy1 + pn["ry"] * tv_dh)
+        d2.ellipse([px - 8, py - 8, px + 8, py + 8], fill=(255, 80, 0))
+        d2.text((px + 10, py - 8), pn["cat"], fill=(255, 80, 0))
+    pl_img.save(debug_dir / "top_product_placement_debug.png")
 
 
 def has_meaningful_alpha(img: Image.Image) -> bool:
@@ -1059,11 +1166,13 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 prod_alpha.save(_prod_debug_dir / f"{cat}_{p.image_id}_alpha.png")
                 prod_img = prod_img.convert("RGB")
 
-                # CV 전용 카테고리: ControlNet 대신 단순 합성
-                if cat in _CV_ONLY_CATS:
+                # cv_composite 모드: 전 카테고리 단순 합성
+                # controlnet 모드: MONITOR/KEYBOARD만 단순 합성 (나머지는 ControlNet)
+                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else {"MONITOR", "KEYBOARD"}
+                if cat in _cv_only_set:
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2))
                     num_placed += 1
-                    print(f"  [_run_cn CV_ONLY] {cat} 합성 완료 (num_placed={num_placed})")
+                    print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
                     return
 
                 # 이미지 평균 밝기 체크 — 너무 어두우면 IP-Adapter가 색감을 못 읽음
@@ -1121,6 +1230,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 desk_depth_mm=req.desk_depth_mm,
                 mode=mode,
                 remover=remover,
+                debug_dir=_debug_dir,
             )
             # available_space 내부 overlap 제거
             _deduped: list[dict] = []
@@ -1205,8 +1315,18 @@ def _run_generate(job_id: str, req: GenerateRequest):
         _draw = _ID.Draw(_dbg)
         for _item in placement_items:
             _x1, _y1, _x2, _y2 = _item["region"]
+            _cat    = normalize_category(_item["product"].category)
+            _score  = _item.get("score")
+            _rid    = _item.get("available_region_id")
+            _src    = "av" if _item.get("placement_source") == "available_space_scoring" else "fb"
+            _label  = _cat
+            if _score is not None:
+                _label += f" s={_score:.2f}"
+            if _rid is not None:
+                _label += f" r{_rid}"
+            _label += f" [{_src}]"
             _draw.rectangle([_x1, _y1, _x2, _y2], outline=(255, 0, 0), width=4)
-            _draw.text((_x1 + 4, _y1 + 4), normalize_category(_item["product"].category), fill=(255, 0, 0))
+            _draw.text((_x1 + 4, _y1 + 4), _label, fill=(255, 0, 0))
         _dbg.save(_debug_dir / "placement_debug.png")
         print(f"[Generate] 배치 시각화 저장: {_debug_dir}/placement_debug.png")
 
@@ -1234,9 +1354,16 @@ def _run_generate(job_id: str, req: GenerateRequest):
         # ── 제품 목록 JSON 저장 ──────────────────────────────────────
         import json as _json
         _products_info = [
-            {"category": normalize_category(_it["product"].category),
-             "image_id": _it["product"].image_id,
-             "region":   list(_it["region"])}
+            {
+                "category":            normalize_category(_it["product"].category),
+                "image_id":            _it["product"].image_id,
+                "region":              list(_it["region"]),
+                "width_px":            _it["region"][2] - _it["region"][0],
+                "height_px":           _it["region"][3] - _it["region"][1],
+                "available_region_id": _it.get("available_region_id"),
+                "score":               _it.get("score"),
+                "placement_source":    _it.get("placement_source", "fallback"),
+            }
             for _it in placement_items
         ]
         (_debug_dir / "products_list.json").write_text(
