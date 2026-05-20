@@ -274,6 +274,17 @@ _PLACEMENT_ORDER = {
 # CV 합성 전용 카테고리 (ControlNet 생성 금지)
 _CV_ONLY_CATS = {"MONITOR", "DESK_SHELF", "KEYBOARD", "DESK_LAMP"}
 
+# 제품별 최소 front-view bbox 크기 (px)
+_MIN_FRONT_SIZE = {
+    "MONITOR":   (220, 150),
+    "KEYBOARD":  (180, 45),
+    "MOUSE":     (45, 30),
+    "SPEAKER":   (55, 55),
+    "DESK_LAMP": (80, 120),
+    "DECO":      (45, 45),
+    "CLOCK":     (55, 40),
+}
+
 # 45도 앵글 뷰에서 제품의 높이/너비 비율
 # 수직 제품(모니터·스탠드·램프)은 크고, 수평 제품(키보드·마우스패드)은 작음
 _FRONT_HEIGHT_RATIO = {
@@ -522,22 +533,41 @@ def calc_placements_from_available_space(
         fv_cy    = fv_dy1 + ry * fv_dh
         print(f"  [AvailSpace-DBG] {cat} w_mm={w_mm} fv_dw={fv_dw} dsk_w={desk_width_mm} ps={ps:.2f} raw_pw={_raw_pw:.0f} fv_pw={fv_pw}")
 
-        # 카테고리별 보정
+        # 카테고리별 크기/위치 보정
+        min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
+        fv_pw = max(fv_pw, min_w)
+        fv_ph = max(fv_ph, min_h)
+
+        _y_override = False
         if cat == "MONITOR":
-            # 모니터는 책상 후면에 서 있음 — ry를 후면으로 강제, 폭/높이 보정
-            ry = min(ry, 0.30)
-            fv_pw = int(fv_pw * 1.10)
-            fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MONITOR"])
-            fv_cy = fv_dy1 + ry * fv_dh
+            fv_pw = max(fv_pw, 240)
+            fv_ph = int(fv_pw * 0.65)
+            y2 = int(fv_dy1 + fv_dh * 0.42)
+            y1 = y2 - fv_ph
+            _y_override = True
+        elif cat == "KEYBOARD":
+            fv_pw = max(fv_pw, 190)
+            fv_ph = max(fv_ph, 45)
+            y2 = int(fv_dy1 + fv_dh * 0.62)
+            y1 = y2 - fv_ph
+            _y_override = True
         elif cat == "DESK_LAMP":
-            # 램프는 선처럼 나오지 않도록 최소 폭 확보
-            fv_pw = max(fv_pw, int(fv_dw * 0.10))
-            fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["DESK_LAMP"])
+            fv_pw = max(fv_pw, 90)
+            fv_ph = max(fv_ph, 130)
             if rx < 0.5:
                 rx = max(rx, 0.12)
             else:
                 rx = min(rx, 0.88)
             fv_cx = fv_dx1 + rx * fv_dw
+            y2 = int(fv_dy1 + fv_dh * 0.45)
+            y1 = y2 - fv_ph
+            _y_override = True
+        elif cat == "SPEAKER":
+            fv_pw = max(fv_pw, 60)
+            fv_ph = max(fv_ph, 60)
+        elif cat == "DECO":
+            fv_pw = max(fv_pw, 45)
+            fv_ph = max(fv_ph, 45)
         elif cat == "MOUSE":
             fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"])
         elif cat == "MOUSEPAD":
@@ -545,9 +575,13 @@ def calc_placements_from_available_space(
 
         x1 = max(0,    int(fv_cx - fv_pw // 2))
         x2 = min(fv_w, x1 + fv_pw)
-        # fv_dy2로 cap → 의자 영역 침범 방지
-        y2 = min(fv_dy2, int(fv_cy))
-        y1 = max(0,    y2 - fv_ph)
+        if not _y_override:
+            # fv_dy2로 cap → 의자 영역 침범 방지
+            y2 = min(fv_dy2, int(fv_cy))
+            y1 = max(0,    y2 - fv_ph)
+        else:
+            y1 = max(0, y1)
+            y2 = min(fv_h, y2)
 
         if x2 > x1 and y2 > y1:
             placements.append({"product": p, "region": (x1, y1, x2, y2)})
@@ -569,6 +603,55 @@ def bbox_iou(a, b) -> float:
     return inter / (area_a + area_b - inter + 1e-6)
 
 
+def has_meaningful_alpha(img: Image.Image) -> bool:
+    if img.mode != "RGBA":
+        return False
+    alpha = np.array(img.getchannel("A"))
+    return alpha.min() < 250
+
+
+def make_white_bg_transparent(
+    img: Image.Image,
+    threshold: int = 245,
+    feather: int = 2,
+) -> Image.Image:
+    rgba = img.convert("RGBA")
+    arr = np.array(rgba)
+
+    rgb = arr[:, :, :3]
+    white = (
+        (rgb[:, :, 0] >= threshold) &
+        (rgb[:, :, 1] >= threshold) &
+        (rgb[:, :, 2] >= threshold)
+    )
+
+    mask = white.astype(np.uint8) * 255
+    h, w = mask.shape
+    flood = mask.copy()
+    ff_mask = np.zeros((h + 2, w + 2), np.uint8)
+
+    for sx, sy in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+        if flood[sy, sx] > 0:
+            cv2.floodFill(flood, ff_mask, (sx, sy), 128)
+
+    bg = flood == 128
+    alpha = arr[:, :, 3]
+    alpha[bg] = 0
+
+    if feather > 0:
+        alpha = cv2.GaussianBlur(alpha, (feather * 2 + 1, feather * 2 + 1), 0)
+
+    arr[:, :, 3] = alpha
+    return Image.fromarray(arr)
+
+
+def prepare_product_image_for_composite(img: Image.Image) -> Image.Image:
+    rgba = img.convert("RGBA")
+    if has_meaningful_alpha(rgba):
+        return rgba
+    return make_white_bg_transparent(rgba)
+
+
 def composite_product_simple(
     base: Image.Image,
     product_img: Image.Image,
@@ -578,7 +661,7 @@ def composite_product_simple(
     target_w = max(1, x2 - x1)
     target_h = max(1, y2 - y1)
 
-    prod = product_img.convert("RGBA")
+    prod = prepare_product_image_for_composite(product_img)
     prod.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
 
     px = x1 + (target_w - prod.width) // 2
@@ -967,16 +1050,18 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 return
             print(f"  [_run_cn] prod_path={prod_path}")
             try:
-                prod_img = Image.open(prod_path).convert("RGB")
+                prod_img = Image.open(prod_path)
+                cat = normalize_category(p.category)
                 _prod_debug_dir = _debug_dir / "products"
                 _prod_debug_dir.mkdir(exist_ok=True)
-                prod_img.save(_prod_debug_dir / f"{p.category}_{p.image_id}.jpg")
-
-                cat = normalize_category(p.category)
+                prod_img.save(_prod_debug_dir / f"{cat}_{p.image_id}_raw.png")
+                prod_alpha = prepare_product_image_for_composite(prod_img)
+                prod_alpha.save(_prod_debug_dir / f"{cat}_{p.image_id}_alpha.png")
+                prod_img = prod_img.convert("RGB")
 
                 # CV 전용 카테고리: ControlNet 대신 단순 합성
                 if cat in _CV_ONLY_CATS:
-                    current = composite_product_simple(current, prod_img, (x1, y1, x2, y2))
+                    current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2))
                     num_placed += 1
                     print(f"  [_run_cn CV_ONLY] {cat} 합성 완료 (num_placed={num_placed})")
                     return
