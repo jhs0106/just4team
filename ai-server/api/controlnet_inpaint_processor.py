@@ -5,16 +5,46 @@ from pathlib import Path
 from PIL import Image
 
 _CAT_PROMPT = {
-    "KEYBOARD":     "mechanical keyboard on desk mat, natural lighting, sharp",
-    "MOUSE":        "wireless mouse on desk, natural lighting, sharp",
-    "MOUSEPAD":     "mouse pad on desk surface, natural lighting",
-    "MONITOR":      "monitor on desk, turned off screen, dark screen, natural lighting",
-    "SPEAKER":      "desktop speaker on desk, natural lighting",
-    "DESK_LAMP":    "desk lamp on desk, warm lighting",
-    "DESK_SHELF":   "monitor riser shelf on desk, natural lighting",
-    "LAPTOP_STAND": "laptop stand on desk, natural lighting",
-    "DECO":         "desk decoration, natural lighting",
-    "CLOCK":        "desk clock, natural lighting",
+    "KEYBOARD": (
+        "low profile keyboard lying flat on desk, front perspective, "
+        "rectangular keys visible, natural lighting"
+    ),
+    "MOUSE": (
+        "small wireless mouse resting on desk surface, top-front view, "
+        "soft contact shadow, natural lighting"
+    ),
+    "MOUSEPAD": (
+        "flat desk mat mouse pad lying on desk surface, thin rectangular mat, "
+        "natural lighting"
+    ),
+    "MONITOR": (
+        "thin computer monitor with rectangular screen, visible narrow stand, "
+        "standing upright on desk, front view, not a laptop, not a shelf, "
+        "turned off dark screen, natural lighting"
+    ),
+    "SPEAKER": (
+        "small desktop speaker standing on desk, front view, "
+        "compact rectangular speaker, natural lighting"
+    ),
+    "DESK_LAMP": (
+        "modern desk lamp with visible round base, vertical arm and lampshade, "
+        "standing on desk, not a cable, natural lighting"
+    ),
+    "DESK_SHELF": (
+        "monitor riser shelf on desk, horizontal wooden shelf, "
+        "open storage space below, natural lighting"
+    ),
+    "LAPTOP_STAND": (
+        "laptop stand on desk, angled metal stand, natural lighting"
+    ),
+    "DECO": (
+        "small desk decoration object placed on desk surface, "
+        "realistic scale, natural lighting"
+    ),
+    "CLOCK": (
+        "small digital desk clock standing on desk, visible clock face, "
+        "natural lighting"
+    ),
 }
 
 _NEGATIVE_PROMPT = (
@@ -23,6 +53,32 @@ _NEGATIVE_PROMPT = (
     "missing object, invisible, transparent, same as background, "
     "colorful screen, bright screen, screen content, display image, glowing screen"
 )
+
+_CAT_NEGATIVE = {
+    "MONITOR": (
+        "keyboard, laptop, shelf, bookshelf, floating screen, "
+        "screen lying flat, distorted stand, extra keyboard"
+    ),
+    "DESK_LAMP": (
+        "cable only, wire only, floating line, no base, broken lamp, "
+        "thin random curve, snake, cord"
+    ),
+    "MOUSE": (
+        "large object, keyboard, monitor, floating, deformed mouse"
+    ),
+    "KEYBOARD": (
+        "monitor, laptop screen, vertical object, floating keys"
+    ),
+    "MOUSEPAD": (
+        "thick object, monitor, keyboard, floating mat"
+    ),
+    "DESK_SHELF": (
+        "monitor, laptop, items on shelf, picture frame, wall shelf"
+    ),
+    "SPEAKER": (
+        "handle, picture frame, door, arch shape, bracket"
+    ),
+}
 
 
 class ControlNetInpaintProcessor:
@@ -194,13 +250,16 @@ class ControlNetInpaintProcessor:
             "placed on desk surface, drop shadow, realistic product photo, "
             "sharp focus, high detail, photorealistic, 8k"
         )
+        negative_prompt = _NEGATIVE_PROMPT + (
+            ", " + _CAT_NEGATIVE[cat] if cat in _CAT_NEGATIVE else ""
+        )
 
         self.pipe.set_ip_adapter_scale(ip_adapter_scale)
         self.pipe.to(self.device)
 
         pipe_kwargs = dict(
             prompt=prompt,
-            negative_prompt=_NEGATIVE_PROMPT,
+            negative_prompt=negative_prompt,
             image=img_sd,
             mask_image=mask_sd,
             control_image=[depth_sd, canny_sd],

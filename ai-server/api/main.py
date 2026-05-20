@@ -261,12 +261,12 @@ _CATEGORY_DIMS_MM = {
 # 45도 앵글 뷰에서 제품의 높이/너비 비율
 # 수직 제품(모니터·스탠드·램프)은 크고, 수평 제품(키보드·마우스패드)은 작음
 _FRONT_HEIGHT_RATIO = {
-    "MONITOR":      0.50,   # 가로 이미지→512 압축 보정: pw 기준 비율
+    "MONITOR":      0.68,
     "KEYBOARD":     0.22,
-    "MOUSE":        0.90,
-    "MOUSEPAD":     0.30,
-    "SPEAKER":      1.20,
-    "DESK_LAMP":    2.00,
+    "MOUSE":        0.75,
+    "MOUSEPAD":     0.25,
+    "SPEAKER":      1.10,
+    "DESK_LAMP":    1.70,
     "DESK_SHELF":   0.20,
     "LAPTOP_STAND": 0.40,
     "DECO":         0.90,
@@ -503,6 +503,28 @@ def calc_placements_from_available_space(
         fv_ph    = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
         fv_cx    = fv_dx1 + rx * fv_dw
         fv_cy    = fv_dy1 + ry * fv_dh
+
+        # 카테고리별 보정
+        if cat == "MONITOR":
+            # 모니터는 책상 후면에 서 있음 — ry를 후면으로 강제, 폭/높이 보정
+            ry = min(ry, 0.30)
+            fv_pw = int(fv_pw * 1.10)
+            fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MONITOR"])
+            fv_cy = fv_dy1 + ry * fv_dh
+        elif cat == "DESK_LAMP":
+            # 램프는 선처럼 나오지 않도록 최소 폭 확보
+            fv_pw = max(fv_pw, int(fv_dw * 0.10))
+            fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["DESK_LAMP"])
+            if rx < 0.5:
+                rx = max(rx, 0.12)
+            else:
+                rx = min(rx, 0.88)
+            fv_cx = fv_dx1 + rx * fv_dw
+        elif cat == "MOUSE":
+            fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"])
+        elif cat == "MOUSEPAD":
+            fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
+
         x1 = max(0,    int(fv_cx - fv_pw // 2))
         x2 = min(fv_w, x1 + fv_pw)
         # fv_dy2로 cap → 의자 영역 침범 방지
@@ -763,8 +785,12 @@ async def run_generate(req: GenerateRequest):
 
 _REMOVAL_PROMPT = (
     "laptop. laptop computer. notebook computer. monitor. keyboard. mouse. "
-    "mouse pad. mousepad. headset. cup. mug. book. notebook. speaker. "
-    "desk lamp. lamp. cable. pen. pencil. phone. tablet. controller. box. bottle."
+    "mouse pad. mousepad. headset. cup. mug. book. books. book stack. "
+    "notebook. notepad. paper. document. folder. file. binder. "
+    "speaker. desk lamp. lamp. stand lamp. table lamp. desk light. "
+    "cable. pen. pencil. pen holder. pencil cup. stationery. desk organizer. "
+    "phone. tablet. controller. box. bottle. plant. potted plant. "
+    "clock. digital clock. diffuser. perfume bottle. vase."
 )
 
 _FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
@@ -786,6 +812,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
         from datetime import datetime
         _debug_dir = Path("outputs/debug") / datetime.now().strftime("%Y%m%d_%H%M%S")
         _debug_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[Generate] mode={req.mode}")
 
         image = b64_to_image(req.image_base64)
         img_w, img_h = image.size
@@ -803,25 +830,56 @@ def _run_generate(job_id: str, req: GenerateRequest):
         front_detections  = detection.get("detections", [])
         job_store[job_id].num_removed = detection["num_objects"]
 
+        # detection 로그
+        print(f"[Removal] num_objects={detection.get('num_objects')}")
+        for _det in front_detections:
+            print(f"[Removal] label={_det.label}, score={_det.score:.3f}, bbox={_det.box_xyxy}")
+        print(f"[Removal] front_instances={len(front_instances)}")
+
+        # front detection overlay 저장
+        from PIL import ImageDraw as _IDraw
+        _ov = image.copy()
+        _ov_draw = _IDraw.Draw(_ov)
+        for _det in front_detections:
+            _bx1, _by1, _bx2, _by2 = _det.box_xyxy
+            _ov_draw.rectangle([_bx1, _by1, _bx2, _by2], outline=(255, 0, 0), width=3)
+            _ov_draw.text((_bx1 + 4, _by1 + 4), f"{_det.label}:{_det.score:.2f}", fill=(255, 0, 0))
+        _ov.save(_debug_dir / "front_detection_overlay.png")
+
+        # combined remove mask 저장
+        _combined_np = np.zeros((img_h, img_w), dtype=np.uint8)
+        for _mp in front_instances:
+            _arr = np.array(_mp.convert("L"))
+            _combined_np = cv2.bitwise_or(_combined_np, (_arr > 127).astype(np.uint8) * 255)
+        Image.fromarray(_combined_np).save(_debug_dir / "front_remove_mask.png")
+
         # ── mode별 LaMa 제거 정책 ───────────────────────────────────
-        # add: 제거 안 함
-        # own_desk: 감지된 물체 모두 제거 (기본)
-        # replace: 지정 물체만 제거 (현재는 own_desk와 동일, 추후 UI에서 indices 전달)
-        # empty_desk: 모두 제거 (own_desk와 동일)
         if mode == RemoveMode.add:
             masks_to_remove = []
+            print("[Removal] add 모드 — 기존 물체 제거 안 함")
         else:
             masks_to_remove = front_instances
+
+        if mode != RemoveMode.add and len(front_instances) == 0:
+            print("[Removal WARNING] remove mode인데 감지된 제거 대상이 없습니다.")
 
         if masks_to_remove:
             lama = get_lama_processor()
             current = image
-            for mask_pil in masks_to_remove:
-                current = lama.inpaint(image=current, mask=mask_pil)
+
+            # combined mask로 한 번에 제거 (비교용 저장)
+            _combined_mask_pil = Image.fromarray(_combined_np)
+            _cleaned_combined  = lama.inpaint(image=image, mask=_combined_mask_pil)
+            _cleaned_combined.save(_debug_dir / "cleaned_front_combined.png")
+
+            # 실제 제거: combined mask 한 번에 처리 (own_desk/empty_desk)
+            # replace는 추후 개별 처리로 분기 가능
+            current = _cleaned_combined
             torch.cuda.empty_cache()
         else:
             current = image
 
+        current.save(_debug_dir / "cleaned_front.png")
         job_store[job_id].cleaned_image = image_to_b64(current)
 
         # ── Step 2→3: ControlNet 제품 생성 ────────────────────────
@@ -856,7 +914,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
             print(f"  [_run_cn] prod_path={prod_path}")
             try:
                 prod_img = Image.open(prod_path).convert("RGB")
-                prod_img.save(_debug_dir / f"product_{p.image_id}_{p.category}.jpg")
+                _prod_debug_dir = _debug_dir / "products"
+                _prod_debug_dir.mkdir(exist_ok=True)
+                prod_img.save(_prod_debug_dir / f"{p.category}_{p.image_id}.jpg")
 
                 # 이미지 평균 밝기 체크 — 너무 어두우면 IP-Adapter가 색감을 못 읽음
                 brightness = float(np.array(prod_img).mean())
