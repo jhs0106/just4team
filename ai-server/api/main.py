@@ -1528,7 +1528,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 elif cat == "DESK_SHELF":
                     ip_scale = 0.0
                 elif cat == "MONITOR":
-                    ip_scale = 0.10
+                    ip_scale = 0.35
                 elif cat == "SPEAKER":
                     ip_scale = 0.40
                 elif cat == "DESK_LAMP":
