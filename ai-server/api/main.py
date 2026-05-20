@@ -481,6 +481,14 @@ def _front_bbox_for_anchor(
         y2 = int(fv_dy1 + fv_dh * 0.45)
         y1 = y2 - fv_ph
         _y_override = True
+    elif cat == "DESK_SHELF":
+        fv_pw = max(min(int(fv_dw * 0.40), 320), 150)
+        fv_ph = max(int(fv_pw * 0.20), 30)
+        if "monitor_rx" in relation_state:
+            _rx_adj = relation_state["monitor_rx"]
+        y2 = int(fv_dy1 + fv_dh * 0.35)
+        y1 = y2 - fv_ph
+        _y_override = True
     elif cat == "SPEAKER":
         fv_pw = max(fv_pw, 60)
         fv_ph = max(fv_ph, 60)
@@ -659,6 +667,13 @@ def calc_placements_from_available_space(
             x1, y1, x2, y2 = best_cand["region"]
             _src = ("forced_keyboard" if best_cand["region_id"] == -1
                     else "available_space_scoring")
+            _sel_reason = (
+                "forced_keyboard_below_monitor" if _src == "forced_keyboard"
+                else "high_score"               if best_score > 0.5
+                else "positive_score"           if best_score > 0
+                else "zero_score_best_available" if best_score >= -0.01
+                else "low_score_best_available"
+            )
             print(f"  [Score] {cat} rx={best_cand['rx']:.2f} ry={best_cand['ry']:.2f} "
                   f"score={best_score:.2f} region_id={best_cand['region_id']} "
                   f"cand={candidate_count} ov_rej={overlap_reject} ls_rej={low_score_reject} "
@@ -669,6 +684,7 @@ def calc_placements_from_available_space(
                 "score":                round(best_score, 3),
                 "available_region_id":  best_cand["region_id"],
                 "placement_source":     _src,
+                "selected_reason":      _sel_reason,
                 "candidate_count":      candidate_count,
                 "overlap_reject_count": overlap_reject,
                 "low_score_reject_count": low_score_reject,
@@ -691,6 +707,7 @@ def calc_placements_from_available_space(
                 "score":                None,
                 "available_region_id":  None,
                 "placement_source":     "fallback",
+                "selected_reason":      None,
                 "candidate_count":      candidate_count,
                 "overlap_reject_count": overlap_reject,
                 "low_score_reject_count": low_score_reject,
@@ -760,6 +777,15 @@ def score_region_for_product(
         score -= 1.5
     if cat in ("DECO", "CLOCK") and 0.30 <= rx <= 0.70 and ry > 0.40:
         score -= 1.0
+    # DECO는 MOUSE/KEYBOARD 작업 영역 x축 근처 강한 penalty
+    if cat == "DECO":
+        for _rkey in ("mouse_rx", "keyboard_rx"):
+            if _rkey in relation_state:
+                _dx = abs(rx - relation_state[_rkey])
+                if _dx < 0.15:
+                    score -= 2.0
+                elif _dx < 0.28:
+                    score -= 0.8
 
     # 이미 배치된 제품과의 거리 penalty
     for prev in placed_norm:
@@ -1480,6 +1506,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 "width_px":               _it["region"][2] - _it["region"][0],
                 "height_px":              _it["region"][3] - _it["region"][1],
                 "placement_source":       _it.get("placement_source", "fallback"),
+                "selected_reason":        _it.get("selected_reason"),
                 "fallback_reason":        _it.get("fallback_reason"),
                 "candidate_count":        _it.get("candidate_count"),
                 "overlap_reject_count":   _it.get("overlap_reject_count"),
@@ -1498,6 +1525,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 "width_px":               None,
                 "height_px":              None,
                 "placement_source":       "unplaced",
+                "selected_reason":        None,
                 "fallback_reason":        _it.get("fallback_reason"),
                 "candidate_count":        _it.get("candidate_count"),
                 "overlap_reject_count":   _it.get("overlap_reject_count"),
