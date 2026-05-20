@@ -847,7 +847,7 @@ def has_meaningful_alpha(img: Image.Image) -> bool:
 def make_white_bg_transparent(
     img: Image.Image,
     threshold: int = 245,
-    feather: int = 2,
+    feather: int = 4,
 ) -> Image.Image:
     rgba = img.convert("RGBA")
     arr = np.array(rgba)
@@ -879,27 +879,59 @@ def make_white_bg_transparent(
     return Image.fromarray(arr)
 
 
+def _tight_crop_rgba(img: Image.Image, padding: int = 4) -> Image.Image:
+    """alpha 채널 기준 오브젝트 영역만 tight crop — 흰 여백 제거."""
+    alpha = np.array(img.getchannel("A"))
+    rows  = np.any(alpha > 10, axis=1)
+    cols  = np.any(alpha > 10, axis=0)
+    if not rows.any():
+        return img
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    h, w = alpha.shape
+    rmin = max(0, rmin - padding)
+    rmax = min(h - 1, rmax + padding)
+    cmin = max(0, cmin - padding)
+    cmax = min(w - 1, cmax + padding)
+    return img.crop((cmin, rmin, cmax + 1, rmax + 1))
+
+
 def prepare_product_image_for_composite(img: Image.Image) -> Image.Image:
     rgba = img.convert("RGBA")
-    if has_meaningful_alpha(rgba):
-        return rgba
-    return make_white_bg_transparent(rgba)
+    result = rgba if has_meaningful_alpha(rgba) else make_white_bg_transparent(rgba)
+    return _tight_crop_rgba(result)
 
 
 def composite_product_simple(
     base: Image.Image,
     product_img: Image.Image,
     region: tuple,
+    edge_feather: int = 4,
 ) -> Image.Image:
     x1, y1, x2, y2 = region
     target_w = max(1, x2 - x1)
     target_h = max(1, y2 - y1)
 
     prod = prepare_product_image_for_composite(product_img)
-    prod.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+
+    # 비율 유지 리사이즈, 최소 시각 크기 30px 보장
+    scale = min(target_w / max(prod.width, 1), target_h / max(prod.height, 1), 1.0)
+    new_w = max(30, int(prod.width * scale))
+    new_h = max(30, int(prod.height * scale))
+    if (new_w, new_h) != (prod.width, prod.height):
+        prod = prod.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    # alpha 경계 feather — 스티커 경계 완화
+    if edge_feather > 0:
+        alpha_arr = np.array(prod.getchannel("A"))
+        ksize     = edge_feather * 2 + 1
+        alpha_blur = cv2.GaussianBlur(alpha_arr, (ksize, ksize), 0)
+        prod_arr   = np.array(prod)
+        prod_arr[:, :, 3] = alpha_blur
+        prod = Image.fromarray(prod_arr)
 
     px = x1 + (target_w - prod.width) // 2
-    py = y2 - prod.height
+    py = y2 - prod.height  # 하단 기준 정렬
 
     out = base.convert("RGBA")
     out.alpha_composite(prod, (max(0, px), max(0, py)))
@@ -1294,8 +1326,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 prod_img = prod_img.convert("RGB")
 
                 # cv_composite 모드: 전 카테고리 단순 합성
-                # controlnet 모드: MONITOR/KEYBOARD만 단순 합성 (나머지는 ControlNet)
-                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else {"MONITOR", "KEYBOARD"}
+                # controlnet 모드: MONITOR만 CV 합성 (화면/스탠드 보존), 나머지 ControlNet refine
+                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else {"MONITOR"}
                 if cat in _cv_only_set:
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2))
                     num_placed += 1
