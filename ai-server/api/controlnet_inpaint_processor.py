@@ -378,7 +378,7 @@ class ControlNetInpaintProcessor:
         result_crop = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
         output = image.copy()
         final_paste_mask = mask_sd.resize((cw, ch), Image.Resampling.LANCZOS).filter(
-            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=8)
+            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=3)
         )
         output.paste(result_crop, (cx1, cy1), mask=final_paste_mask)
 
