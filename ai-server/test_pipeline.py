@@ -463,8 +463,8 @@ if __name__ == "__main__":
             if phase not in _PHASE_COUNTS:
                 print("phase는 1, 2, 3 중 하나")
             else:
-                CATEGORY_COUNTS.clear()
-                CATEGORY_COUNTS.update(_PHASE_COUNTS[phase])
+                global CATEGORY_COUNTS
+                CATEGORY_COUNTS = dict(_PHASE_COUNTS[phase])
                 print(f"[Phase {phase}] {[k for k,v in CATEGORY_COUNTS.items() if v[1]>0]}")
                 test_generate()
         else:
