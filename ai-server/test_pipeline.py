@@ -439,10 +439,15 @@ def test_generate():
     print(f"\n제거 물체: {result['num_removed']}개")
     print(f"배치 제품: {result['num_placed']}개")
     print(f"소요 시간: {time.time()-t:.1f}s")
-    print(f"결과 위치: {OUT.resolve()}")
-    print(f"  step1_cleaned.png    — LaMa 물체 제거 후")
-    print(f"  step2_composited.png — CV 합성 후 (SD 이전)")
-    print(f"  step3_final.png      — SD img2img + LoRA 후")
+    print(f"\n[결과 파일 — test_results]")
+    print(f"  {OUT}/step1_cleaned.png    — LaMa 물체 제거 후")
+    print(f"  {OUT}/step3_final.png      — 최종 결과")
+    print(f"\n[디버그 파일 — outputs/debug/<timestamp>/]")
+    print(f"  cleaned_front.png          — 제거 후 이미지")
+    print(f"  placement_only_result.png  — bbox 배치 확인")
+    print(f"  cv_composite_result.png    — CV 합성 확인")
+    print(f"  placement_debug.png        — bbox 좌표 시각화")
+    print(f"  products_list.json         — 사용된 제품/좌표 목록")
 
 
 if __name__ == "__main__":

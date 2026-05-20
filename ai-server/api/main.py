@@ -1125,11 +1125,43 @@ def _run_generate(job_id: str, req: GenerateRequest):
         _dbg.save(_debug_dir / "placement_debug.png")
         print(f"[Generate] 배치 시각화 저장: {_debug_dir}/placement_debug.png")
 
+        # ── 항상 저장: placement_only 결과 ──────────────────────────
+        _dbg.save(_debug_dir / "placement_only_result.png")
+
+        # ── 항상 저장: cv_composite 결과 (GPU 불필요, 빠름) ──────────
+        _cv_base = current.copy()
+        for _cv_item in placement_items:
+            _cv_p   = _cv_item["product"]
+            _cv_cat = normalize_category(_cv_p.category)
+            if _cv_p.image_id is None:
+                continue
+            _cv_path = find_product_image(_cv_p.image_id)
+            if _cv_path is None:
+                continue
+            try:
+                _cv_img  = Image.open(_cv_path)
+                _cv_base = composite_product_simple(_cv_base, _cv_img, _cv_item["region"])
+            except Exception:
+                pass
+        _cv_base.save(_debug_dir / "cv_composite_result.png")
+        print(f"[Generate] cv_composite 디버그 저장: {_debug_dir}/cv_composite_result.png")
+
+        # ── 제품 목록 JSON 저장 ──────────────────────────────────────
+        import json as _json
+        _products_info = [
+            {"category": normalize_category(_it["product"].category),
+             "image_id": _it["product"].image_id,
+             "region":   list(_it["region"])}
+            for _it in placement_items
+        ]
+        (_debug_dir / "products_list.json").write_text(
+            _json.dumps(_products_info, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
         gen_mode = getattr(req, "generation_mode", "controlnet")
 
         # ── placement_only 모드: bbox만 그려서 반환 ──────────────────
         if gen_mode == "placement_only":
-            _dbg.save(_debug_dir / "placement_only_result.png")
             job_store[job_id].num_placed  = 0
             job_store[job_id].result_image = image_to_b64(_dbg)
             job_store[job_id].status       = JobStatus.done
