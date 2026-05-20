@@ -419,6 +419,80 @@ def _region_from_detection_center(
 
 
 
+def _sample_points_in_region(region: dict, n: int = 7) -> list[tuple[float, float]]:
+    bx = region["bbox_px"]
+    rx1, ry1 = float(bx["x"]), float(bx["y"])
+    rx2, ry2 = rx1 + float(bx["width"]), ry1 + float(bx["height"])
+    return [
+        (rx1 + (rx2 - rx1) * (gi + 0.5) / n,
+         ry1 + (ry2 - ry1) * (gj + 0.5) / n)
+        for gi in range(n) for gj in range(n)
+    ]
+
+
+def _front_bbox_for_anchor(
+    cat: str, rx: float, ry: float, w_mm: int,
+    fv_dx1: int, fv_dy1: int, fv_dx2: int, fv_dy2: int,
+    fv_dw: int, fv_dh: int, fv_w: int, fv_h: int,
+    desk_width_mm: int | None,
+    relation_state: dict,
+) -> tuple[int, int, int, int] | None:
+    ps     = 0.60 + 0.40 * ry
+    fv_pw  = max(40, min(int(w_mm * fv_dw / (desk_width_mm or 1200) * ps), int(fv_dw * 0.65)))
+    fv_ph  = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
+    min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
+    fv_pw  = max(fv_pw, min_w)
+    fv_ph  = max(fv_ph, min_h)
+    _y_override = False
+    _rx_adj = rx
+
+    if cat == "MONITOR":
+        fv_pw = max(min(int(fv_dw * 0.48), 420), 240)
+        fv_ph = int(fv_pw * 0.60)
+        y2 = int(fv_dy1 + fv_dh * 0.42)
+        y1 = max(int(fv_h * 0.08), y2 - fv_ph)
+        _y_override = True
+    elif cat == "KEYBOARD":
+        fv_pw = max(min(int(fv_dw * 0.38), 360), 220)
+        fv_ph = max(int(fv_pw * 0.20), 45)
+        if "monitor_rx" in relation_state:
+            _rx_adj = relation_state["monitor_rx"]
+        y2 = int(fv_dy1 + fv_dh * 0.62)
+        y1 = y2 - fv_ph
+        _y_override = True
+    elif cat == "DESK_LAMP":
+        fv_pw = max(fv_pw, 90)
+        fv_ph = max(fv_ph, 130)
+        _rx_adj = max(rx, 0.12) if rx < 0.5 else min(rx, 0.88)
+        y2 = int(fv_dy1 + fv_dh * 0.45)
+        y1 = y2 - fv_ph
+        _y_override = True
+    elif cat == "SPEAKER":
+        fv_pw = max(fv_pw, 60)
+        fv_ph = max(fv_ph, 60)
+    elif cat == "DECO":
+        fv_pw = max(fv_pw, 45)
+        fv_ph = max(fv_ph, 45)
+    elif cat == "MOUSE":
+        fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"])
+    elif cat == "MOUSEPAD":
+        fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
+
+    fv_cx = fv_dx1 + _rx_adj * fv_dw
+    x1 = max(0, int(fv_cx - fv_pw // 2))
+    x2 = min(fv_w, x1 + fv_pw)
+    if not _y_override:
+        y2 = min(fv_dy2, int(fv_dy1 + ry * fv_dh))
+        y1 = max(0, y2 - fv_ph)
+    else:
+        y1 = max(0, y1)
+        y2 = min(fv_h, y2)
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
+
+
 def calc_placements_from_available_space(
     front_image: Image.Image,
     top_view_image: Image.Image,
@@ -502,108 +576,84 @@ def calc_placements_from_available_space(
         if normalize_category(p.category) not in _CATEGORY_DIMS_MM:
             print(f"[Placement SKIP] unsupported: {p.category}")
 
-    unused_regions: list  = list(available_regions)
-    relation_state: dict  = {}
-    placed_norm:    list  = []
-    placements:     list  = []
+    relation_state:      dict = {}
+    placed_norm:         list = []
+    placed_front_bboxes: list = []
+    placements:          list = []
 
     for p in sorted_products:
         cat  = normalize_category(p.category)
         w_mm = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
 
-        # 모든 미사용 region에 score 계산 → 최고 점수 선택
-        best_region, best_score, best_rx, best_ry = None, -999.0, 0.5, 0.5
-        for region in unused_regions:
-            tv_cx = region["center_px"]["x"]
-            tv_cy = region["center_px"]["y"]
-            rx = max(0.0, min(1.0, (tv_cx - tv_dx1) / tv_dw))
-            ry = max(0.0, min(1.0, (tv_cy - tv_dy1) / tv_dh))
-            s  = score_region_for_product(cat, rx, ry, placed_norm, relation_state)
-            if s > best_score:
-                best_score, best_region, best_rx, best_ry = s, region, rx, ry
+        best_score      = -999.0
+        best_cand       = None
+        candidate_count = 0
 
-        if best_region is None:
-            print(f"[Placement SKIP] no region for {cat}")
-            continue
-        unused_regions.remove(best_region)
+        for region in available_regions:
+            for anchor_x, anchor_y in _sample_points_in_region(region, n=7):
+                rx = max(0.0, min(1.0, (anchor_x - tv_dx1) / tv_dw))
+                ry = max(0.0, min(1.0, (anchor_y - tv_dy1) / tv_dh))
+                fv_bbox = _front_bbox_for_anchor(
+                    cat, rx, ry, w_mm,
+                    fv_dx1, fv_dy1, fv_dx2, fv_dy2, fv_dw, fv_dh, fv_w, fv_h,
+                    desk_width_mm, relation_state,
+                )
+                if fv_bbox is None:
+                    continue
+                # 이미 배치된 front-view bbox와 overlap 체크
+                if any(bbox_iou(fv_bbox, prev) >= 0.15 for prev in placed_front_bboxes):
+                    continue
+                candidate_count += 1
+                s = score_region_for_product(cat, rx, ry, placed_norm, relation_state)
+                if s < -0.5:
+                    continue
+                if s > best_score:
+                    best_score = s
+                    best_cand  = {"region": fv_bbox, "rx": rx, "ry": ry,
+                                  "region_id": region["region_id"]}
 
-        # front-view bbox 계산 (원근 스케일 포함)
-        ps      = 0.60 + 0.40 * best_ry
-        _raw_pw = w_mm * fv_dw / (desk_width_mm or 1200) * ps
-        fv_pw   = max(40, min(int(_raw_pw), int(fv_dw * 0.65)))
-        fv_ph   = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
-        fv_cx   = fv_dx1 + best_rx * fv_dw
-
-        min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
-        fv_pw = max(fv_pw, min_w)
-        fv_ph = max(fv_ph, min_h)
-
-        _y_override = False
-        if cat == "MONITOR":
-            fv_pw = max(fv_pw, 240)
-            fv_ph = int(fv_pw * 0.65)
-            y2 = int(fv_dy1 + fv_dh * 0.42)
-            y1 = y2 - fv_ph
-            _y_override = True
-        elif cat == "KEYBOARD":
-            fv_pw = max(fv_pw, 190)
-            fv_ph = max(fv_ph, 45)
-            y2 = int(fv_dy1 + fv_dh * 0.62)
-            y1 = y2 - fv_ph
-            _y_override = True
-        elif cat == "DESK_LAMP":
-            fv_pw = max(fv_pw, 90)
-            fv_ph = max(fv_ph, 130)
-            if best_rx < 0.5:
-                best_rx = max(best_rx, 0.12)
-            else:
-                best_rx = min(best_rx, 0.88)
-            fv_cx = fv_dx1 + best_rx * fv_dw
-            y2 = int(fv_dy1 + fv_dh * 0.45)
-            y1 = y2 - fv_ph
-            _y_override = True
-        elif cat == "SPEAKER":
-            fv_pw = max(fv_pw, 60)
-            fv_ph = max(fv_ph, 60)
-        elif cat == "DECO":
-            fv_pw = max(fv_pw, 45)
-            fv_ph = max(fv_ph, 45)
-        elif cat == "MOUSE":
-            fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"])
-        elif cat == "MOUSEPAD":
-            fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
-
-        x1 = max(0, int(fv_cx - fv_pw // 2))
-        x2 = min(fv_w, x1 + fv_pw)
-        if not _y_override:
-            y2 = min(fv_dy2, int(fv_dy1 + best_ry * fv_dh))
-            y1 = max(0, y2 - fv_ph)
-        else:
-            y1 = max(0, y1)
-            y2 = min(fv_h, y2)
-
-        if x2 > x1 and y2 > y1:
-            print(f"  [Score] {cat} rx={best_rx:.2f} ry={best_ry:.2f} "
-                  f"score={best_score:.2f} region_id={best_region['region_id']} "
-                  f"→ fv({x1},{y1},{x2},{y2})")
+        if best_cand:
+            x1, y1, x2, y2 = best_cand["region"]
+            print(f"  [Score] {cat} rx={best_cand['rx']:.2f} ry={best_cand['ry']:.2f} "
+                  f"score={best_score:.2f} region_id={best_cand['region_id']} "
+                  f"candidates={candidate_count} → fv({x1},{y1},{x2},{y2})")
             placements.append({
                 "product":             p,
                 "region":              (x1, y1, x2, y2),
                 "score":               round(best_score, 3),
-                "available_region_id": best_region["region_id"],
+                "available_region_id": best_cand["region_id"],
                 "placement_source":    "available_space_scoring",
+                "candidate_count":     candidate_count,
+                "fallback_reason":     None,
+                "anchor_rx":           round(best_cand["rx"], 3),
+                "anchor_ry":           round(best_cand["ry"], 3),
             })
-            relation_state[f"{cat.lower()}_rx"] = best_rx
-            relation_state[f"{cat.lower()}_ry"] = best_ry
-            placed_norm.append({"rx": best_rx, "ry": best_ry, "cat": cat})
+            placed_front_bboxes.append((x1, y1, x2, y2))
+            relation_state[f"{cat.lower()}_rx"] = best_cand["rx"]
+            relation_state[f"{cat.lower()}_ry"] = best_cand["ry"]
+            placed_norm.append({"rx": best_cand["rx"], "ry": best_cand["ry"], "cat": cat})
+        else:
+            reason = ("no_non_overlapping_candidate" if candidate_count == 0
+                      else "all_candidates_low_score")
+            print(f"  [Score FAIL] {cat} candidates={candidate_count} → {reason}")
+            placements.append({
+                "product":             p,
+                "region":              None,
+                "score":               None,
+                "available_region_id": None,
+                "placement_source":    "fallback",
+                "candidate_count":     candidate_count,
+                "fallback_reason":     reason,
+                "anchor_rx":           None,
+                "anchor_ry":           None,
+            })
 
-    # top-view 디버그 overlay 저장
     if debug_dir is not None:
         try:
             _save_topview_overlays(
                 top_view_image=top_view_image,
                 available_regions=available_regions,
-                placements=placements,
+                placements=[i for i in placements if i.get("region") is not None],
                 placed_norm=placed_norm,
                 tv_dx1=tv_dx1, tv_dy1=tv_dy1, tv_dw=tv_dw, tv_dh=tv_dh,
                 debug_dir=debug_dir,
@@ -1217,12 +1267,13 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 log.error("_run_cn ERROR %s\n%s", msg, traceback.format_exc())
 
         # ── 배치 위치 결정: top-view available space 우선, 없으면 _calc_regions ──
-        placement_items: list[dict] = []
+        placement_items:    list[dict] = []
+        _unplaced_for_json: list[dict] = []
 
         if req.top_view_image_base64:
             print(f"[Generate] desk_width_mm={req.desk_width_mm} desk_depth_mm={req.desk_depth_mm}")
             top_image_for_place = b64_to_image(req.top_view_image_base64)
-            placement_items = calc_placements_from_available_space(
+            _all_space_results = calc_placements_from_available_space(
                 front_image=current,
                 top_view_image=top_image_for_place,
                 products=products,
@@ -1232,34 +1283,51 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 remover=remover,
                 debug_dir=_debug_dir,
             )
-            # available_space 내부 overlap 제거
+
+            # scored (region not None) vs failed 분리
+            _scored_items = [i for i in _all_space_results if i.get("region") is not None]
+            _failed_items = [i for i in _all_space_results if i.get("region") is None]
+            _failed_meta  = {id(i["product"]): i for i in _failed_items}
+
+            # scored 내부 overlap 안전 제거 (grid 단계에서 이미 체크했으나 보험)
             _deduped: list[dict] = []
-            for _item in placement_items:
+            for _item in _scored_items:
                 if all(bbox_iou(_item["region"], _prev["region"]) < 0.25 for _prev in _deduped):
                     _deduped.append(_item)
                 else:
                     print(f"[Placement SKIP] internal overlap: {normalize_category(_item['product'].category)} {_item['region']}")
             placement_items = _deduped
 
-            if placement_items:
-                print(f"[Generate] available_space 배치: {len(placement_items)}개")
-                placed_ids = {id(item["product"]) for item in placement_items}
-                unplaced   = [p for p in products if id(p) not in placed_ids]
-                if unplaced:
-                    desk_bbox_for_fallback = _detect_desk_bbox(current)
-                    fallback_items = _calc_regions(
-                        img_w, img_h, unplaced, desk_bbox_for_fallback, req.desk_width_mm
-                    )
-                    # fallback 추가 시 기존 배치와 overlap 필터
-                    _added = 0
-                    for _fi in fallback_items:
-                        _cat = normalize_category(_fi["product"].category)
-                        if all(bbox_iou(_fi["region"], _prev["region"]) < 0.25 for _prev in placement_items):
-                            placement_items.append(_fi)
-                            _added += 1
-                        else:
-                            print(f"[Placement SKIP] overlap: {_cat} {_fi['region']}")
-                    print(f"[Generate] unplaced {len(unplaced)}개 → fallback {_added}개 추가")
+            # scoring 실패 제품 → _calc_regions fallback
+            _failed_products = [i["product"] for i in _failed_items]
+            if _failed_products:
+                _desk_bbox_fb = _detect_desk_bbox(current)
+                _raw_fallback = _calc_regions(img_w, img_h, _failed_products, _desk_bbox_fb, req.desk_width_mm)
+                _added = 0
+                for _fi in _raw_fallback:
+                    _fi_cat  = normalize_category(_fi["product"].category)
+                    _fi_meta = _failed_meta.get(id(_fi["product"]), {})
+                    _fi.update({
+                        "placement_source":    "fallback",
+                        "fallback_reason":     _fi_meta.get("fallback_reason"),
+                        "candidate_count":     _fi_meta.get("candidate_count", 0),
+                        "score":               None,
+                        "available_region_id": None,
+                        "anchor_rx":           None,
+                        "anchor_ry":           None,
+                    })
+                    if all(bbox_iou(_fi["region"], _prev["region"]) < 0.25 for _prev in placement_items):
+                        placement_items.append(_fi)
+                        _added += 1
+                    else:
+                        print(f"[Placement SKIP] overlap: {_fi_cat} {_fi['region']}")
+                print(f"[Generate] space-fail {len(_failed_products)}개 → fallback {_added}개 추가")
+
+            # scoring+fallback 모두 실패한 제품 → JSON에만 기록
+            _placed_ids = {id(i["product"]) for i in placement_items}
+            _unplaced_for_json = [i for i in _failed_items if id(i["product"]) not in _placed_ids]
+
+            print(f"[Generate] available_space 배치: {len(placement_items)}개")
 
         if not placement_items:
             # fallback: 기존 _calc_regions + DINO 매칭
@@ -1360,11 +1428,31 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 "region":              list(_it["region"]),
                 "width_px":            _it["region"][2] - _it["region"][0],
                 "height_px":           _it["region"][3] - _it["region"][1],
-                "available_region_id": _it.get("available_region_id"),
-                "score":               _it.get("score"),
                 "placement_source":    _it.get("placement_source", "fallback"),
+                "fallback_reason":     _it.get("fallback_reason"),
+                "candidate_count":     _it.get("candidate_count"),
+                "score":               _it.get("score"),
+                "available_region_id": _it.get("available_region_id"),
+                "anchor_rx":           _it.get("anchor_rx"),
+                "anchor_ry":           _it.get("anchor_ry"),
             }
             for _it in placement_items
+        ] + [
+            {
+                "category":            normalize_category(_it["product"].category),
+                "image_id":            _it["product"].image_id,
+                "region":              None,
+                "width_px":            None,
+                "height_px":           None,
+                "placement_source":    "unplaced",
+                "fallback_reason":     _it.get("fallback_reason"),
+                "candidate_count":     _it.get("candidate_count"),
+                "score":               None,
+                "available_region_id": None,
+                "anchor_rx":           None,
+                "anchor_ry":           None,
+            }
+            for _it in _unplaced_for_json
         ]
         (_debug_dir / "products_list.json").write_text(
             _json.dumps(_products_info, indent=2, ensure_ascii=False), encoding="utf-8"
