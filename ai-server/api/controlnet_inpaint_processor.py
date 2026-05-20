@@ -8,7 +8,7 @@ _CAT_PROMPT = {
     "KEYBOARD":     "mechanical keyboard on desk mat, natural lighting, sharp",
     "MOUSE":        "wireless mouse on desk, natural lighting, sharp",
     "MOUSEPAD":     "mouse pad on desk surface, natural lighting",
-    "MONITOR":      "monitor on desk, natural lighting, sharp screen",
+    "MONITOR":      "monitor on desk, turned off screen, dark screen, natural lighting",
     "SPEAKER":      "desktop speaker on desk, natural lighting",
     "DESK_LAMP":    "desk lamp on desk, warm lighting",
     "DESK_SHELF":   "monitor riser shelf on desk, natural lighting",
@@ -20,7 +20,8 @@ _CAT_PROMPT = {
 _NEGATIVE_PROMPT = (
     "blurry, low quality, distorted, watermark, text, person, face, "
     "floating, deformed, ugly, empty desk, bare desk, no product, "
-    "missing object, invisible, transparent, same as background"
+    "missing object, invisible, transparent, same as background, "
+    "colorful screen, bright screen, screen content, display image, glowing screen"
 )
 
 
@@ -177,13 +178,12 @@ class ControlNetInpaintProcessor:
         _white_px = int((np.array(mask_sd) > 127).sum())
         print(f"  [generate_product] {category} white_px={_white_px} crop={cw}x{ch} sd={sd_w}x{sd_h}")
 
-        # 3. depth/canny를 제품 이미지 기준으로 계산
-        #    배경(빈 책상) 기준으로 계산하면 SD가 배경 텍스처를 그림
-        prod_cn  = product_image.resize((sd_w, sd_h), Image.Resampling.LANCZOS).convert("RGB")
-        depth_sd = self._get_depth(prod_cn)
-        canny_sd = self._get_canny(prod_cn)
+        # 3. ControlNet: 책상 crop 기준 depth/canny (배경 구조 유지)
+        #    IP-Adapter가 제품 외형을 담당하므로 ControlNet은 책상 표면 구조만 전달
+        depth_sd = self._get_depth(img_sd)
+        canny_sd = self._get_canny(img_sd)
 
-        # 4. IP-Adapter: 제품 외관 참조
+        # 4. IP-Adapter: 제품 이미지 외형 참조
         prod_ip = product_image.resize((512, 512), Image.Resampling.LANCZOS).convert("RGB")
 
         cat      = category.upper()
@@ -207,7 +207,7 @@ class ControlNetInpaintProcessor:
             ip_adapter_image=prod_ip,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
-            controlnet_conditioning_scale=[controlnet_scale, controlnet_scale * 0.7],
+            controlnet_conditioning_scale=[0.35, 0.20],
             width=sd_w,
             height=sd_h,
         )
@@ -219,10 +219,13 @@ class ControlNetInpaintProcessor:
         self.pipe.to("cpu")
         torch.cuda.empty_cache()
 
-        # 5. 원본 크기로 복원 후 마스크 기반 블렌딩
+        # 5. 원본 크기로 복원 후 soft mask 블렌딩 (사각형 경계 제거)
         result_crop = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
         output = image.copy()
-        output.paste(result_crop, (cx1, cy1), mask=crop_mask.convert("L"))
+        soft_mask = crop_mask.convert("L").filter(
+            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=8)
+        )
+        output.paste(result_crop, (cx1, cy1), mask=soft_mask)
         print(f"  [ControlNet+IP] {cat} 생성 완료 (SD {sd_w}×{sd_h})")
         return output
 

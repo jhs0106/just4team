@@ -548,10 +548,12 @@ def _calc_regions(
     if desk_bbox:
         dx1, dy1, dx2, dy2 = desk_bbox
     else:
-        # 의자가 이미지 하단을 차지하므로 dy2를 68%로 제한
         dx1, dy1 = 0, int(img_h * 0.35)
         dx2, dy2 = img_w, int(img_h * 0.68)
-    # DINO가 의자 포함 전체를 책상으로 인식할 수 있으므로 항상 68%로 cap
+    # 상단 cap: 책상이 이미지 상단 20% 이내에서 시작한다고 감지되면 무시
+    # → 후면 제품(모니터 등)이 벽 영역에 배치되는 것을 방지
+    dy1 = max(dy1, int(img_h * 0.20))
+    # 하단 cap: 의자 영역 침범 방지
     dy2 = min(dy2, int(img_h * 0.68))
 
     DW = dx2 - dx1
@@ -781,6 +783,10 @@ def _build_occupied_mask_from_detection(detection: dict, img_w: int, img_h: int)
 def _run_generate(job_id: str, req: GenerateRequest):
     job_store[job_id].status = JobStatus.running
     try:
+        from datetime import datetime
+        _debug_dir = Path("outputs/debug") / datetime.now().strftime("%Y%m%d_%H%M%S")
+        _debug_dir.mkdir(parents=True, exist_ok=True)
+
         image = b64_to_image(req.image_base64)
         img_w, img_h = image.size
         mode = req.mode  # RemoveMode enum
@@ -847,17 +853,42 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 print(f"  [_run_cn SKIP] {msg}")
                 log.error("_run_cn SKIP %s", msg)
                 return
+            print(f"  [_run_cn] prod_path={prod_path}")
             try:
-                prod_img       = Image.open(prod_path).convert("RGB")
+                prod_img = Image.open(prod_path).convert("RGB")
+                prod_img.save(_debug_dir / f"product_{p.image_id}_{p.category}.jpg")
+
+                # 이미지 평균 밝기 체크 — 너무 어두우면 IP-Adapter가 색감을 못 읽음
+                brightness = float(np.array(prod_img).mean())
+                cat = normalize_category(p.category)
+                print(f"  [_run_cn] {cat} brightness={brightness:.1f}")
+
+                if brightness < 40:
+                    # 거의 검정 이미지 → IP-Adapter 끔, 프롬프트만으로 생성
+                    ip_scale = 0.0
+                    print(f"  [_run_cn] {cat} 이미지 너무 어두움 → IP-Adapter 비활성화")
+                elif cat == "MONITOR":
+                    # 화면에 컨텐츠가 있어서 scale 높이면 화면 내용까지 복사됨
+                    ip_scale = 0.35
+                elif cat == "DESK_SHELF":
+                    # 라이프스타일 사진(모니터+소품 포함)
+                    ip_scale = 0.30
+                elif cat in ("SPEAKER", "DESK_LAMP"):
+                    ip_scale = 0.40
+                elif cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
+                    # 단품 이미지가 명확 → 외형 반영 강화
+                    ip_scale = 0.65
+                else:
+                    ip_scale = 0.50
+
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
-                cat            = normalize_category(p.category)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
-                print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ctx={context_region is not None}")
+                print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ip_scale={ip_scale}")
                 current = cn_proc.generate_product(
                     image=current, mask=mask, product_image=prod_img,
                     category=p.category, style=req.style.value,
                     context_region=context_region,
-                    ip_adapter_scale=0.4,
+                    ip_adapter_scale=ip_scale,
                 )
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
@@ -945,9 +976,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _x1, _y1, _x2, _y2 = _item["region"]
             _draw.rectangle([_x1, _y1, _x2, _y2], outline=(255, 0, 0), width=4)
             _draw.text((_x1 + 4, _y1 + 4), _item["product"].category, fill=(255, 0, 0))
-        Path("outputs/debug").mkdir(parents=True, exist_ok=True)
-        _dbg.save("outputs/debug/placement_debug.png")
-        print("[Generate] 배치 시각화 저장: outputs/debug/placement_debug.png")
+        _dbg.save(_debug_dir / "placement_debug.png")
+        print(f"[Generate] 배치 시각화 저장: {_debug_dir}/placement_debug.png")
 
         for item in placement_items:
             p = item["product"]
