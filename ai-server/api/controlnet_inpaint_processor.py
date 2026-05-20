@@ -392,47 +392,26 @@ class ControlNetInpaintProcessor:
         if self._has_lora:
             pipe_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
-        # Pass 1: 제품 형태 생성
+        # Pass 1: single-pass (pass2는 hallucination 유발 — 비활성화)
         result_sd_pass1 = self.pipe(**pipe_kwargs).images[0]
+        result_sd = result_sd_pass1
 
-        # Pass 2: 배경 integration refine (dilated mask, IP off, low canny)
+        # refine mask: pass2 비활성화 상태에서도 debug/paste용으로 silhouette 확장만
         _refine_mask_arr = np.array(mask_sd)
-        _dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        _dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         _refine_mask_arr = cv2.dilate(_refine_mask_arr, _dil_k)
-        _refine_mask_arr = cv2.GaussianBlur(_refine_mask_arr, (9, 9), 0)
+        _refine_mask_arr = cv2.GaussianBlur(_refine_mask_arr, (5, 5), 0)
         _refine_mask = Image.fromarray(_refine_mask_arr).convert("L")
-
-        _refine_prompt = (
-            f"{lora_token}natural desk surface lighting, soft ambient occlusion, "
-            "consistent desk texture, realistic product integration, "
-            "subtle contact shadow, photorealistic, seamless blending"
-        )
-        _refine_cn_scales = [max(0.04, cn_scales[0] * 0.6), 0.05]
-        self.pipe.set_ip_adapter_scale(0.0)
-        _refine_kwargs = dict(
-            prompt=_refine_prompt,
-            negative_prompt=negative_prompt,
-            image=result_sd_pass1,
-            mask_image=_refine_mask,
-            control_image=[depth_sd, canny_sd],
-            ip_adapter_image=prod_ip,
-            num_inference_steps=20,
-            guidance_scale=6.0,
-            controlnet_conditioning_scale=_refine_cn_scales,
-            width=sd_w,
-            height=sd_h,
-        )
-        if self._has_lora:
-            _refine_kwargs["cross_attention_kwargs"] = {"scale": lora_scale * 0.5}
-        result_sd = self.pipe(**_refine_kwargs).images[0]
 
         self.pipe.to("cpu")
         torch.cuda.empty_cache()
 
-        # 6. 원본 크기 복원: pass2 refine mask 기준 paste (edge blending 활용)
+        # 6. 원본 크기 복원: silhouette mask 기준 paste
         result_crop    = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
         output         = image.copy()
-        final_paste_mask = _refine_mask.resize((cw, ch), Image.Resampling.LANCZOS)
+        final_paste_mask = mask_sd.resize((cw, ch), Image.Resampling.LANCZOS).filter(
+            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=3)
+        )
         output.paste(result_crop, (cx1, cy1), mask=final_paste_mask)
 
         # debug 파일 저장
