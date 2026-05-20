@@ -289,8 +289,16 @@ class ControlNetInpaintProcessor:
 
         _prod_fit = prod_rgba.resize((_fpw, _fph), Image.Resampling.LANCZOS)
 
-        _ppx  = bx1 + (bw - _fpw) // 2   # center x
-        _ppy  = by2 - _fph                # bottom-align y
+        _ppx = bx1 + (bw - _fpw) // 2
+        # contact alignment: alpha object bottom → bbox bottom (not image bottom)
+        _alpha_arr_raw = np.array(prod_rgba.getchannel("A"))
+        _rows_with_alpha = np.where((_alpha_arr_raw > 127).any(axis=1))[0]
+        _alpha_bottom_norm = (_rows_with_alpha[-1] / max(prod_rgba.height - 1, 1)) if len(_rows_with_alpha) > 0 else 1.0
+        _obj_bottom_in_fit = max(1, int(_fph * _alpha_bottom_norm))
+        _ppy = by2 - _obj_bottom_in_fit
+        _applied_contact_shift = _fph - _obj_bottom_in_fit  # image bottom보다 위로 올라간 px
+        print(f"  [contact_align] {cat} alpha_bottom={_alpha_bottom_norm:.3f} obj_bottom_fit={_obj_bottom_in_fit} shift={_applied_contact_shift}")
+
         _pc1x = max(0, _ppx);             _pc2x = min(sd_w, _ppx + _fpw)
         _pc1y = max(0, _ppy);             _pc2y = min(sd_h, _ppy + _fph)
         _src1x = max(0, -_ppx);           _src1y = max(0, -_ppy)
@@ -305,6 +313,23 @@ class ControlNetInpaintProcessor:
             _slice = _prod_fit.crop((_src1x, _src1y, _src2x, _src2y))
             composite_sd.alpha_composite(_slice, (_pc1x, _pc1y))
         composite_sd = composite_sd.convert("RGB")
+
+        # color matching: product 영역 밝기를 desk background에 맞춤 (sticker 느낌 완화)
+        _color_matched_composite_sd = composite_sd.copy()
+        if _pc2x > _pc1x and _pc2y > _pc1y:
+            _bg_region = np.array(img_sd)[max(0, by1):min(sd_h, by2), max(0, bx1):min(sd_w, bx2)]
+            _bg_mean   = float(_bg_region.mean()) if _bg_region.size > 0 else 128.0
+            _comp_arr  = np.array(composite_sd).astype(np.float32)
+            _alpha_sml = np.array(_prod_fit.getchannel("A"))
+            _prod_px_mask = np.zeros((sd_h, sd_w), dtype=bool)
+            _prod_px_mask[_pc1y:_pc2y, _pc1x:_pc2x] = _alpha_sml[_src1y:_src2y, _src1x:_src2x] > 127
+            _prod_mean = float(_comp_arr[_prod_px_mask].mean()) if _prod_px_mask.any() else _bg_mean
+            if _prod_mean > 0 and abs(_prod_mean - _bg_mean) > 15:
+                _ratio = min(max(_bg_mean / _prod_mean, 0.65), 1.35)
+                _comp_arr[_prod_px_mask] = np.clip(_comp_arr[_prod_px_mask] * _ratio, 0, 255)
+                composite_sd = Image.fromarray(_comp_arr.astype(np.uint8))
+                _color_matched_composite_sd = composite_sd.copy()
+                print(f"  [color_match] {cat} bg={_bg_mean:.0f} prod={_prod_mean:.0f} ratio={_ratio:.3f}")
 
         # C. silhouette mask: alpha 있으면 전 카테고리 적용, 없으면 bbox fallback
         _has_alpha = np.array(prod_rgba.getchannel("A")).min() < 250
@@ -329,15 +354,13 @@ class ControlNetInpaintProcessor:
         # 5. IP-Adapter: letterbox 비율 유지 512×512
         prod_ip = _letterbox_512(product_image)
 
-        # 카테고리별 depth/canny 가중치
-        # MONITOR: canny 약하게 → 배경 조명/질감에 섞이도록 (black screen 목적)
-        # KEYBOARD: canny 강하게 → 키 형태 유지 (이제 ControlNet 미통과이지만 예비)
+        # 카테고리별 depth/canny 가중치 (pass1용 — pass2는 자동 감소)
         if cat == "MONITOR":
-            cn_scales = [0.08, 0.20]
+            cn_scales = [0.06, 0.15]
         elif cat == "KEYBOARD":
-            cn_scales = [0.10, 0.25]
+            cn_scales = [0.08, 0.18]
         else:
-            cn_scales = [0.15, 0.28]
+            cn_scales = [0.10, 0.22]
 
         cat_desc = _CAT_PROMPT.get(cat, "product on desk, natural lighting")
         lora_token = "JU_Style, " if self._has_lora else ""
@@ -369,17 +392,47 @@ class ControlNetInpaintProcessor:
         if self._has_lora:
             pipe_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
-        result_sd = self.pipe(**pipe_kwargs).images[0]
+        # Pass 1: 제품 형태 생성
+        result_sd_pass1 = self.pipe(**pipe_kwargs).images[0]
+
+        # Pass 2: 배경 integration refine (dilated mask, IP off, low canny)
+        _refine_mask_arr = np.array(mask_sd)
+        _dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        _refine_mask_arr = cv2.dilate(_refine_mask_arr, _dil_k)
+        _refine_mask_arr = cv2.GaussianBlur(_refine_mask_arr, (9, 9), 0)
+        _refine_mask = Image.fromarray(_refine_mask_arr).convert("L")
+
+        _refine_prompt = (
+            f"{lora_token}natural desk surface lighting, soft ambient occlusion, "
+            "consistent desk texture, realistic product integration, "
+            "subtle contact shadow, photorealistic, seamless blending"
+        )
+        _refine_cn_scales = [max(0.04, cn_scales[0] * 0.6), 0.05]
+        self.pipe.set_ip_adapter_scale(0.0)
+        _refine_kwargs = dict(
+            prompt=_refine_prompt,
+            negative_prompt=negative_prompt,
+            image=result_sd_pass1,
+            mask_image=_refine_mask,
+            control_image=[depth_sd, canny_sd],
+            ip_adapter_image=prod_ip,
+            num_inference_steps=20,
+            guidance_scale=6.0,
+            controlnet_conditioning_scale=_refine_cn_scales,
+            width=sd_w,
+            height=sd_h,
+        )
+        if self._has_lora:
+            _refine_kwargs["cross_attention_kwargs"] = {"scale": lora_scale * 0.5}
+        result_sd = self.pipe(**_refine_kwargs).images[0]
 
         self.pipe.to("cpu")
         torch.cuda.empty_cache()
 
-        # 6. 원본 크기 복원: inpaint에 쓴 mask_sd 기준 final paste (silhouette/bbox 공통)
-        result_crop = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
-        output = image.copy()
-        final_paste_mask = mask_sd.resize((cw, ch), Image.Resampling.LANCZOS).filter(
-            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=3)
-        )
+        # 6. 원본 크기 복원: pass2 refine mask 기준 paste (edge blending 활용)
+        result_crop    = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
+        output         = image.copy()
+        final_paste_mask = _refine_mask.resize((cw, ch), Image.Resampling.LANCZOS)
         output.paste(result_crop, (cx1, cy1), mask=final_paste_mask)
 
         # debug 파일 저장
@@ -388,12 +441,15 @@ class ControlNetInpaintProcessor:
                 _ddir = Path(debug_dir)
                 _ddir.mkdir(parents=True, exist_ok=True)
                 img_sd.save(_ddir / f"{cat}_crop_img.png")
+                _color_matched_composite_sd.save(_ddir / f"{cat}_color_matched_composite_sd.png")
                 composite_sd.save(_ddir / f"{cat}_composite_sd.png")
                 mask_sd.save(_ddir / f"{cat}_mask_sd.png")
+                _refine_mask.save(_ddir / f"{cat}_refine_mask_sd.png")
                 final_paste_mask.save(_ddir / f"{cat}_final_paste_mask.png")
+                result_sd_pass1.save(_ddir / f"{cat}_pass1_result_sd.png")
+                result_sd.save(_ddir / f"{cat}_pass2_refine_sd.png")
                 prod_ip.save(_ddir / f"{cat}_prod_ip.png")
                 _m = debug_meta or {}
-                # actual_composite: 원본 이미지 좌표계로 변환 (target_bbox와 직접 비교 가능)
                 _actual_img_w = int(_fpw * cw / max(sd_w, 1))
                 _actual_img_h = int(_fph * ch / max(sd_h, 1))
                 _dbg_json = {
@@ -417,10 +473,20 @@ class ControlNetInpaintProcessor:
                     "scale_to_bbox":                round(_sc, 4),
                     "category_max_scale":           _cat_max_scale,
                     "mask_type":                    mask_type,
-                    "final_paste_mask_type":        mask_type,
+                    "final_paste_mask_type":        "refine_dilated",
                 }
                 (_ddir / f"{cat}_debug.json").write_text(
                     json.dumps(_dbg_json, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                # contact_info.json (배치 정렬 기준)
+                _contact_info = {
+                    "alpha_bottom_norm":      round(_alpha_bottom_norm, 4),
+                    "alpha_bottom_y_in_fit":  int(_obj_bottom_in_fit),
+                    "placement_contact_y_sd": int(by2),
+                    "applied_contact_shift":  int(_applied_contact_shift),
+                }
+                (_ddir / f"{cat}_contact_info.json").write_text(
+                    json.dumps(_contact_info, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
             except Exception as _de:
                 print(f"  [debug save error] {cat}: {_de}")

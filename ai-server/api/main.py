@@ -984,37 +984,84 @@ def _add_contact_shadow(
     base: Image.Image,
     region: tuple,
     category: str,
+    prod_alpha: Image.Image | None = None,
+    debug_dir: Path | None = None,
 ) -> Image.Image:
-    """제품 하단 contact shadow 합성 (multiply 방식, 카테고리별 타원/직사각형)."""
+    """제품 하단 contact shadow 합성 (multiply 방식, alpha 기반 contact 계산)."""
     x1, y1, x2, y2 = region
     w, h = base.size
     cat = category.upper()
     pw = max(1, x2 - x1)
+    ph = max(1, y2 - y1)
 
+    # alpha contact 계산: 실제 오브젝트 하단 픽셀 위치
+    _contact_y  = min(y2, h - 1)
+    _contact_x1 = x1
+    _contact_x2 = x2
+
+    if prod_alpha is not None and prod_alpha.mode == "RGBA":
+        _sc  = min(pw / max(prod_alpha.width, 1), ph / max(prod_alpha.height, 1))
+        _sw  = max(1, int(prod_alpha.width  * _sc))
+        _sh  = max(1, int(prod_alpha.height * _sc))
+        _psc = prod_alpha.resize((_sw, _sh), Image.Resampling.LANCZOS)
+        _a   = np.array(_psc.getchannel("A"))
+        _px  = x1 + (pw - _sw) // 2
+
+        _rows = np.where((_a > 127).any(axis=1))[0]
+        if len(_rows) > 0:
+            _obj_bot_local = _rows[-1]
+            _contact_y = min(h - 1, (y2 - _sh) + _obj_bot_local)
+            _cols = np.where(_a[_obj_bot_local] > 127)[0]
+            if len(_cols) > 0:
+                _contact_x1 = max(0,  _px + _cols[0])
+                _contact_x2 = min(w,  _px + _cols[-1])
+
+    _cx  = (_contact_x1 + _contact_x2) // 2
+    _cw  = max(1, _contact_x2 - _contact_x1)
     shadow = np.zeros((h, w), dtype=np.float32)
 
     if cat == "MONITOR":
-        cx, cy = (x1 + x2) // 2, min(y2, h - 1)
-        cv2.ellipse(shadow, (cx, cy), (max(pw // 4, 35), 10), 0, 0, 360, 1.0, -1)
+        cv2.ellipse(shadow, (_cx, _contact_y), (max(_cw // 4, 35), 10), 0, 0, 360, 1.0, -1)
         blur_k, strength = 25, 0.38
     elif cat == "KEYBOARD":
-        shadow[max(0, y2 - 6):min(h, y2 + 8), max(0, x1):min(w, x2)] = 1.0
+        shadow[max(0, _contact_y - 6):min(h, _contact_y + 8),
+               max(0, _contact_x1):min(w, _contact_x2)] = 1.0
         blur_k, strength = 19, 0.35
     elif cat == "MOUSE":
-        cx, cy = (x1 + x2) // 2, min(y2, h - 1)
-        cv2.ellipse(shadow, (cx, cy), (max(pw // 2, 20), 9), 0, 0, 360, 1.0, -1)
+        cv2.ellipse(shadow, (_cx, _contact_y), (max(_cw // 2, 20), 9), 0, 0, 360, 1.0, -1)
         blur_k, strength = 19, 0.42
     elif cat == "DESK_LAMP":
-        cx, cy = (x1 + x2) // 2, min(y2, h - 1)
-        cv2.ellipse(shadow, (cx, cy), (max(pw // 2, 22), 12), 0, 0, 360, 1.0, -1)
+        cv2.ellipse(shadow, (_cx, _contact_y), (max(_cw // 2, 22), 12), 0, 0, 360, 1.0, -1)
         blur_k, strength = 21, 0.28
     else:
-        cx, cy = (x1 + x2) // 2, min(y2, h - 1)
-        cv2.ellipse(shadow, (cx, cy), (max(pw // 3, 18), 9), 0, 0, 360, 1.0, -1)
+        cv2.ellipse(shadow, (_cx, _contact_y), (max(_cw // 3, 18), 9), 0, 0, 360, 1.0, -1)
         blur_k, strength = 17, 0.25
 
     shadow = cv2.GaussianBlur(shadow, (blur_k, blur_k), 0)
     shadow = np.clip(shadow * strength, 0.0, 0.45)
+
+    if debug_dir is not None:
+        try:
+            import json as _j
+            _dd = Path(debug_dir)
+            _dd.mkdir(parents=True, exist_ok=True)
+            Image.fromarray((shadow * 255).astype(np.uint8)).save(_dd / f"{cat}_shadow_mask.png")
+            _shadow_info = {
+                "contact_y":      int(_contact_y),
+                "contact_x1":     int(_contact_x1),
+                "contact_x2":     int(_contact_x2),
+                "shadow_strength": float(strength),
+                "shadow_bbox":    [int(_contact_x1),
+                                   max(0,  int(_contact_y) - blur_k),
+                                   int(_contact_x2),
+                                   min(h,  int(_contact_y) + blur_k)],
+            }
+            _ci_path = _dd / f"{cat}_contact_info.json"
+            _existing = _j.loads(_ci_path.read_text(encoding="utf-8")) if _ci_path.exists() else {}
+            _existing.update(_shadow_info)
+            _ci_path.write_text(_j.dumps(_existing, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
     arr = np.array(base.convert("RGB")).astype(np.float32)
     arr = arr * (1.0 - shadow[:, :, np.newaxis])
@@ -1448,7 +1495,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if cat in _cv_only_set:
                     _record("cv_composite", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
-                    current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
+                    current = _add_contact_shadow(current, (x1, y1, x2, y2), cat,
+                                                  prod_alpha=prod_alpha,
+                                                  debug_dir=_debug_dir / "products")
                     num_placed += 1
                     print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
                     return
@@ -1459,7 +1508,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if _ar_invalid and not req.fixed_test_products:
                     _record("cv_fallback_aspect_invalid", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
-                    current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
+                    current = _add_contact_shadow(current, (x1, y1, x2, y2), cat,
+                                                  prod_alpha=prod_alpha,
+                                                  debug_dir=_debug_dir / "products")
                     num_placed += 1
                     print(f"  [_run_cn CV fallback] {cat} (num_placed={num_placed})")
                     return
@@ -1526,7 +1577,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         _gen_results[cat]["fit_fill_ratio_h"] = round(_act_h / max(_tgt_h, 1), 3) if _act_h else None
                     except Exception:
                         pass
-                current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
+                current = _add_contact_shadow(current, (x1, y1, x2, y2), cat,
+                                              prod_alpha=prod_alpha,
+                                              debug_dir=_debug_dir / "products")
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
             except Exception as _e:
