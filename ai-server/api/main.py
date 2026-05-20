@@ -1330,46 +1330,41 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if _alpha_cov > 0.80:
                     print(f"  [WARNING] {cat} id={p.image_id}: alpha_coverage={_alpha_cov:.2f}"
                           f" — multi-object/lifestyle 이미지 의심, 단품 이미지로 교체 필요")
-                prod_img = prod_img.convert("RGB")
 
                 # cv_composite 모드: 전 카테고리 단순 합성
-                # controlnet 모드: MONITOR만 CV 합성 (화면/스탠드 보존), 나머지 ControlNet refine
-                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else {"MONITOR"}
+                # controlnet 모드: MONITOR + KEYBOARD → CV 합성 (D: flat product, CV로 충분)
+                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else {"MONITOR", "KEYBOARD"}
                 if cat in _cv_only_set:
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2))
                     num_placed += 1
                     print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
                     return
 
-                # 이미지 평균 밝기 체크 — 너무 어두우면 IP-Adapter가 색감을 못 읽음
-                brightness = float(np.array(prod_img).mean())
+                # 밝기 체크: 어두운 이미지 → IP-Adapter 색감 인식 불가 → 비활성화
+                _prod_rgb    = prod_img.convert("RGB")
+                brightness   = float(np.array(_prod_rgb).mean())
                 print(f"  [_run_cn] {cat} brightness={brightness:.1f}")
 
                 if brightness < 40:
-                    # 거의 검정 이미지 → IP-Adapter 끔, 프롬프트만으로 생성
                     ip_scale = 0.0
                     print(f"  [_run_cn] {cat} 이미지 너무 어두움 → IP-Adapter 비활성화")
-                elif cat == "MONITOR":
-                    # 제품 이미지에 화면 내용물이 있어 IP-Adapter 완전 비활성화, 프롬프트만으로 생성
-                    ip_scale = 0.0
                 elif cat == "DESK_SHELF":
-                    # 라이프스타일 사진(모니터+소품 포함) → IP-Adapter 끔, 프롬프트만으로 생성
                     ip_scale = 0.0
                 elif cat == "SPEAKER":
                     ip_scale = 0.40
                 elif cat == "DESK_LAMP":
-                    ip_scale = 0.20  # 얇은 스틱형 제품 이미지 복사 방지
-                elif cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
-                    # 단품 이미지가 명확 → 외형 반영 강화
+                    ip_scale = 0.20
+                elif cat in ("MOUSE", "MOUSEPAD"):
                     ip_scale = 0.65
                 else:
                     ip_scale = 0.50
 
+                # prod_alpha(RGBA) 전달 — generate_product 내부에서 letterbox/silhouette 처리
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
                 print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ip_scale={ip_scale}")
                 current = cn_proc.generate_product(
-                    image=current, mask=mask, product_image=prod_img,
+                    image=current, mask=mask, product_image=prod_alpha,
                     category=p.category, style=req.style.value,
                     context_region=context_region,
                     ip_adapter_scale=ip_scale,
@@ -1620,7 +1615,12 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         # ── controlnet 모드 ──────────────────────────────────────────
         for item in placement_items:
-            p = item["product"]
+            p   = item["product"]
+            cat = normalize_category(p.category)
+            # E: DECO score <= 0 → 배치 기록은 유지하되 생성 skip
+            if cat == "DECO" and (item.get("score") is None or item.get("score", 0) <= 0):
+                print(f"  [Generate SKIP] DECO score={item.get('score')} ≤ 0 → 생성 제외")
+                continue
             print(f"  [Generate] 처리: {p.category} image_id={p.image_id} region={item['region']}")
             _run_cn(p, *item["region"])
 

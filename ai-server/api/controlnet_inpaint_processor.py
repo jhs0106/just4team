@@ -4,6 +4,23 @@ import cv2
 from pathlib import Path
 from PIL import Image
 
+
+def _letterbox_512(img: Image.Image) -> Image.Image:
+    # RGBA: transparent 영역을 중립 회색으로 합성 후 비율 유지 패딩
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (210, 210, 210))
+        bg.paste(img.convert("RGB"), mask=img.getchannel("A"))
+        img_rgb = bg
+    else:
+        img_rgb = img.convert("RGB")
+    w, h = img_rgb.size
+    scale = min(512 / max(w, 1), 512 / max(h, 1))
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    resized = img_rgb.resize((nw, nh), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (512, 512), (210, 210, 210))
+    canvas.paste(resized, ((512 - nw) // 2, (512 - nh) // 2))
+    return canvas
+
 _CAT_PROMPT = {
     "KEYBOARD": (
         "low profile keyboard lying flat on desk, front perspective, "
@@ -202,47 +219,85 @@ class ControlNetInpaintProcessor:
         ip_adapter_scale: float = 0.4,
         controlnet_scale: float = 0.6,
         lora_scale: float = 0.65,
-        context_region: tuple | None = None,  # 하위 호환, 내부 미사용
+        context_region: tuple | None = None,
     ) -> Image.Image:
         iw, ih = image.size
+        cat = category.upper()
 
-        # 1. 마스크에서 제품 bbox 추출
+        # 1. placement bbox from mask
         mask_np = np.array(mask.convert("L"))
         ys, xs  = np.where(mask_np > 127)
         if len(xs) == 0:
-            print(f"  [generate_product] {category} mask 비어있음 — skip")
+            print(f"  [generate_product] {cat} mask 비어있음 — skip")
             return image
 
         x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
         pw, ph = max(1, x2 - x1), max(1, y2 - y1)
 
-        # 2. context crop: 제품 bbox 주변 50% 패딩 (너무 크면 SD 해상도에서 마스크 비율이 너무 작아짐)
-        pad = min(int(max(pw, ph) * 0.5), 160)
-        cx1 = max(0, x1 - pad)
-        cy1 = max(0, y1 - pad)
-        cx2 = min(iw, x2 + pad)
-        cy2 = min(ih, y2 + pad)
+        # 2. context crop with padding
+        pad    = min(int(max(pw, ph) * 0.5), 160)
+        cx1    = max(0, x1 - pad); cy1 = max(0, y1 - pad)
+        cx2    = min(iw, x2 + pad); cy2 = min(ih, y2 + pad)
+        cw, ch = cx2 - cx1, cy2 - cy1
 
         crop_img  = image.crop((cx1, cy1, cx2, cy2))
         crop_mask = mask.crop((cx1, cy1, cx2, cy2))
-        cw, ch    = crop_img.size
         sd_w, sd_h = self._sd_size(cw, ch)
 
-        img_sd  = crop_img.resize((sd_w, sd_h), Image.Resampling.LANCZOS).convert("RGB")
-        mask_sd = crop_mask.resize((sd_w, sd_h), Image.Resampling.NEAREST).convert("L")
+        img_sd   = crop_img.resize((sd_w, sd_h), Image.Resampling.LANCZOS).convert("RGB")
+        mask_sd  = crop_mask.resize((sd_w, sd_h), Image.Resampling.NEAREST).convert("L")
+
+        # product bbox in SD coords (relative to crop origin)
+        sx = sd_w / max(cw, 1); sy = sd_h / max(ch, 1)
+        bx1 = int((x1 - cx1) * sx); bx2 = int((x2 - cx1) * sx)
+        by1 = int((y1 - cy1) * sy); by2 = int((y2 - cy1) * sy)
+        bw  = max(1, bx2 - bx1);   bh  = max(1, by2 - by1)
 
         _white_px = int((np.array(mask_sd) > 127).sum())
-        print(f"  [generate_product] {category} white_px={_white_px} crop={cw}x{ch} sd={sd_w}x{sd_h}")
+        print(f"  [generate_product] {cat} white_px={_white_px} crop={cw}x{ch} sd={sd_w}x{sd_h}")
 
-        # 3. ControlNet: 책상 crop 기준 depth/canny (배경 구조 유지)
-        #    IP-Adapter가 제품 외형을 담당하므로 ControlNet은 책상 표면 구조만 전달
+        # 3. product RGBA — accept RGBA (tight-cropped) or RGB
+        prod_rgba = product_image if product_image.mode == "RGBA" else product_image.convert("RGBA")
+
+        # fit product into SD placement bbox (bottom-aligned, aspect-ratio preserved)
+        _sc  = min(bw / max(prod_rgba.width, 1), bh / max(prod_rgba.height, 1), 1.0)
+        _fpw = max(8, int(prod_rgba.width * _sc))
+        _fph = max(8, int(prod_rgba.height * _sc))
+        _prod_fit = prod_rgba.resize((_fpw, _fph), Image.Resampling.LANCZOS)
+
+        _ppx  = bx1 + (bw - _fpw) // 2   # center x
+        _ppy  = by2 - _fph                # bottom-align y
+        _pc1x = max(0, _ppx);             _pc2x = min(sd_w, _ppx + _fpw)
+        _pc1y = max(0, _ppy);             _pc2y = min(sd_h, _ppy + _fph)
+        _src1x = max(0, -_ppx);           _src1y = max(0, -_ppy)
+        _src2x = _src1x + (_pc2x - _pc1x); _src2y = _src1y + (_pc2y - _pc1y)
+
+        # B. CV composite 선행: img_sd에 제품 합성 → canny가 제품 엣지를 인식
+        composite_sd = img_sd.copy().convert("RGBA")
+        if _pc2x > _pc1x and _pc2y > _pc1y:
+            _slice = _prod_fit.crop((_src1x, _src1y, _src2x, _src2y))
+            composite_sd.alpha_composite(_slice, (_pc1x, _pc1y))
+        composite_sd = composite_sd.convert("RGB")
+
+        # C. 실루엣 mask: 비직사각형 제품은 alpha mask → dilate+blur (사각형 background 파괴 방지)
+        _use_silhouette = cat in {"MOUSE", "SPEAKER", "DESK_LAMP", "CLOCK", "DECO"}
+        if _use_silhouette and _pc2x > _pc1x and _pc2y > _pc1y:
+            _sil = np.zeros((sd_h, sd_w), dtype=np.uint8)
+            _alpha_slice = np.array(_prod_fit.getchannel("A"))[_src1y:_src2y, _src1x:_src2x]
+            _sil[_pc1y:_pc2y, _pc1x:_pc2x] = _alpha_slice
+            _k   = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            _sil = cv2.dilate(_sil, _k)
+            _sil = cv2.GaussianBlur(_sil, (7, 7), 0)
+            mask_sd = Image.fromarray(_sil).convert("L")
+            print(f"  [generate_product] {cat} silhouette mask 적용")
+
+        # 4. ControlNet: depth=빈 배경(책상 구조), canny=composite(제품 엣지) — B
         depth_sd = self._get_depth(img_sd)
-        canny_sd = self._get_canny(img_sd)
+        canny_sd = self._get_canny(composite_sd)
 
-        # 4. IP-Adapter: 제품 이미지 외형 참조
-        prod_ip = product_image.resize((512, 512), Image.Resampling.LANCZOS).convert("RGB")
+        # 5. IP-Adapter: letterbox 비율 유지 512×512 — A
+        prod_ip = _letterbox_512(product_image)
 
-        cat      = category.upper()
         cat_desc = _CAT_PROMPT.get(cat, "product on desk, natural lighting")
         lora_token = "JU_Style, " if self._has_lora else ""
         prompt   = (
@@ -278,7 +333,7 @@ class ControlNetInpaintProcessor:
         self.pipe.to("cpu")
         torch.cuda.empty_cache()
 
-        # 5. 원본 크기로 복원 후 soft mask 블렌딩 (사각형 경계 제거)
+        # 6. 원본 크기로 복원 후 soft mask 블렌딩
         result_crop = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
         output = image.copy()
         soft_mask = crop_mask.convert("L").filter(
