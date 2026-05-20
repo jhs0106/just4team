@@ -299,6 +299,20 @@ _MIN_FRONT_SIZE = {
     "CLOCK":     (55, 40),
 }
 
+# 카테고리 쌍별 허용 IoU 상한 — 이 값 이상이면 overlap으로 거부
+_OVERLAP_TOLERANCE: dict = {
+    frozenset({"MONITOR",  "KEYBOARD"}):   0.35,  # 키보드가 모니터 하단과 살짝 겹쳐도 허용
+    frozenset({"MONITOR",  "DESK_SHELF"}): 0.30,
+    frozenset({"KEYBOARD", "MOUSEPAD"}):   0.50,  # 키보드가 마우스패드 위에 놓임
+    frozenset({"MOUSE",    "MOUSEPAD"}):   0.60,  # 마우스가 마우스패드 위에 놓임
+}
+_DEFAULT_OVERLAP_THR = 0.10
+
+
+def _overlap_threshold(cat_a: str, cat_b: str) -> float:
+    return _OVERLAP_TOLERANCE.get(frozenset({cat_a, cat_b}), _DEFAULT_OVERLAP_THR)
+
+
 # 45도 앵글 뷰에서 제품의 높이/너비 비율
 # 수직 제품(모니터·스탠드·램프)은 크고, 수평 제품(키보드·마우스패드)은 작음
 _FRONT_HEIGHT_RATIO = {
@@ -576,18 +590,20 @@ def calc_placements_from_available_space(
         if normalize_category(p.category) not in _CATEGORY_DIMS_MM:
             print(f"[Placement SKIP] unsupported: {p.category}")
 
-    relation_state:      dict = {}
-    placed_norm:         list = []
-    placed_front_bboxes: list = []
-    placements:          list = []
+    relation_state:     dict = {}
+    placed_norm:        list = []
+    placed_front_items: list = []  # {region, cat} — 카테고리별 overlap 임계값 적용용
+    placements:         list = []
 
     for p in sorted_products:
         cat  = normalize_category(p.category)
         w_mm = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
 
-        best_score      = -999.0
-        best_cand       = None
-        candidate_count = 0
+        best_score       = -999.0
+        best_cand        = None
+        candidate_count  = 0
+        overlap_reject   = 0
+        low_score_reject = 0
 
         for region in available_regions:
             for anchor_x, anchor_y in _sample_points_in_region(region, n=7):
@@ -600,52 +616,87 @@ def calc_placements_from_available_space(
                 )
                 if fv_bbox is None:
                     continue
-                # 이미 배치된 front-view bbox와 overlap 체크
-                if any(bbox_iou(fv_bbox, prev) >= 0.15 for prev in placed_front_bboxes):
+                # 카테고리 쌍별 허용 IoU 상한으로 overlap 체크
+                _rej = any(
+                    bbox_iou(fv_bbox, prev["region"]) >= _overlap_threshold(cat, prev["cat"])
+                    for prev in placed_front_items
+                )
+                if _rej:
+                    overlap_reject += 1
                     continue
                 candidate_count += 1
                 s = score_region_for_product(cat, rx, ry, placed_norm, relation_state)
                 if s < -0.5:
+                    low_score_reject += 1
                     continue
                 if s > best_score:
                     best_score = s
                     best_cand  = {"region": fv_bbox, "rx": rx, "ry": ry,
                                   "region_id": region["region_id"]}
 
+        # KEYBOARD 강제 후보: scoring 실패 시 monitor 하단 위치에 강제 생성
+        if cat == "KEYBOARD" and best_cand is None:
+            _forced_rx = relation_state.get("monitor_rx", 0.50)
+            for _fry in [0.65, 0.70, 0.60, 0.75, 0.55]:
+                _fb = _front_bbox_for_anchor(
+                    cat, _forced_rx, _fry, w_mm,
+                    fv_dx1, fv_dy1, fv_dx2, fv_dy2, fv_dw, fv_dh, fv_w, fv_h,
+                    desk_width_mm, relation_state,
+                )
+                if _fb is None:
+                    continue
+                # MONITOR와는 overlap 허용, 나머지와는 엄격히
+                _non_mon = [i for i in placed_front_items if i["cat"] != "MONITOR"]
+                if any(bbox_iou(_fb, i["region"]) >= _DEFAULT_OVERLAP_THR for i in _non_mon):
+                    continue
+                _fs = score_region_for_product(cat, _forced_rx, _fry, placed_norm, relation_state)
+                best_score = max(_fs, -0.49)  # 강제 후보는 score 하한 보장
+                best_cand  = {"region": _fb, "rx": _forced_rx, "ry": _fry, "region_id": -1}
+                print(f"  [KEYBOARD forced] rx={_forced_rx:.2f} ry={_fry:.2f} → {_fb}")
+                break
+
         if best_cand:
             x1, y1, x2, y2 = best_cand["region"]
+            _src = ("forced_keyboard" if best_cand["region_id"] == -1
+                    else "available_space_scoring")
             print(f"  [Score] {cat} rx={best_cand['rx']:.2f} ry={best_cand['ry']:.2f} "
                   f"score={best_score:.2f} region_id={best_cand['region_id']} "
-                  f"candidates={candidate_count} → fv({x1},{y1},{x2},{y2})")
+                  f"cand={candidate_count} ov_rej={overlap_reject} ls_rej={low_score_reject} "
+                  f"→ fv({x1},{y1},{x2},{y2})")
             placements.append({
-                "product":             p,
-                "region":              (x1, y1, x2, y2),
-                "score":               round(best_score, 3),
-                "available_region_id": best_cand["region_id"],
-                "placement_source":    "available_space_scoring",
-                "candidate_count":     candidate_count,
-                "fallback_reason":     None,
-                "anchor_rx":           round(best_cand["rx"], 3),
-                "anchor_ry":           round(best_cand["ry"], 3),
+                "product":              p,
+                "region":               (x1, y1, x2, y2),
+                "score":                round(best_score, 3),
+                "available_region_id":  best_cand["region_id"],
+                "placement_source":     _src,
+                "candidate_count":      candidate_count,
+                "overlap_reject_count": overlap_reject,
+                "low_score_reject_count": low_score_reject,
+                "fallback_reason":      None,
+                "anchor_rx":            round(best_cand["rx"], 3),
+                "anchor_ry":            round(best_cand["ry"], 3),
             })
-            placed_front_bboxes.append((x1, y1, x2, y2))
+            placed_front_items.append({"region": (x1, y1, x2, y2), "cat": cat})
             relation_state[f"{cat.lower()}_rx"] = best_cand["rx"]
             relation_state[f"{cat.lower()}_ry"] = best_cand["ry"]
             placed_norm.append({"rx": best_cand["rx"], "ry": best_cand["ry"], "cat": cat})
         else:
             reason = ("no_non_overlapping_candidate" if candidate_count == 0
                       else "all_candidates_low_score")
-            print(f"  [Score FAIL] {cat} candidates={candidate_count} → {reason}")
+            print(f"  [Score FAIL] {cat} cand={candidate_count} "
+                  f"ov_rej={overlap_reject} ls_rej={low_score_reject} → {reason}")
             placements.append({
-                "product":             p,
-                "region":              None,
-                "score":               None,
-                "available_region_id": None,
-                "placement_source":    "fallback",
-                "candidate_count":     candidate_count,
-                "fallback_reason":     reason,
-                "anchor_rx":           None,
-                "anchor_ry":           None,
+                "product":              p,
+                "region":               None,
+                "score":                None,
+                "available_region_id":  None,
+                "placement_source":     "fallback",
+                "candidate_count":      candidate_count,
+                "overlap_reject_count": overlap_reject,
+                "low_score_reject_count": low_score_reject,
+                "fallback_reason":      reason,
+                "anchor_rx":            None,
+                "anchor_ry":            None,
             })
 
     if debug_dir is not None:
@@ -1423,34 +1474,38 @@ def _run_generate(job_id: str, req: GenerateRequest):
         import json as _json
         _products_info = [
             {
-                "category":            normalize_category(_it["product"].category),
-                "image_id":            _it["product"].image_id,
-                "region":              list(_it["region"]),
-                "width_px":            _it["region"][2] - _it["region"][0],
-                "height_px":           _it["region"][3] - _it["region"][1],
-                "placement_source":    _it.get("placement_source", "fallback"),
-                "fallback_reason":     _it.get("fallback_reason"),
-                "candidate_count":     _it.get("candidate_count"),
-                "score":               _it.get("score"),
-                "available_region_id": _it.get("available_region_id"),
-                "anchor_rx":           _it.get("anchor_rx"),
-                "anchor_ry":           _it.get("anchor_ry"),
+                "category":               normalize_category(_it["product"].category),
+                "image_id":               _it["product"].image_id,
+                "region":                 list(_it["region"]),
+                "width_px":               _it["region"][2] - _it["region"][0],
+                "height_px":              _it["region"][3] - _it["region"][1],
+                "placement_source":       _it.get("placement_source", "fallback"),
+                "fallback_reason":        _it.get("fallback_reason"),
+                "candidate_count":        _it.get("candidate_count"),
+                "overlap_reject_count":   _it.get("overlap_reject_count"),
+                "low_score_reject_count": _it.get("low_score_reject_count"),
+                "score":                  _it.get("score"),
+                "available_region_id":    _it.get("available_region_id"),
+                "anchor_rx":              _it.get("anchor_rx"),
+                "anchor_ry":              _it.get("anchor_ry"),
             }
             for _it in placement_items
         ] + [
             {
-                "category":            normalize_category(_it["product"].category),
-                "image_id":            _it["product"].image_id,
-                "region":              None,
-                "width_px":            None,
-                "height_px":           None,
-                "placement_source":    "unplaced",
-                "fallback_reason":     _it.get("fallback_reason"),
-                "candidate_count":     _it.get("candidate_count"),
-                "score":               None,
-                "available_region_id": None,
-                "anchor_rx":           None,
-                "anchor_ry":           None,
+                "category":               normalize_category(_it["product"].category),
+                "image_id":               _it["product"].image_id,
+                "region":                 None,
+                "width_px":               None,
+                "height_px":              None,
+                "placement_source":       "unplaced",
+                "fallback_reason":        _it.get("fallback_reason"),
+                "candidate_count":        _it.get("candidate_count"),
+                "overlap_reject_count":   _it.get("overlap_reject_count"),
+                "low_score_reject_count": _it.get("low_score_reject_count"),
+                "score":                  None,
+                "available_region_id":    None,
+                "anchor_rx":              None,
+                "anchor_ry":              None,
             }
             for _it in _unplaced_for_json
         ]
