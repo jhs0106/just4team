@@ -18,9 +18,9 @@ _CAT_PROMPT = {
         "natural lighting"
     ),
     "MONITOR": (
-        "thin computer monitor with rectangular screen, visible narrow stand, "
-        "standing upright on desk, front view, not a laptop, not a shelf, "
-        "turned off dark screen, natural lighting"
+        "computer monitor with completely black screen powered off, "
+        "thin bezel, narrow silver stand, standing on wooden desk, "
+        "front view, blank dark screen, no display content, natural lighting"
     ),
     "SPEAKER": (
         "small desktop speaker standing on desk, front view, "
@@ -57,7 +57,9 @@ _NEGATIVE_PROMPT = (
 _CAT_NEGATIVE = {
     "MONITOR": (
         "keyboard, laptop, shelf, bookshelf, floating screen, "
-        "screen lying flat, distorted stand, extra keyboard"
+        "screen lying flat, distorted stand, extra keyboard, "
+        "wallpaper, sunset, landscape, photo on screen, image on screen, "
+        "glowing screen, lit screen, colorful display, bright screen, neon, sky, clouds"
     ),
     "DESK_LAMP": (
         "cable only, wire only, floating line, no base, broken lamp, "

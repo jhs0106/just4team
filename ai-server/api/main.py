@@ -931,8 +931,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     # 제품 이미지에 화면 내용물이 있어 IP-Adapter 완전 비활성화, 프롬프트만으로 생성
                     ip_scale = 0.0
                 elif cat == "DESK_SHELF":
-                    # 라이프스타일 사진(모니터+소품 포함)
-                    ip_scale = 0.30
+                    # 라이프스타일 사진(모니터+소품 포함) → IP-Adapter 끔, 프롬프트만으로 생성
+                    ip_scale = 0.0
                 elif cat in ("SPEAKER", "DESK_LAMP"):
                     ip_scale = 0.40
                 elif cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
