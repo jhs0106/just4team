@@ -222,7 +222,6 @@ def load_product_catalog() -> dict:
 
 
 def enrich_products_from_csv(products: list) -> list:
-    """req.products에 width_mm/depth_mm가 없으면 products.csv 값으로 보완. category도 정규화."""
     catalog = load_product_catalog()
     enriched = []
     for p in products:
@@ -920,7 +919,6 @@ def make_white_bg_transparent(
 
 
 def _tight_crop_rgba(img: Image.Image, padding: int = 4) -> Image.Image:
-    """alpha 채널 기준 오브젝트 영역만 tight crop — 흰 여백 제거."""
     alpha = np.array(img.getchannel("A"))
     rows  = np.any(alpha > 10, axis=1)
     cols  = np.any(alpha > 10, axis=0)
@@ -987,7 +985,6 @@ def _add_contact_shadow(
     prod_alpha: Image.Image | None = None,
     debug_dir: Path | None = None,
 ) -> Image.Image:
-    """제품 하단 contact shadow 합성 (multiply 방식, alpha 기반 contact 계산)."""
     x1, y1, x2, y2 = region
     w, h = base.size
     cat = category.upper()
@@ -1330,7 +1327,6 @@ _BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", 
 
 
 def _build_occupied_mask_from_detection(detection: dict, img_w: int, img_h: int) -> np.ndarray:
-    """detect_with_prompt 결과 → numpy occupied_mask (uint8)."""
     occupied = np.zeros((img_h, img_w), dtype=np.uint8)
     for mask_pil in detection.get("individual_masks", []):
         arr = np.array(mask_pil.convert("L"))
@@ -1504,9 +1500,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
                     return
 
-                # AR invalid 처리:
-                #   fixed_test 모드 → generate_product() 강제 (debug JSON 생성)
-                #   일반 모드      → CV fallback
+                # AR invalid: fixed_test → generate_product 강제, 일반 → CV fallback
                 if _ar_invalid and not req.fixed_test_products:
                     _record("cv_fallback_aspect_invalid", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)

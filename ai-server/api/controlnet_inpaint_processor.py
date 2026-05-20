@@ -187,10 +187,8 @@ class ControlNetInpaintProcessor:
 
         self.pipe = pipe
 
-    # 전처리
-
     def _sd_size(self, w: int, h: int) -> tuple[int, int]:
-        """비율 유지 SD 호환 크기 (8의 배수). 긴 변 기준 512, 짧은 변 min 256."""
+        # 비율 유지 SD 호환 크기: 긴 변=512, 짧은 변≥256, 8의 배수
         if w >= h:
             sw = 512
             sh = max(256, round(h * 512 / w / 8) * 8)
@@ -216,8 +214,6 @@ class ControlNetInpaintProcessor:
     def _get_canny(self, image: Image.Image, low: int = 80, high: int = 180) -> Image.Image:
         arr = cv2.Canny(np.array(image.convert("L")), low, high)
         return Image.fromarray(np.stack([arr] * 3, axis=-1))
-
-    # 메인
 
     def generate_product(
         self,
