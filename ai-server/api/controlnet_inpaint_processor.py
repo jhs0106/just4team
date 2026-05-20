@@ -282,7 +282,7 @@ class ControlNetInpaintProcessor:
         result_crop = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
         output = image.copy()
         soft_mask = crop_mask.convert("L").filter(
-            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=8)
+            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=3)
         )
         output.paste(result_crop, (cx1, cy1), mask=soft_mask)
         print(f"  [ControlNet+IP] {cat} 생성 완료 (SD {sd_w}×{sd_h})")

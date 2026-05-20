@@ -928,8 +928,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     ip_scale = 0.0
                     print(f"  [_run_cn] {cat} 이미지 너무 어두움 → IP-Adapter 비활성화")
                 elif cat == "MONITOR":
-                    # 화면에 컨텐츠가 있어서 scale 높이면 화면 내용까지 복사됨
-                    ip_scale = 0.35
+                    # 제품 이미지에 화면 내용물이 있어 IP-Adapter 완전 비활성화, 프롬프트만으로 생성
+                    ip_scale = 0.0
                 elif cat == "DESK_SHELF":
                     # 라이프스타일 사진(모니터+소품 포함)
                     ip_scale = 0.30
