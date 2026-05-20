@@ -1391,11 +1391,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"  [WARNING] {cat} id={p.image_id}: alpha_coverage={_alpha_cov:.2f}"
                           f" — multi-object/lifestyle 이미지 의심, 단품 이미지로 교체 필요")
 
-                # cv_composite 모드: 전 카테고리 단순 합성
-                # controlnet 모드: MONITOR + KEYBOARD → CV 합성 (D: flat product, CV로 충분)
-                # controlnet 모드에서 MONITOR는 ControlNet 통과 (black screen 생성)
-                # KEYBOARD만 CV-only 유지 (flat 제품이라 CV로 충분)
-                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else {"KEYBOARD"}
+                # cv_composite 모드: _CV_ONLY_CATS 전체 CV 합성
+                # controlnet 모드: 전 카테고리 generate_product() 경유
+                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else set()
                 if cat in _cv_only_set:
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2))
                     current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
