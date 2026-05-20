@@ -1320,6 +1320,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
             print(f"  [_run_cn] prod_path={prod_path}")
             try:
                 prod_img = Image.open(prod_path)
+                _raw_w, _raw_h = prod_img.size
                 cat = normalize_category(p.category)
                 _prod_debug_dir = _debug_dir / "products"
                 _prod_debug_dir.mkdir(exist_ok=True)
@@ -1363,11 +1364,21 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
                 print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ip_scale={ip_scale}")
+                _debug_meta = {
+                    "image_id":      p.image_id,
+                    "width_mm":      getattr(p, "width_mm", None),
+                    "depth_mm":      getattr(p, "depth_mm", None),
+                    "height_mm":     getattr(p, "height_mm", None),
+                    "product_raw_w": _raw_w,
+                    "product_raw_h": _raw_h,
+                }
                 current = cn_proc.generate_product(
                     image=current, mask=mask, product_image=prod_alpha,
                     category=p.category, style=req.style.value,
                     context_region=context_region,
                     ip_adapter_scale=ip_scale,
+                    debug_dir=_debug_dir / "products",
+                    debug_meta=_debug_meta,
                 )
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
