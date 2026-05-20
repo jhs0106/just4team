@@ -1380,28 +1380,45 @@ def _run_generate(job_id: str, req: GenerateRequest):
             print(f"  product: category={_p.category}, image_id={_p.image_id}, "
                   f"size={_p.width_mm}x{_p.depth_mm}")
 
-        num_placed = 0
-        run_errors: list[str] = []
+        num_placed   = 0
+        run_errors:  list[str]  = []
+        gen_mode     = getattr(req, "generation_mode", "controlnet")
+        _gen_results: dict[str, dict] = {}   # cat → per-product generation 결과
 
         def _run_cn(p, x1, y1, x2, y2):
             nonlocal current, num_placed, run_errors
+            cat      = normalize_category(p.category)
+            _ar_range = _CAT_ASPECT_VALID.get(cat)
+
+            def _record(route, status, error=None, ar=None, ar_valid=None, debug_json=False):
+                _gen_results[cat] = {
+                    "generation_route":   route,
+                    "generation_status":  status,
+                    "generation_error":   error,
+                    "aspect_ratio":       round(ar, 3) if ar is not None else None,
+                    "aspect_ratio_valid": ar_valid,
+                    "aspect_ratio_range": list(_ar_range) if _ar_range else None,
+                    "debug_json_created": debug_json,
+                }
+
             if p.image_id is None:
-                msg = f"{p.category}: image_id=None"
+                msg = f"{cat}: image_id=None"
                 run_errors.append(msg)
                 print(f"  [_run_cn SKIP] {msg}")
+                _record("skipped_no_image", "skipped", error=msg)
                 return
             prod_path = find_product_image(p.image_id)
             if prod_path is None:
-                msg = f"{p.category}: product image not found for image_id={p.image_id}"
+                msg = f"{cat}: product image not found for image_id={p.image_id}"
                 run_errors.append(msg)
                 print(f"  [_run_cn SKIP] {msg}")
                 log.error("_run_cn SKIP %s", msg)
+                _record("skipped_no_file", "skipped", error=msg)
                 return
             print(f"  [_run_cn] prod_path={prod_path}")
             try:
                 prod_img = Image.open(prod_path)
                 _raw_w, _raw_h = prod_img.size
-                cat = normalize_category(p.category)
                 _prod_debug_dir = _debug_dir / "products"
                 _prod_debug_dir.mkdir(exist_ok=True)
                 prod_img.save(_prod_debug_dir / f"{cat}_{p.image_id}_raw.png")
@@ -1412,32 +1429,44 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"  [WARNING] {cat} id={p.image_id}: alpha_coverage={_alpha_cov:.2f}"
                           f" — multi-object/lifestyle 이미지 의심, 단품 이미지로 교체 필요")
 
-                # aspect ratio validation: 범위 밖이면 warning + CV fallback (skip 아님)
-                _ar = prod_alpha.width / max(prod_alpha.height, 1)
-                _ar_range = _CAT_ASPECT_VALID.get(cat)
+                # aspect ratio 계산
+                _ar       = prod_alpha.width / max(prod_alpha.height, 1)
+                _ar_valid = True
                 _ar_invalid = False
                 if _ar_range is not None:
                     _ar_min, _ar_max = _ar_range
                     if not (_ar_min <= _ar <= _ar_max):
-                        msg = (f"{cat} id={p.image_id}: aspect_ratio={_ar:.2f} "
-                               f"out of [{_ar_min}, {_ar_max}] — 잘못된 제품 이미지, CV fallback")
-                        run_errors.append(msg)
-                        print(f"  [WARNING] {msg}")
                         _ar_invalid = True
+                        _ar_valid   = False
+                        msg = (f"{cat} id={p.image_id}: aspect_ratio={_ar:.2f} "
+                               f"out of [{_ar_min}, {_ar_max}]")
+                        run_errors.append(msg)
+                        print(f"  [WARNING] {msg} — {'강제 generate_product (fixed_test)' if req.fixed_test_products else 'CV fallback'}")
 
-                # cv_composite 모드: _CV_ONLY_CATS 전체 CV 합성
-                # controlnet 모드: 전 카테고리 generate_product() 경유 (단, ar invalid → CV fallback)
+                # cv_composite 모드 전용 CV path
                 _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else set()
-                if cat in _cv_only_set or _ar_invalid:
+                if cat in _cv_only_set:
+                    _record("cv_composite", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
                     current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
                     num_placed += 1
                     print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
                     return
 
-                # 밝기 체크: 어두운 이미지 → IP-Adapter 색감 인식 불가 → 비활성화
-                _prod_rgb    = prod_img.convert("RGB")
-                brightness   = float(np.array(_prod_rgb).mean())
+                # AR invalid 처리:
+                #   fixed_test 모드 → generate_product() 강제 (debug JSON 생성)
+                #   일반 모드      → CV fallback
+                if _ar_invalid and not req.fixed_test_products:
+                    _record("cv_fallback_aspect_invalid", "done", ar=_ar, ar_valid=_ar_valid)
+                    current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
+                    current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
+                    num_placed += 1
+                    print(f"  [_run_cn CV fallback] {cat} (num_placed={num_placed})")
+                    return
+
+                # ── generate_product() (controlnet) ──────────────────────
+                _prod_rgb  = prod_img.convert("RGB")
+                brightness = float(np.array(_prod_rgb).mean())
                 print(f"  [_run_cn] {cat} brightness={brightness:.1f}")
 
                 if brightness < 40:
@@ -1446,7 +1475,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 elif cat == "DESK_SHELF":
                     ip_scale = 0.0
                 elif cat == "MONITOR":
-                    ip_scale = 0.10  # black screen 모드: 화면 콘텐츠 최소화
+                    ip_scale = 0.10
                 elif cat == "SPEAKER":
                     ip_scale = 0.40
                 elif cat == "DESK_LAMP":
@@ -1456,18 +1485,21 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 else:
                     ip_scale = 0.50
 
-                # prod_alpha(RGBA) 전달 — generate_product 내부에서 letterbox/silhouette 처리
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
-                print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ip_scale={ip_scale}")
+                _route = "controlnet_forced_invalid_ar" if _ar_invalid else "controlnet"
+                print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ip_scale={ip_scale} route={_route}")
                 _debug_meta = {
-                    "image_id":      p.image_id,
-                    "width_mm":      getattr(p, "width_mm", None),
-                    "depth_mm":      getattr(p, "depth_mm", None),
-                    "height_mm":     getattr(p, "height_mm", None),
-                    "product_raw_w": _raw_w,
-                    "product_raw_h": _raw_h,
+                    "image_id":           p.image_id,
+                    "width_mm":           getattr(p, "width_mm", None),
+                    "depth_mm":           getattr(p, "depth_mm", None),
+                    "height_mm":          getattr(p, "height_mm", None),
+                    "product_raw_w":      _raw_w,
+                    "product_raw_h":      _raw_h,
+                    "aspect_ratio":       round(_ar, 3),
+                    "aspect_ratio_valid": _ar_valid,
                 }
+                _record(_route, "done", ar=_ar, ar_valid=_ar_valid)
                 current = cn_proc.generate_product(
                     image=current, mask=mask, product_image=prod_alpha,
                     category=p.category, style=req.style.value,
@@ -1476,6 +1508,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     debug_dir=_debug_dir / "products",
                     debug_meta=_debug_meta,
                 )
+                _dbg_json_path = _debug_dir / "products" / f"{cat}_debug.json"
+                _gen_results[cat]["debug_json_created"] = _dbg_json_path.exists()
                 current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
@@ -1484,6 +1518,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 run_errors.append(msg)
                 print(f"  [_run_cn ERROR] {msg}")
                 log.error("_run_cn ERROR %s\n%s", msg, traceback.format_exc())
+                if cat not in _gen_results:
+                    _record("skipped_error", "failed", error=str(_e))
+                else:
+                    _gen_results[cat]["generation_status"] = "failed"
+                    _gen_results[cat]["generation_error"]  = str(_e)
 
         # ── 배치 위치 결정: top-view available space 우선, 없으면 _calc_regions ──
         placement_items:    list[dict] = []
@@ -1695,8 +1734,6 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _json.dumps(_products_list_meta, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        gen_mode = getattr(req, "generation_mode", "controlnet")
-
         # ── placement_only 모드: bbox만 그려서 반환 ──────────────────
         if gen_mode == "placement_only":
             job_store[job_id].num_placed  = 0
@@ -1745,6 +1782,21 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _run_cn(p, *item["region"])
 
         print(f"[Generate] num_placed={num_placed}")
+
+        # ── products_list.json에 generation_route 병합 후 덮어쓰기 ────
+        for _entry in _products_info:
+            _gr = _gen_results.get(_entry.get("category"), {})
+            _entry["generation_route"]   = _gr.get("generation_route")
+            _entry["generation_status"]  = _gr.get("generation_status")
+            _entry["generation_error"]   = _gr.get("generation_error")
+            _entry["aspect_ratio"]       = _gr.get("aspect_ratio")
+            _entry["aspect_ratio_valid"] = _gr.get("aspect_ratio_valid")
+            _entry["aspect_ratio_range"] = _gr.get("aspect_ratio_range")
+            _entry["debug_json_created"] = _gr.get("debug_json_created", False)
+        (_debug_dir / "products_list.json").write_text(
+            _json.dumps(_products_list_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(f"[Generate] products_list.json 업데이트 (generation_route 포함)")
 
         # ── 실제 생성 0개면 failed ──────────────────────────────────
         if num_placed == 0:
