@@ -60,17 +60,15 @@ CATEGORY_PROMPT = {
 }
 
 # 카테고리별 수량 규칙 (min, max)
-# 1차: MONITOR+KEYBOARD+MOUSE / 2차: SPEAKER (0,1) / 3차: DESK_LAMP (1,1)
-CATEGORY_COUNTS = {
-    "KEYBOARD":     (1, 1),
-    "MOUSE":        (1, 1),
-    "MONITOR":      (1, 1),
-    "DESK_LAMP":    (0, 0),
-    "SPEAKER":      (0, 0),
-    "DESK_SHELF":   (0, 0),
-    "LAPTOP_STAND": (0, 0),
-    "DECO":         (0, 0),
+_PHASE_COUNTS = {
+    1: {"KEYBOARD": (1,1), "MOUSE": (1,1), "MONITOR": (1,1),
+        "DESK_LAMP": (0,0), "SPEAKER": (0,0), "DESK_SHELF": (0,0), "LAPTOP_STAND": (0,0), "DECO": (0,0)},
+    2: {"KEYBOARD": (1,1), "MOUSE": (1,1), "MONITOR": (1,1),
+        "DESK_LAMP": (0,0), "SPEAKER": (0,1), "DESK_SHELF": (0,0), "LAPTOP_STAND": (0,0), "DECO": (0,0)},
+    3: {"KEYBOARD": (1,1), "MOUSE": (1,1), "MONITOR": (1,1),
+        "DESK_LAMP": (1,1), "SPEAKER": (0,1), "DESK_SHELF": (0,0), "LAPTOP_STAND": (0,0), "DECO": (0,0)},
 }
+CATEGORY_COUNTS = _PHASE_COUNTS[1]
 
 STYLE_KEYWORDS = {
     "white": ["화이트", "white", "흰"],
@@ -461,8 +459,15 @@ if __name__ == "__main__":
         elif cmd == "place":
             step2_place_products(to_b64(DESK_IMAGE))
         elif cmd == "generate":
-            test_generate()
+            phase = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+            if phase not in _PHASE_COUNTS:
+                print("phase는 1, 2, 3 중 하나")
+            else:
+                CATEGORY_COUNTS.clear()
+                CATEGORY_COUNTS.update(_PHASE_COUNTS[phase])
+                print(f"[Phase {phase}] {[k for k,v in CATEGORY_COUNTS.items() if v[1]>0]}")
+                test_generate()
         else:
-            print("사용법: python test_pipeline.py [remove|place|generate]")
+            print("사용법: python test_pipeline.py [remove|place|generate [1|2|3]]")
     else:
         main()
