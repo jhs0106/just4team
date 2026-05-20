@@ -1021,7 +1021,9 @@ def _add_contact_shadow(
     shadow = np.zeros((h, w), dtype=np.float32)
 
     if cat == "MONITOR":
-        cv2.ellipse(shadow, (_cx, _contact_y), (max(_cw // 4, 35), 10), 0, 0, 360, 1.0, -1)
+        # 스탠드 alpha contact가 좁아도 shadow는 최소 bbox 너비의 20% 보장
+        _shadow_half_w = max(_cw // 4, pw // 5, 40)
+        cv2.ellipse(shadow, (_cx, _contact_y), (_shadow_half_w, 10), 0, 0, 360, 1.0, -1)
         blur_k, strength = 25, 0.38
     elif cat == "KEYBOARD":
         shadow[max(0, _contact_y - 6):min(h, _contact_y + 8),

@@ -279,13 +279,10 @@ class ControlNetInpaintProcessor:
         _fpw = max(8, int(prod_rgba.width * _sc))
         _fph = max(8, int(prod_rgba.height * _sc))
 
-        # KEYBOARD/MOUSE: 가로 폭이 bbox 80% 미만이면 horizontal stretch
+        # KEYBOARD만 horizontal stretch 허용 (MOUSE는 비율 유지 필수)
         if cat == "KEYBOARD" and _fpw < bw * 0.80:
             _fpw = max(8, int(bw * 0.90))
             print(f"  [KEYBOARD stretch] width → {_fpw} (bbox_w={bw:.0f}, fill={_fpw/max(bw,1):.2f})")
-        elif cat == "MOUSE" and _fpw < bw * 0.80:
-            _fpw = max(8, int(bw * 0.90))
-            print(f"  [MOUSE stretch] width → {_fpw} (bbox_w={bw:.0f}, fill={_fpw/max(bw,1):.2f})")
 
         _prod_fit = prod_rgba.resize((_fpw, _fph), Image.Resampling.LANCZOS)
 
@@ -314,22 +311,8 @@ class ControlNetInpaintProcessor:
             composite_sd.alpha_composite(_slice, (_pc1x, _pc1y))
         composite_sd = composite_sd.convert("RGB")
 
-        # color matching: product 영역 밝기를 desk background에 맞춤 (sticker 느낌 완화)
+        # color matching: composite_sd는 canny 생성용 — 적용 안 함 (canny edge 품질 간섭)
         _color_matched_composite_sd = composite_sd.copy()
-        if _pc2x > _pc1x and _pc2y > _pc1y:
-            _bg_region = np.array(img_sd)[max(0, by1):min(sd_h, by2), max(0, bx1):min(sd_w, bx2)]
-            _bg_mean   = float(_bg_region.mean()) if _bg_region.size > 0 else 128.0
-            _comp_arr  = np.array(composite_sd).astype(np.float32)
-            _alpha_sml = np.array(_prod_fit.getchannel("A"))
-            _prod_px_mask = np.zeros((sd_h, sd_w), dtype=bool)
-            _prod_px_mask[_pc1y:_pc2y, _pc1x:_pc2x] = _alpha_sml[_src1y:_src2y, _src1x:_src2x] > 127
-            _prod_mean = float(_comp_arr[_prod_px_mask].mean()) if _prod_px_mask.any() else _bg_mean
-            if _prod_mean > 0 and abs(_prod_mean - _bg_mean) > 15:
-                _ratio = min(max(_bg_mean / _prod_mean, 0.65), 1.35)
-                _comp_arr[_prod_px_mask] = np.clip(_comp_arr[_prod_px_mask] * _ratio, 0, 255)
-                composite_sd = Image.fromarray(_comp_arr.astype(np.uint8))
-                _color_matched_composite_sd = composite_sd.copy()
-                print(f"  [color_match] {cat} bg={_bg_mean:.0f} prod={_prod_mean:.0f} ratio={_ratio:.3f}")
 
         # C. silhouette mask: alpha 있으면 전 카테고리 적용, 없으면 bbox fallback
         _has_alpha = np.array(prod_rgba.getchannel("A")).min() < 250
@@ -354,9 +337,9 @@ class ControlNetInpaintProcessor:
         # 5. IP-Adapter: letterbox 비율 유지 512×512
         prod_ip = _letterbox_512(product_image)
 
-        # 카테고리별 depth/canny 가중치 (pass1용 — pass2는 자동 감소)
+        # 카테고리별 depth/canny 가중치
         if cat == "MONITOR":
-            cn_scales = [0.06, 0.15]
+            cn_scales = [0.08, 0.20]   # 복구: 0.06/0.15는 형태 흐트러짐 발생
         elif cat == "KEYBOARD":
             cn_scales = [0.08, 0.18]
         else:
@@ -420,13 +403,12 @@ class ControlNetInpaintProcessor:
                 _ddir = Path(debug_dir)
                 _ddir.mkdir(parents=True, exist_ok=True)
                 img_sd.save(_ddir / f"{cat}_crop_img.png")
-                _color_matched_composite_sd.save(_ddir / f"{cat}_color_matched_composite_sd.png")
                 composite_sd.save(_ddir / f"{cat}_composite_sd.png")
                 mask_sd.save(_ddir / f"{cat}_mask_sd.png")
                 _refine_mask.save(_ddir / f"{cat}_refine_mask_sd.png")
                 final_paste_mask.save(_ddir / f"{cat}_final_paste_mask.png")
                 result_sd_pass1.save(_ddir / f"{cat}_pass1_result_sd.png")
-                result_sd.save(_ddir / f"{cat}_pass2_refine_sd.png")
+                # pass2 비활성화 — pass1 결과가 final
                 prod_ip.save(_ddir / f"{cat}_prod_ip.png")
                 _m = debug_meta or {}
                 _actual_img_w = int(_fpw * cw / max(sd_w, 1))
@@ -452,12 +434,13 @@ class ControlNetInpaintProcessor:
                     "scale_to_bbox":                round(_sc, 4),
                     "category_max_scale":           _cat_max_scale,
                     "mask_type":                    mask_type,
-                    "final_paste_mask_type":        "refine_dilated",
+                    "final_paste_mask_type":        "silhouette_blur_r3",
+                    "pass2_enabled":                False,
                 }
                 (_ddir / f"{cat}_debug.json").write_text(
                     json.dumps(_dbg_json, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
-                # contact_info.json (배치 정렬 기준)
+                # contact_info.json (배치 정렬 기준 — shadow 정보는 _add_contact_shadow에서 merge)
                 _contact_info = {
                     "alpha_bottom_norm":      round(_alpha_bottom_norm, 4),
                     "alpha_bottom_y_in_fit":  int(_obj_bottom_in_fit),
