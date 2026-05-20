@@ -293,11 +293,17 @@ _PREFERRED_POS = {
 _MIN_FRONT_SIZE = {
     "MONITOR":   (220, 150),
     "KEYBOARD":  (180, 45),
-    "MOUSE":     (45, 30),
+    "MOUSE":     (60, 45),
     "SPEAKER":   (55, 55),
     "DESK_LAMP": (80, 120),
     "DECO":      (45, 45),
     "CLOCK":     (55, 40),
+}
+
+# scoring으로 선택된 anchor → front-view bbox 변환 시 카테고리별 y 보정 (px)
+_CONTACT_Y_OFFSET = {
+    "KEYBOARD": 32,
+    "MOUSE":    20,
 }
 
 # 카테고리 쌍별 허용 IoU 상한 — 이 값 이상이면 overlap으로 거부
@@ -465,16 +471,22 @@ def _front_bbox_for_anchor(
     if cat == "MONITOR":
         fv_pw = max(min(int(fv_dw * 0.48), 420), 240)
         fv_ph = int(fv_pw * 0.60)
-        y2 = int(fv_dy1 + fv_dh * 0.42)
-        y1 = max(int(fv_h * 0.08), y2 - fv_ph)
+        # contact point: stand/base가 책상 뒷면(back line)에 닿는 위치
+        _monitor_contact_y = int(fv_dy1 + fv_dh * 0.28)
+        y2 = _monitor_contact_y
+        y1 = max(int(fv_h * 0.05), y2 - fv_ph)
+        relation_state["monitor_contact_y"] = y2
         _y_override = True
     elif cat == "KEYBOARD":
         fv_pw = max(min(int(fv_dw * 0.38), 360), 220)
         fv_ph = max(int(fv_pw * 0.20), 45)
         if "monitor_rx" in relation_state:
             _rx_adj = relation_state["monitor_rx"]
-        y2 = int(fv_dy1 + fv_dh * 0.62)
+        # 사용자 쪽으로 +32px 내려서 모니터 바로 아래 붙는 현상 완화
+        _kb_base_y = int(fv_dy1 + fv_dh * 0.62) + _CONTACT_Y_OFFSET["KEYBOARD"]
+        y2 = min(_kb_base_y, int(fv_dy2 - 15))
         y1 = y2 - fv_ph
+        relation_state["keyboard_y2"] = y2  # MOUSE y 정렬용
         _y_override = True
     elif cat == "DESK_LAMP":
         fv_pw = max(fv_pw, 90)
@@ -498,7 +510,13 @@ def _front_bbox_for_anchor(
         fv_pw = max(fv_pw, 45)
         fv_ph = max(fv_ph, 45)
     elif cat == "MOUSE":
-        fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"])
+        fv_pw = max(fv_pw, 60)
+        fv_ph = max(int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"]), 45)
+        # keyboard y2 기준으로 정렬 (+20px), chair 영역 침범 방지
+        _mouse_base_y = relation_state.get("keyboard_y2", int(fv_dy1 + fv_dh * 0.62))
+        y2 = min(_mouse_base_y + _CONTACT_Y_OFFSET["MOUSE"], int(fv_dy2 - 15))
+        y1 = y2 - fv_ph
+        _y_override = True
     elif cat == "MOUSEPAD":
         fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
 
@@ -941,6 +959,47 @@ def composite_product_simple(
     return out.convert("RGB")
 
 
+def _add_contact_shadow(
+    base: Image.Image,
+    region: tuple,
+    category: str,
+) -> Image.Image:
+    """제품 하단 contact shadow 합성 (multiply 방식, 카테고리별 타원/직사각형)."""
+    x1, y1, x2, y2 = region
+    w, h = base.size
+    cat = category.upper()
+    pw = max(1, x2 - x1)
+
+    shadow = np.zeros((h, w), dtype=np.float32)
+
+    if cat == "MONITOR":
+        cx, cy = (x1 + x2) // 2, min(y2, h - 1)
+        cv2.ellipse(shadow, (cx, cy), (max(pw // 4, 35), 10), 0, 0, 360, 1.0, -1)
+        blur_k, strength = 25, 0.30
+    elif cat == "KEYBOARD":
+        shadow[max(0, y2 - 6):min(h, y2 + 8), max(0, x1):min(w, x2)] = 1.0
+        blur_k, strength = 19, 0.28
+    elif cat == "MOUSE":
+        cx, cy = (x1 + x2) // 2, min(y2, h - 1)
+        cv2.ellipse(shadow, (cx, cy), (max(pw // 2, 20), 9), 0, 0, 360, 1.0, -1)
+        blur_k, strength = 19, 0.32
+    elif cat == "DESK_LAMP":
+        cx, cy = (x1 + x2) // 2, min(y2, h - 1)
+        cv2.ellipse(shadow, (cx, cy), (max(pw // 2, 22), 12), 0, 0, 360, 1.0, -1)
+        blur_k, strength = 21, 0.28
+    else:
+        cx, cy = (x1 + x2) // 2, min(y2, h - 1)
+        cv2.ellipse(shadow, (cx, cy), (max(pw // 3, 18), 9), 0, 0, 360, 1.0, -1)
+        blur_k, strength = 17, 0.25
+
+    shadow = cv2.GaussianBlur(shadow, (blur_k, blur_k), 0)
+    shadow = np.clip(shadow * strength, 0.0, 0.45)
+
+    arr = np.array(base.convert("RGB")).astype(np.float32)
+    arr = arr * (1.0 - shadow[:, :, np.newaxis])
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
 def _detect_desk_bbox(image: Image.Image) -> tuple | None:
     # DINO로 책상 영역 감지. 실패 시 None → _calc_regions fallback 사용
     import numpy as np
@@ -1334,9 +1393,12 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
                 # cv_composite 모드: 전 카테고리 단순 합성
                 # controlnet 모드: MONITOR + KEYBOARD → CV 합성 (D: flat product, CV로 충분)
-                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else {"MONITOR", "KEYBOARD"}
+                # controlnet 모드에서 MONITOR는 ControlNet 통과 (black screen 생성)
+                # KEYBOARD만 CV-only 유지 (flat 제품이라 CV로 충분)
+                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else {"KEYBOARD"}
                 if cat in _cv_only_set:
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2))
+                    current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
                     num_placed += 1
                     print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
                     return
@@ -1351,6 +1413,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"  [_run_cn] {cat} 이미지 너무 어두움 → IP-Adapter 비활성화")
                 elif cat == "DESK_SHELF":
                     ip_scale = 0.0
+                elif cat == "MONITOR":
+                    ip_scale = 0.10  # black screen 모드: 화면 콘텐츠 최소화
                 elif cat == "SPEAKER":
                     ip_scale = 0.40
                 elif cat == "DESK_LAMP":
@@ -1380,6 +1444,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     debug_dir=_debug_dir / "products",
                     debug_meta=_debug_meta,
                 )
+                current = _add_contact_shadow(current, (x1, y1, x2, y2), cat)
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
             except Exception as _e:
@@ -1560,6 +1625,13 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 "available_region_id":    _it.get("available_region_id"),
                 "anchor_rx":              _it.get("anchor_rx"),
                 "anchor_ry":              _it.get("anchor_ry"),
+                "category_anchor_type":   "base_contact",
+                "front_contact_x":        (_it["region"][0] + _it["region"][2]) // 2,
+                "front_contact_y":        _it["region"][3],
+                "applied_front_offset_x": 0,
+                "applied_front_offset_y": _CONTACT_Y_OFFSET.get(
+                    normalize_category(_it["product"].category), 0
+                ),
             }
             for _it in placement_items
         ] + [
