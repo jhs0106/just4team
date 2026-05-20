@@ -499,10 +499,12 @@ def calc_placements_from_available_space(
 
         # front-view 좌표 (원근 스케일 포함)
         ps       = 0.60 + 0.40 * ry
-        fv_pw    = max(40, int(w_mm * fv_dw / (desk_width_mm or 1200) * ps))
+        _raw_pw  = w_mm * fv_dw / (desk_width_mm or 1200) * ps
+        fv_pw    = max(40, min(int(_raw_pw), int(fv_dw * 0.65)))  # 책상 너비 65% cap
         fv_ph    = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
         fv_cx    = fv_dx1 + rx * fv_dw
         fv_cy    = fv_dy1 + ry * fv_dh
+        print(f"  [AvailSpace-DBG] {cat} w_mm={w_mm} fv_dw={fv_dw} dsk_w={desk_width_mm} ps={ps:.2f} raw_pw={_raw_pw:.0f} fv_pw={fv_pw}")
 
         # 카테고리별 보정
         if cat == "MONITOR":
@@ -600,10 +602,11 @@ def _calc_regions(
         h_ratio = _FRONT_HEIGHT_RATIO.get(cat, 0.80)
 
         if desk_width_mm and desk_width_mm > 0:
-            pw = int(w_mm * DW / desk_width_mm)
+            raw = int(w_mm * DW / desk_width_mm)
         else:
             # 책상 너비 대비 카테고리별 비율로 fallback
-            pw = int(DW * _DESK_W_RATIO.get(cat, 0.15))
+            raw = int(DW * _DESK_W_RATIO.get(cat, 0.15))
+        pw = min(raw, int(DW * 0.65))  # 책상 너비 65% cap
 
         ph = int(pw * h_ratio)
         return pw, ph
@@ -962,6 +965,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
         placement_items: list[dict] = []
 
         if req.top_view_image_base64:
+            print(f"[Generate] desk_width_mm={req.desk_width_mm} desk_depth_mm={req.desk_depth_mm}")
             top_image_for_place = b64_to_image(req.top_view_image_base64)
             placement_items = calc_placements_from_available_space(
                 front_image=current,
