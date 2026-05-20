@@ -17,6 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
+import sys as _sys
+
 Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.ERROR,
@@ -26,6 +28,31 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("ai-server")
+
+# stdout을 파일에도 동시 기록 — 서버 터미널 접근 없이 print 로그 확인용
+class _Tee:
+    def __init__(self, *files):
+        self.files = files
+    def write(self, obj):
+        for f in self.files:
+            try:
+                f.write(obj)
+                f.flush()
+            except Exception:
+                pass
+    def flush(self):
+        for f in self.files:
+            try:
+                f.flush()
+            except Exception:
+                pass
+    def isatty(self):
+        return False
+    def fileno(self):
+        return self.files[0].fileno() if self.files else 1
+
+_stdout_log_file = open("logs/stdout.log", "a", encoding="utf-8")
+_sys.stdout = _Tee(_sys.__stdout__, _stdout_log_file)
 
 from .models import (
     StyleName, RemoveMode, JobStatus,
@@ -104,6 +131,52 @@ async def get_job(job_id: str):
 PRODUCT_IMAGE_DIR = Path("data/test/processed_images")
 _CATALOG_CSV      = Path("data/test/products.csv")
 
+
+def find_product_image(image_id: int) -> Path | None:
+    for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        path = PRODUCT_IMAGE_DIR / f"{image_id}{ext}"
+        if path.exists():
+            return path
+    return None
+
+
+def _to_int_or_none(v):
+    try:
+        if v is None or v == "":
+            return None
+        return int(float(v))
+    except Exception:
+        return None
+
+
+_CATEGORY_ALIASES = {
+    "KEYBOARD":      "KEYBOARD",
+    "MOUSE":         "MOUSE",
+    "MOUSEPAD":      "MOUSEPAD",
+    "MOUSE_PAD":     "MOUSEPAD",
+    "MOUSE PAD":     "MOUSEPAD",
+    "MONITOR":       "MONITOR",
+    "SPEAKER":       "SPEAKER",
+    "LAMP":          "DESK_LAMP",
+    "DESK LAMP":     "DESK_LAMP",
+    "DESK_LAMP":     "DESK_LAMP",
+    "DESK SHELF":    "DESK_SHELF",
+    "DESK_SHELF":    "DESK_SHELF",
+    "MONITOR RISER": "DESK_SHELF",
+    "LAPTOP STAND":  "LAPTOP_STAND",
+    "LAPTOP_STAND":  "LAPTOP_STAND",
+    "DECO":          "DECO",
+    "DECOR":         "DECO",
+    "CLOCK":         "CLOCK",
+}
+
+
+def normalize_category(category: str) -> str:
+    key = category.strip().upper().replace("-", "_")
+    key_space = key.replace("_", " ")
+    return _CATEGORY_ALIASES.get(key, _CATEGORY_ALIASES.get(key_space, key))
+
+
 # ── products.csv 임시 DB ─────────────────────────────────────────────────────
 
 _product_catalog: dict = {}
@@ -117,13 +190,28 @@ def load_product_catalog() -> dict:
         with open(_CATALOG_CSV, encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
                 try:
-                    image_id = int(row["id"])
-                    meta     = ast.literal_eval(row.get("metadata", "{}"))
+                    image_id = _to_int_or_none(row.get("id") or row.get("image_id"))
+                    if image_id is None:
+                        continue
+                    meta = {}
+                    if row.get("metadata"):
+                        try:
+                            meta = ast.literal_eval(row["metadata"])
+                        except Exception:
+                            meta = {}
+                    width_mm = (
+                        _to_int_or_none(row.get("width_mm"))
+                        or _to_int_or_none(meta.get("width_mm"))
+                    )
+                    depth_mm = (
+                        _to_int_or_none(row.get("depth_mm"))
+                        or _to_int_or_none(meta.get("depth_mm"))
+                    )
                     _product_catalog[image_id] = {
-                        "category": row.get("category", ""),
-                        "title":    row.get("title", ""),
-                        "width_mm": int(meta.get("width_mm", 0)) or None,
-                        "depth_mm": int(meta.get("depth_mm", 0)) or None,
+                        "category": normalize_category(row.get("category", "")),
+                        "title":    row.get("title") or row.get("name") or "",
+                        "width_mm": width_mm,
+                        "depth_mm": depth_mm,
                     }
                 except Exception:
                     continue
@@ -134,19 +222,24 @@ def load_product_catalog() -> dict:
 
 
 def enrich_products_from_csv(products: list) -> list:
-    """req.products에 width_mm/depth_mm가 없으면 products.csv 값으로 보완."""
+    """req.products에 width_mm/depth_mm가 없으면 products.csv 값으로 보완. category도 정규화."""
     catalog = load_product_catalog()
     enriched = []
     for p in products:
+        updates: dict = {}
+        norm_cat = normalize_category(p.category)
+        if norm_cat != p.category:
+            updates["category"] = norm_cat
         if p.image_id is not None and p.image_id in catalog:
-            meta    = catalog[p.image_id]
-            updates = {}
+            meta = catalog[p.image_id]
+            if not updates.get("category") and meta["category"]:
+                updates["category"] = meta["category"]
             if p.width_mm is None and meta["width_mm"]:
                 updates["width_mm"] = meta["width_mm"]
             if p.depth_mm is None and meta["depth_mm"]:
                 updates["depth_mm"] = meta["depth_mm"]
-            if updates:
-                p = p.model_copy(update=updates)
+        if updates:
+            p = p.model_copy(update=updates)
         enriched.append(p)
     return enriched
 
@@ -222,10 +315,10 @@ def _match_products_to_detections(products, detections) -> list:
     unmatched = []
 
     for p in products:
-        cat = p.category.upper()
+        cat = normalize_category(p.category)
         found = None
         for i, det in enumerate(available):
-            det_cat = _DINO_LABEL_TO_CATEGORY.get(det.label.lower(), "").upper()
+            det_cat = _DINO_LABEL_TO_CATEGORY.get(det.label.lower(), "")
             if det_cat == cat:
                 found = i
                 break
@@ -291,6 +384,7 @@ def calc_placements_from_available_space(
     products: list,
     desk_width_mm: int | None,
     desk_depth_mm: int | None,
+    mode: RemoveMode = RemoveMode.own_desk,
     remover=None,
 ) -> list[dict]:
     """
@@ -323,12 +417,14 @@ def calc_placements_from_available_space(
     desk_width_cm = (desk_width_mm / 10) if desk_width_mm else 120.0
     desk_depth_cm = (desk_depth_mm / 10) if desk_depth_mm else desk_width_cm * 0.55
 
+    remove_mask = None if mode == RemoveMode.add else occupied_np
+
     space_info        = analyze_space(
         occupied_mask=occupied_np,
         desk_width_cm=desk_width_cm,
         desk_depth_cm=desk_depth_cm,
         desk_mask=desk_mask_np,
-        remove_mask=occupied_np,
+        remove_mask=remove_mask,
     )
     available_regions = space_info.get("available_regions", [])
     cm_per_px         = space_info.get("cm_per_px", {"x": 0.1, "y": 0.1})
@@ -353,17 +449,23 @@ def calc_placements_from_available_space(
     if fv_bbox:
         fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox
     else:
-        fv_dx1, fv_dy1 = 0, int(fv_h * 0.45)
-        fv_dx2, fv_dy2 = fv_w, fv_h
+        fv_dx1, fv_dy1 = 0, int(fv_h * 0.15)
+        fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.68)
+    # DINO가 의자 포함 전체를 책상으로 인식할 수 있으므로 항상 68%로 cap
+    fv_dy2 = min(fv_dy2, int(fv_h * 0.68))
     fv_dw = max(1, fv_dx2 - fv_dx1)
     fv_dh = max(1, fv_dy2 - fv_dy1)
 
     placements = []
     used_ids   = set()
+    skip_reasons: list[str] = []
 
     for p in products:
-        cat   = p.category.upper()
+        cat = normalize_category(p.category)
         if cat not in _CATEGORY_DIMS_MM:
+            msg = f"unsupported category: raw={p.category}, normalized={cat}"
+            skip_reasons.append(msg)
+            print(f"[Placement SKIP] {msg}")
             continue
 
         w_mm  = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
@@ -403,7 +505,8 @@ def calc_placements_from_available_space(
         fv_cy    = fv_dy1 + ry * fv_dh
         x1 = max(0,    int(fv_cx - fv_pw // 2))
         x2 = min(fv_w, x1 + fv_pw)
-        y2 = min(fv_h, int(fv_cy))
+        # fv_dy2로 cap → 의자 영역 침범 방지
+        y2 = min(fv_dy2, int(fv_cy))
         y1 = max(0,    y2 - fv_ph)
 
         if x2 > x1 and y2 > y1:
@@ -445,15 +548,18 @@ def _calc_regions(
     if desk_bbox:
         dx1, dy1, dx2, dy2 = desk_bbox
     else:
-        dx1, dy1 = 0, int(img_h * 0.45)
-        dx2, dy2 = img_w, img_h
+        # 의자가 이미지 하단을 차지하므로 dy2를 68%로 제한
+        dx1, dy1 = 0, int(img_h * 0.35)
+        dx2, dy2 = img_w, int(img_h * 0.68)
+    # DINO가 의자 포함 전체를 책상으로 인식할 수 있으므로 항상 68%로 cap
+    dy2 = min(dy2, int(img_h * 0.68))
 
     DW = dx2 - dx1
     DH = dy2 - dy1
     cx = (dx1 + dx2) // 2
 
-    # 전면(카메라 가까운 쪽): 책상 표면 78% 지점
-    front_y = dy1 + int(DH * 0.78)
+    # 전면(카메라 가까운 쪽): 책상 표면 55% 지점 — 0.78은 의자 영역까지 내려감
+    front_y = dy1 + int(DH * 0.55)
     # 후면(벽 쪽): 책상 상단 경계 — 후면 제품은 위쪽(벽)으로 솟아오름
     back_top = dy1
 
@@ -465,7 +571,7 @@ def _calc_regions(
         return 0.60 + 0.40 * ratio
 
     def product_pixel_size(p) -> tuple[int, int]:
-        cat     = p.category.upper()
+        cat     = normalize_category(p.category)
         w_mm    = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM.get(cat, (100, 100))[0]
         h_ratio = _FRONT_HEIGHT_RATIO.get(cat, 0.80)
 
@@ -480,7 +586,7 @@ def _calc_regions(
 
     regions = []
     for p in products:
-        cat = p.category.upper()
+        cat = normalize_category(p.category)
         if cat not in _CATEGORY_DIMS_MM:
             continue
 
@@ -712,89 +818,54 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         job_store[job_id].cleaned_image = image_to_b64(current)
 
-        # ── Step 2: top-view 공간 분석 (제공된 경우) ───────────────
-        desk_mask_np: np.ndarray | None = None
-        space_info: dict | None = None
-
-        if req.top_view_image_base64:
-            top_image = b64_to_image(req.top_view_image_base64)
-            tv_w, tv_h = top_image.size
-
-            # top-view 물체 감지 → occupied_mask
-            top_detection = remover.detect_with_prompt(
-                image=top_image,
-                prompt=_REMOVAL_PROMPT,
-                max_area_ratio=0.40,
-            )
-            occupied_np = _build_occupied_mask_from_detection(top_detection, tv_w, tv_h)
-            occupied_np = postprocess_occupied_mask(occupied_np)
-
-            # mode별 remove_mask (top-view 기준)
-            if mode == RemoveMode.empty_desk:
-                top_remove_mask = occupied_np
-            elif mode == RemoveMode.add:
-                top_remove_mask = None
-            else:
-                top_remove_mask = occupied_np  # own_desk/replace: 전체 제거
-
-            # desk_mask 자동 생성
-            desk_mask_np = remover.detect_desk_mask(top_image)
-            if desk_mask_np is None:
-                print("[Generate] desk_mask 자동 생성 실패 → full image fallback")
-                desk_mask_np = make_full_desk_mask((tv_h, tv_w))
-            else:
-                desk_mask_np = keep_largest_component(desk_mask_np)
-
-            # 가용 공간 분석
-            desk_width_cm = (req.desk_width_mm / 10) if req.desk_width_mm else 120.0
-            desk_depth_cm = 60.0
-            space_info = analyze_space(
-                occupied_mask=occupied_np,
-                desk_width_cm=desk_width_cm,
-                desk_depth_cm=desk_depth_cm,
-                desk_mask=desk_mask_np,
-                remove_mask=top_remove_mask,
-            )
-            n_regions = len(space_info.get("available_regions", []))
-            print(f"[Generate] 공간 분석 완료: 가용 영역 {n_regions}개, "
-                  f"가용 면적 {space_info['available_area_cm2']:.0f}cm²")
-
-        # ── Step 3: ControlNet 제품 생성 ───────────────────────────
+        # ── Step 2→3: ControlNet 제품 생성 ────────────────────────
+        # top-view 공간 분석은 calc_placements_from_available_space() 내부에서 수행
         cn_proc = get_controlnet_inpaint_processor()
 
-        # products.csv로 width_mm/depth_mm 보완
+        # products.csv로 width_mm/depth_mm 보완 + category 정규화
         products = enrich_products_from_csv(req.products)
 
+        print(f"[Generate] products={len(products)}")
+        for _p in products:
+            print(f"  product: category={_p.category}, image_id={_p.image_id}, "
+                  f"size={_p.width_mm}x{_p.depth_mm}")
+
         num_placed = 0
+        run_errors: list[str] = []
 
         def _run_cn(p, x1, y1, x2, y2):
-            nonlocal current, num_placed
+            nonlocal current, num_placed, run_errors
             if p.image_id is None:
-                print(f"  [_run_cn SKIP] {p.category}: image_id=None")
-                log.error("_run_cn SKIP %s: image_id=None", p.category)
+                msg = f"{p.category}: image_id=None"
+                run_errors.append(msg)
+                print(f"  [_run_cn SKIP] {msg}")
                 return
-            prod_path = PRODUCT_IMAGE_DIR / f"{p.image_id}.png"
-            if not prod_path.exists():
-                print(f"  [_run_cn SKIP] {p.category}: 파일 없음 → {prod_path.resolve()}")
-                log.error("_run_cn SKIP %s: 파일 없음 %s", p.category, prod_path.resolve())
+            prod_path = find_product_image(p.image_id)
+            if prod_path is None:
+                msg = f"{p.category}: product image not found for image_id={p.image_id}"
+                run_errors.append(msg)
+                print(f"  [_run_cn SKIP] {msg}")
+                log.error("_run_cn SKIP %s", msg)
                 return
             try:
                 prod_img       = Image.open(prod_path).convert("RGB")
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
-                cat            = p.category.upper()
+                cat            = normalize_category(p.category)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
                 print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ctx={context_region is not None}")
                 current = cn_proc.generate_product(
                     image=current, mask=mask, product_image=prod_img,
                     category=p.category, style=req.style.value,
                     context_region=context_region,
-                    ip_adapter_scale=0.8,
+                    ip_adapter_scale=0.4,
                 )
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
             except Exception as _e:
-                print(f"  [_run_cn ERROR] {p.category}: {_e}")
-                log.error("_run_cn ERROR %s: %s\n%s", p.category, _e, traceback.format_exc())
+                msg = f"{p.category}: ControlNet generation failed: {_e}"
+                run_errors.append(msg)
+                print(f"  [_run_cn ERROR] {msg}")
+                log.error("_run_cn ERROR %s\n%s", msg, traceback.format_exc())
 
         # ── 배치 위치 결정: top-view available space 우선, 없으면 _calc_regions ──
         placement_items: list[dict] = []
@@ -807,10 +878,21 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 products=products,
                 desk_width_mm=req.desk_width_mm,
                 desk_depth_mm=req.desk_depth_mm,
+                mode=mode,
                 remover=remover,
             )
             if placement_items:
                 print(f"[Generate] available_space 배치: {len(placement_items)}개")
+                # available_space에서 배치 못 받은 제품 → _calc_regions fallback
+                placed_ids = {id(item["product"]) for item in placement_items}
+                unplaced   = [p for p in products if id(p) not in placed_ids]
+                if unplaced:
+                    desk_bbox_for_fallback = _detect_desk_bbox(current)
+                    fallback_items = _calc_regions(
+                        img_w, img_h, unplaced, desk_bbox_for_fallback, req.desk_width_mm
+                    )
+                    placement_items.extend(fallback_items)
+                    print(f"[Generate] unplaced {len(unplaced)}개 → _calc_regions fallback {len(fallback_items)}개 추가")
 
         if not placement_items:
             # fallback: 기존 _calc_regions + DINO 매칭
@@ -820,19 +902,15 @@ def _run_generate(job_id: str, req: GenerateRequest):
             else:
                 print("[Generate] desk 감지 실패 → 이미지 비율 fallback")
 
-            print(f"[Generate] fallback 시작: products={len(products)}개")
-            for _p in products:
-                print(f"  product: {_p.category} id={_p.image_id}")
             matched, unmatched = _match_products_to_detections(products, front_detections)
             print(f"[Generate] fallback 매칭: matched={len(matched)}개, unmatched={len(unmatched)}개")
 
-            matched_back          = [i for i in matched   if i["product"].category.upper() in _BACK_CATS]
-            unmatched_back        = [p for p in unmatched if p.category.upper()            in _BACK_CATS]
-            matched_front_prods   = [i["product"] for i in matched   if i["product"].category.upper() in _FRONT_CATS]
-            unmatched_front_prods = [p            for p in unmatched if p.category.upper()            in _FRONT_CATS]
+            matched_back          = [i for i in matched   if normalize_category(i["product"].category) in _BACK_CATS]
+            unmatched_back        = [p for p in unmatched if normalize_category(p.category)            in _BACK_CATS]
+            matched_front_prods   = [i["product"] for i in matched   if normalize_category(i["product"].category) in _FRONT_CATS]
+            unmatched_front_prods = [p            for p in unmatched if normalize_category(p.category)            in _FRONT_CATS]
             all_front_prods       = matched_front_prods + unmatched_front_prods
 
-            # 후면: DINO 위치 기반
             for item in matched_back:
                 p = item["product"]
                 region = _region_from_detection_center(
@@ -840,34 +918,52 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 )
                 placement_items.append({"product": p, "region": region})
 
-            # 후면 fallback
             for item in _calc_regions(img_w, img_h, unmatched_back, desk_bbox, req.desk_width_mm):
                 placement_items.append(item)
 
-            # 전면
             for item in _calc_regions(img_w, img_h, all_front_prods, desk_bbox, req.desk_width_mm):
                 placement_items.append(item)
 
-        # ── 생성 실행 ─────────────────────────────────────────────────
-        print(f"[Generate] placement_items={len(placement_items)}개")
+        # ── 배치 가능 제품 없으면 즉시 failed ──────────────────────
+        print(f"[Generate] placement_items={len(placement_items)}")
+
+        if not placement_items:
+            job_store[job_id].status = JobStatus.failed
+            job_store[job_id].error = (
+                "배치 가능한 제품 영역이 없습니다. "
+                "products.category, image_id, top_view_image_base64, "
+                "desk_mask/available_space 분석 결과를 확인하세요."
+                + ((" | " + " | ".join(run_errors[:5])) if run_errors else "")
+            )
+            return
 
         # 배치 위치 시각화 저장 (디버그용)
-        if placement_items:
-            from PIL import ImageDraw as _ID
-            _dbg = current.copy()
-            _draw = _ID.Draw(_dbg)
-            for _item in placement_items:
-                _x1, _y1, _x2, _y2 = _item["region"]
-                _draw.rectangle([_x1, _y1, _x2, _y2], outline=(255, 0, 0), width=4)
-                _draw.text((_x1 + 4, _y1 + 4), _item["product"].category, fill=(255, 0, 0))
-            Path("outputs/debug").mkdir(parents=True, exist_ok=True)
-            _dbg.save("outputs/debug/placement_debug.png")
-            print("[Generate] 배치 시각화 저장: outputs/debug/placement_debug.png")
+        from PIL import ImageDraw as _ID
+        _dbg = current.copy()
+        _draw = _ID.Draw(_dbg)
+        for _item in placement_items:
+            _x1, _y1, _x2, _y2 = _item["region"]
+            _draw.rectangle([_x1, _y1, _x2, _y2], outline=(255, 0, 0), width=4)
+            _draw.text((_x1 + 4, _y1 + 4), _item["product"].category, fill=(255, 0, 0))
+        Path("outputs/debug").mkdir(parents=True, exist_ok=True)
+        _dbg.save("outputs/debug/placement_debug.png")
+        print("[Generate] 배치 시각화 저장: outputs/debug/placement_debug.png")
 
         for item in placement_items:
             p = item["product"]
             print(f"  [Generate] 처리: {p.category} image_id={p.image_id} region={item['region']}")
             _run_cn(p, *item["region"])
+
+        print(f"[Generate] num_placed={num_placed}")
+
+        # ── 실제 생성 0개면 failed ──────────────────────────────────
+        if num_placed == 0:
+            job_store[job_id].status = JobStatus.failed
+            job_store[job_id].error = (
+                "제품 생성이 0개 수행되었습니다: "
+                + (" | ".join(run_errors[:5]) if run_errors else "알 수 없는 오류")
+            )
+            return
 
         job_store[job_id].num_placed   = num_placed
         job_store[job_id].result_image = image_to_b64(current)
