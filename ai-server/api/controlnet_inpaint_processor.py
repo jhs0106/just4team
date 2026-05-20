@@ -56,10 +56,8 @@ _NEGATIVE_PROMPT = (
 
 _CAT_NEGATIVE = {
     "MONITOR": (
-        "keyboard, laptop, shelf, bookshelf, floating screen, "
-        "screen lying flat, distorted stand, extra keyboard, "
-        "wallpaper, sunset, landscape, photo on screen, image on screen, "
-        "glowing screen, lit screen, colorful display, bright screen, neon, sky, clouds"
+        "keyboard, laptop, shelf, wallpaper, sunset, landscape, "
+        "image on screen, glowing screen, lit screen, bright display, neon"
     ),
     "DESK_LAMP": (
         "cable only, wire only, floating line, no base, broken lamp, "

@@ -936,8 +936,10 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 elif cat == "DESK_SHELF":
                     # 라이프스타일 사진(모니터+소품 포함) → IP-Adapter 끔, 프롬프트만으로 생성
                     ip_scale = 0.0
-                elif cat in ("SPEAKER", "DESK_LAMP"):
+                elif cat == "SPEAKER":
                     ip_scale = 0.40
+                elif cat == "DESK_LAMP":
+                    ip_scale = 0.20  # 얇은 스틱형 제품 이미지 복사 방지
                 elif cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
                     # 단품 이미지가 명확 → 외형 반영 강화
                     ip_scale = 0.65
