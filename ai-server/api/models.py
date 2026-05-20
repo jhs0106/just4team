@@ -99,6 +99,8 @@ class GenerateRequest(BaseModel):
     max_area_ratio:        float             = Field(0.20, ge=0.05, le=0.60, description="이 비율 초과 마스크는 배경으로 간주해 제외")
     top_view_image_base64: Optional[str]     = Field(None, description="탑뷰 이미지 (base64) — 제공 시 공간 분석 기반 배치")
     mode:                  RemoveMode        = Field(RemoveMode.own_desk, description="물체 제거 정책")
+    generation_mode:       str               = Field("controlnet", description="생성 모드: placement_only | cv_composite | controlnet")
+    removal_strategy:      str               = Field("combined",   description="제거 방식: none | sequential | combined")
 
 
 class GenerateResult(BaseModel):

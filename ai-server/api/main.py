@@ -258,6 +258,22 @@ _CATEGORY_DIMS_MM = {
     "CLOCK":        (100, 100),
 }
 
+# 생성 순서: 큰/뒤쪽 제품 먼저, 작은/앞쪽 제품 나중
+_PLACEMENT_ORDER = {
+    "MONITOR":      10,
+    "DESK_SHELF":   20,
+    "SPEAKER":      30,
+    "DESK_LAMP":    40,
+    "CLOCK":        50,
+    "DECO":         60,
+    "MOUSEPAD":     70,
+    "KEYBOARD":     80,
+    "MOUSE":        90,
+}
+
+# CV 합성 전용 카테고리 (ControlNet 생성 금지)
+_CV_ONLY_CATS = {"MONITOR", "DESK_SHELF", "KEYBOARD", "DESK_LAMP"}
+
 # 45도 앵글 뷰에서 제품의 높이/너비 비율
 # 수직 제품(모니터·스탠드·램프)은 크고, 수평 제품(키보드·마우스패드)은 작음
 _FRONT_HEIGHT_RATIO = {
@@ -539,6 +555,38 @@ def calc_placements_from_available_space(
                   f"rx={rx:.2f} ry={ry:.2f} → fv({x1},{y1},{x2},{y2})")
 
     return placements
+
+
+def bbox_iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
+    iw  = max(0, ix2 - ix1); ih = max(0, iy2 - iy1)
+    inter  = iw * ih
+    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1, (bx2 - bx1) * (by2 - by1))
+    return inter / (area_a + area_b - inter + 1e-6)
+
+
+def composite_product_simple(
+    base: Image.Image,
+    product_img: Image.Image,
+    region: tuple,
+) -> Image.Image:
+    x1, y1, x2, y2 = region
+    target_w = max(1, x2 - x1)
+    target_h = max(1, y2 - y1)
+
+    prod = product_img.convert("RGBA")
+    prod.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+
+    px = x1 + (target_w - prod.width) // 2
+    py = y2 - prod.height
+
+    out = base.convert("RGBA")
+    out.alpha_composite(prod, (max(0, px), max(0, py)))
+    return out.convert("RGB")
 
 
 def _detect_desk_bbox(image: Image.Image) -> tuple | None:
@@ -856,31 +904,34 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _combined_np = cv2.bitwise_or(_combined_np, (_arr > 127).astype(np.uint8) * 255)
         Image.fromarray(_combined_np).save(_debug_dir / "front_remove_mask.png")
 
-        # ── mode별 LaMa 제거 정책 ───────────────────────────────────
+        # ── 제거 전략 결정 ──────────────────────────────────────────
+        removal_strategy = getattr(req, "removal_strategy", "combined")
         if mode == RemoveMode.add:
-            masks_to_remove = []
+            removal_strategy = "none"
             print("[Removal] add 모드 — 기존 물체 제거 안 함")
-        else:
-            masks_to_remove = front_instances
 
-        if mode != RemoveMode.add and len(front_instances) == 0:
+        if removal_strategy != "none" and len(front_instances) == 0:
             print("[Removal WARNING] remove mode인데 감지된 제거 대상이 없습니다.")
 
-        if masks_to_remove:
-            lama = get_lama_processor()
+        _combined_mask_pil = Image.fromarray(_combined_np)
+
+        if removal_strategy == "none":
             current = image
 
-            # combined mask로 한 번에 제거 (비교용 저장)
-            _combined_mask_pil = Image.fromarray(_combined_np)
-            _cleaned_combined  = lama.inpaint(image=image, mask=_combined_mask_pil)
-            _cleaned_combined.save(_debug_dir / "cleaned_front_combined.png")
+        elif removal_strategy == "sequential":
+            lama   = get_lama_processor()
+            current = image
+            for _mask_pil in front_instances:
+                current = lama.inpaint(image=current, mask=_mask_pil)
+            current.save(_debug_dir / "cleaned_front_sequential.png")
+            torch.cuda.empty_cache()
 
-            # 실제 제거: combined mask 한 번에 처리 (own_desk/empty_desk)
-            # replace는 추후 개별 처리로 분기 가능
+        else:  # combined (default)
+            lama              = get_lama_processor()
+            _cleaned_combined = lama.inpaint(image=image, mask=_combined_mask_pil)
+            _cleaned_combined.save(_debug_dir / "cleaned_front_combined.png")
             current = _cleaned_combined
             torch.cuda.empty_cache()
-        else:
-            current = image
 
         current.save(_debug_dir / "cleaned_front.png")
         job_store[job_id].cleaned_image = image_to_b64(current)
@@ -921,9 +972,17 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 _prod_debug_dir.mkdir(exist_ok=True)
                 prod_img.save(_prod_debug_dir / f"{p.category}_{p.image_id}.jpg")
 
+                cat = normalize_category(p.category)
+
+                # CV 전용 카테고리: ControlNet 대신 단순 합성
+                if cat in _CV_ONLY_CATS:
+                    current = composite_product_simple(current, prod_img, (x1, y1, x2, y2))
+                    num_placed += 1
+                    print(f"  [_run_cn CV_ONLY] {cat} 합성 완료 (num_placed={num_placed})")
+                    return
+
                 # 이미지 평균 밝기 체크 — 너무 어두우면 IP-Adapter가 색감을 못 읽음
                 brightness = float(np.array(prod_img).mean())
-                cat = normalize_category(p.category)
                 print(f"  [_run_cn] {cat} brightness={brightness:.1f}")
 
                 if brightness < 40:
@@ -978,9 +1037,17 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 mode=mode,
                 remover=remover,
             )
+            # available_space 내부 overlap 제거
+            _deduped: list[dict] = []
+            for _item in placement_items:
+                if all(bbox_iou(_item["region"], _prev["region"]) < 0.25 for _prev in _deduped):
+                    _deduped.append(_item)
+                else:
+                    print(f"[Placement SKIP] internal overlap: {normalize_category(_item['product'].category)} {_item['region']}")
+            placement_items = _deduped
+
             if placement_items:
                 print(f"[Generate] available_space 배치: {len(placement_items)}개")
-                # available_space에서 배치 못 받은 제품 → _calc_regions fallback
                 placed_ids = {id(item["product"]) for item in placement_items}
                 unplaced   = [p for p in products if id(p) not in placed_ids]
                 if unplaced:
@@ -988,8 +1055,16 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     fallback_items = _calc_regions(
                         img_w, img_h, unplaced, desk_bbox_for_fallback, req.desk_width_mm
                     )
-                    placement_items.extend(fallback_items)
-                    print(f"[Generate] unplaced {len(unplaced)}개 → _calc_regions fallback {len(fallback_items)}개 추가")
+                    # fallback 추가 시 기존 배치와 overlap 필터
+                    _added = 0
+                    for _fi in fallback_items:
+                        _cat = normalize_category(_fi["product"].category)
+                        if all(bbox_iou(_fi["region"], _prev["region"]) < 0.25 for _prev in placement_items):
+                            placement_items.append(_fi)
+                            _added += 1
+                        else:
+                            print(f"[Placement SKIP] overlap: {_cat} {_fi['region']}")
+                    print(f"[Generate] unplaced {len(unplaced)}개 → fallback {_added}개 추가")
 
         if not placement_items:
             # fallback: 기존 _calc_regions + DINO 매칭
@@ -1034,17 +1109,62 @@ def _run_generate(job_id: str, req: GenerateRequest):
             )
             return
 
-        # 배치 위치 시각화 저장 (디버그용)
+        # ── 생성 순서 정렬: 큰/뒤쪽 제품 먼저 ─────────────────────────
+        placement_items.sort(
+            key=lambda item: _PLACEMENT_ORDER.get(normalize_category(item["product"].category), 999)
+        )
+
+        # ── 배치 위치 시각화 저장 ────────────────────────────────────
         from PIL import ImageDraw as _ID
         _dbg = current.copy()
         _draw = _ID.Draw(_dbg)
         for _item in placement_items:
             _x1, _y1, _x2, _y2 = _item["region"]
             _draw.rectangle([_x1, _y1, _x2, _y2], outline=(255, 0, 0), width=4)
-            _draw.text((_x1 + 4, _y1 + 4), _item["product"].category, fill=(255, 0, 0))
+            _draw.text((_x1 + 4, _y1 + 4), normalize_category(_item["product"].category), fill=(255, 0, 0))
         _dbg.save(_debug_dir / "placement_debug.png")
         print(f"[Generate] 배치 시각화 저장: {_debug_dir}/placement_debug.png")
 
+        gen_mode = getattr(req, "generation_mode", "controlnet")
+
+        # ── placement_only 모드: bbox만 그려서 반환 ──────────────────
+        if gen_mode == "placement_only":
+            _dbg.save(_debug_dir / "placement_only_result.png")
+            job_store[job_id].num_placed  = 0
+            job_store[job_id].result_image = image_to_b64(_dbg)
+            job_store[job_id].status       = JobStatus.done
+            print("[Generate] placement_only 완료")
+            return
+
+        # ── cv_composite 모드: 제품 이미지 단순 합성 ────────────────
+        if gen_mode == "cv_composite":
+            for item in placement_items:
+                p   = item["product"]
+                cat = normalize_category(p.category)
+                if p.image_id is None:
+                    run_errors.append(f"{cat}: image_id=None")
+                    continue
+                prod_path = find_product_image(p.image_id)
+                if prod_path is None:
+                    run_errors.append(f"{cat}: image not found id={p.image_id}")
+                    continue
+                prod_img = Image.open(prod_path)
+                current  = composite_product_simple(current, prod_img, item["region"])
+                num_placed += 1
+                print(f"  [cv_composite] {cat} 합성 완료 (num_placed={num_placed})")
+
+            current.save(_debug_dir / "cv_composite_result.png")
+            if num_placed == 0:
+                job_store[job_id].status = JobStatus.failed
+                job_store[job_id].error  = "cv_composite 0개: " + " | ".join(run_errors[:5])
+                return
+            job_store[job_id].num_placed   = num_placed
+            job_store[job_id].result_image = image_to_b64(current)
+            job_store[job_id].status       = JobStatus.done
+            print("[Generate] cv_composite 완료")
+            return
+
+        # ── controlnet 모드 ──────────────────────────────────────────
         for item in placement_items:
             p = item["product"]
             print(f"  [Generate] 처리: {p.category} image_id={p.image_id} region={item['region']}")
