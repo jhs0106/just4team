@@ -1547,6 +1547,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     "aspect_ratio_valid": _ar_valid,
                 }
                 _record(_route, "done", ar=_ar, ar_valid=_ar_valid)
+                _mon_variants = req.fixed_test_products and cat == "MONITOR"
+                _pre_generate = current.copy() if _mon_variants else None
+                _vprefix = "MONITOR_A_current" if _mon_variants else None
                 current = cn_proc.generate_product(
                     image=current, mask=mask, product_image=prod_alpha,
                     category=p.category, style=req.style.value,
@@ -1554,8 +1557,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     ip_adapter_scale=ip_scale,
                     debug_dir=_debug_dir / "products",
                     debug_meta=_debug_meta,
+                    variant_prefix=_vprefix,
                 )
-                _dbg_json_path  = _debug_dir / "products" / f"{cat}_debug.json"
+                _dbg_json_path  = _debug_dir / "products" / f"{_vprefix or cat}_debug.json"
                 _dbg_exists     = _dbg_json_path.exists()
                 _gen_results[cat]["debug_json_created"] = _dbg_exists
                 if _dbg_exists:
@@ -1578,6 +1582,25 @@ def _run_generate(job_id: str, req: GenerateRequest):
                                               debug_dir=_debug_dir / "products")
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
+                if _mon_variants and _pre_generate is not None:
+                    _pdir = _debug_dir / "products"
+                    current.save(_pdir / "MONITOR_A_current.png")
+                    current.save(_pdir / "MONITOR_B_cn_0.08_ip_0.35.png")
+                    try:
+                        _vC = cn_proc.generate_product(
+                            image=_pre_generate, mask=mask, product_image=prod_alpha,
+                            category=p.category, style=req.style.value,
+                            context_region=context_region, ip_adapter_scale=0.20,
+                            debug_dir=_pdir, debug_meta=_debug_meta,
+                            variant_prefix="MONITOR_C_cn_0.10_ip_0.20",
+                            cn_scales_override=[0.10, 0.25],
+                        )
+                        _add_contact_shadow(_vC, (x1, y1, x2, y2), cat, prod_alpha=prod_alpha).save(
+                            _pdir / "MONITOR_C_cn_0.10_ip_0.20.png"
+                        )
+                        print("  [MONITOR variant C] 저장 완료")
+                    except Exception as _ve:
+                        print(f"  [MONITOR variant C ERROR] {_ve}")
             except Exception as _e:
                 msg = f"{p.category}: ControlNet generation failed: {_e}"
                 run_errors.append(msg)

@@ -230,6 +230,8 @@ class ControlNetInpaintProcessor:
         context_region: tuple | None = None,
         debug_dir: Path | None = None,
         debug_meta: dict | None = None,
+        variant_prefix: str | None = None,
+        cn_scales_override: list | None = None,
     ) -> Image.Image:
         iw, ih = image.size
         cat = category.upper()
@@ -334,8 +336,10 @@ class ControlNetInpaintProcessor:
         prod_ip = _letterbox_512(product_image)
 
         # 카테고리별 depth/canny 가중치
-        if cat == "MONITOR":
-            cn_scales = [0.08, 0.20]   # 복구: 0.06/0.15는 형태 흐트러짐 발생
+        if cn_scales_override is not None:
+            cn_scales = cn_scales_override
+        elif cat == "MONITOR":
+            cn_scales = [0.08, 0.20]
         elif cat == "KEYBOARD":
             cn_scales = [0.08, 0.18]
         else:
@@ -398,14 +402,15 @@ class ControlNetInpaintProcessor:
             try:
                 _ddir = Path(debug_dir)
                 _ddir.mkdir(parents=True, exist_ok=True)
-                img_sd.save(_ddir / f"{cat}_crop_img.png")
-                composite_sd.save(_ddir / f"{cat}_composite_sd.png")
-                mask_sd.save(_ddir / f"{cat}_mask_sd.png")
-                _refine_mask.save(_ddir / f"{cat}_refine_mask_sd.png")
-                final_paste_mask.save(_ddir / f"{cat}_final_paste_mask.png")
-                result_sd_pass1.save(_ddir / f"{cat}_pass1_result_sd.png")
-                # pass2 비활성화 — pass1 결과가 final
-                prod_ip.save(_ddir / f"{cat}_prod_ip.png")
+                _prefix = variant_prefix or cat
+                img_sd.save(_ddir / f"{_prefix}_crop_img.png")
+                composite_sd.save(_ddir / f"{_prefix}_composite_sd.png")
+                canny_sd.save(_ddir / f"{_prefix}_canny_sd.png")
+                mask_sd.save(_ddir / f"{_prefix}_mask_sd.png")
+                _refine_mask.save(_ddir / f"{_prefix}_refine_mask_sd.png")
+                final_paste_mask.save(_ddir / f"{_prefix}_final_paste_mask.png")
+                result_sd_pass1.save(_ddir / f"{_prefix}_pass1_result_sd.png")
+                prod_ip.save(_ddir / f"{_prefix}_prod_ip.png")
                 _m = debug_meta or {}
                 _actual_img_w = int(_fpw * cw / max(sd_w, 1))
                 _actual_img_h = int(_fph * ch / max(sd_h, 1))
@@ -433,17 +438,16 @@ class ControlNetInpaintProcessor:
                     "final_paste_mask_type":        "silhouette_blur_r3",
                     "pass2_enabled":                False,
                 }
-                (_ddir / f"{cat}_debug.json").write_text(
+                (_ddir / f"{_prefix}_debug.json").write_text(
                     json.dumps(_dbg_json, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
-                # contact_info.json (배치 정렬 기준 — shadow 정보는 _add_contact_shadow에서 merge)
                 _contact_info = {
                     "alpha_bottom_norm":      round(_alpha_bottom_norm, 4),
                     "alpha_bottom_y_in_fit":  int(_obj_bottom_in_fit),
                     "placement_contact_y_sd": int(by2),
                     "applied_contact_shift":  int(_applied_contact_shift),
                 }
-                (_ddir / f"{cat}_contact_info.json").write_text(
+                (_ddir / f"{_prefix}_contact_info.json").write_text(
                     json.dumps(_contact_info, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
             except Exception as _de:
