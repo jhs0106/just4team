@@ -331,11 +331,11 @@ class ControlNetInpaintProcessor:
         # MONITOR: canny 약하게 → 배경 조명/질감에 섞이도록 (black screen 목적)
         # KEYBOARD: canny 강하게 → 키 형태 유지 (이제 ControlNet 미통과이지만 예비)
         if cat == "MONITOR":
-            cn_scales = [0.10, 0.25]
+            cn_scales = [0.08, 0.20]
         elif cat == "KEYBOARD":
-            cn_scales = [0.12, 0.32]
+            cn_scales = [0.10, 0.25]
         else:
-            cn_scales = [0.20, 0.35]
+            cn_scales = [0.15, 0.28]
 
         cat_desc = _CAT_PROMPT.get(cat, "product on desk, natural lighting")
         lora_token = "JU_Style, " if self._has_lora else ""

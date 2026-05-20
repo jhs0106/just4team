@@ -303,7 +303,7 @@ _PREFERRED_POS = {
 _MIN_FRONT_SIZE = {
     "MONITOR":   (220, 150),
     "KEYBOARD":  (180, 45),
-    "MOUSE":     (60, 45),
+    "MOUSE":     (70, 52),
     "SPEAKER":   (55, 55),
     "DESK_LAMP": (80, 120),
     "DECO":      (45, 45),
@@ -996,14 +996,14 @@ def _add_contact_shadow(
     if cat == "MONITOR":
         cx, cy = (x1 + x2) // 2, min(y2, h - 1)
         cv2.ellipse(shadow, (cx, cy), (max(pw // 4, 35), 10), 0, 0, 360, 1.0, -1)
-        blur_k, strength = 25, 0.30
+        blur_k, strength = 25, 0.38
     elif cat == "KEYBOARD":
         shadow[max(0, y2 - 6):min(h, y2 + 8), max(0, x1):min(w, x2)] = 1.0
-        blur_k, strength = 19, 0.28
+        blur_k, strength = 19, 0.35
     elif cat == "MOUSE":
         cx, cy = (x1 + x2) // 2, min(y2, h - 1)
         cv2.ellipse(shadow, (cx, cy), (max(pw // 2, 20), 9), 0, 0, 360, 1.0, -1)
-        blur_k, strength = 19, 0.32
+        blur_k, strength = 19, 0.42
     elif cat == "DESK_LAMP":
         cx, cy = (x1 + x2) // 2, min(y2, h - 1)
         cv2.ellipse(shadow, (cx, cy), (max(pw // 2, 22), 12), 0, 0, 360, 1.0, -1)
@@ -1481,9 +1481,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 elif cat == "DESK_LAMP":
                     ip_scale = 0.20
                 elif cat in ("MOUSE", "MOUSEPAD"):
-                    ip_scale = 0.65
-                else:
                     ip_scale = 0.50
+                else:
+                    ip_scale = 0.40
 
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
