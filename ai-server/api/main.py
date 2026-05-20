@@ -259,10 +259,11 @@ _CATEGORY_DIMS_MM = {
 }
 
 # MONITOR→KEYBOARD→MOUSE 순서여야 관계 기반 배치가 작동함
+# KEYBOARD(15)가 DESK_SHELF(20)보다 먼저: 핵심 제품이 모니터 아래 공간 선점
 _PLACEMENT_ORDER = {
     "MONITOR":      10,
+    "KEYBOARD":     15,
     "DESK_SHELF":   20,
-    "KEYBOARD":     30,
     "MOUSEPAD":     40,
     "MOUSE":        50,
     "SPEAKER":      60,
@@ -301,10 +302,11 @@ _MIN_FRONT_SIZE = {
 
 # 카테고리 쌍별 허용 IoU 상한 — 이 값 이상이면 overlap으로 거부
 _OVERLAP_TOLERANCE: dict = {
-    frozenset({"MONITOR",  "KEYBOARD"}):   0.35,  # 키보드가 모니터 하단과 살짝 겹쳐도 허용
-    frozenset({"MONITOR",  "DESK_SHELF"}): 0.30,
-    frozenset({"KEYBOARD", "MOUSEPAD"}):   0.50,  # 키보드가 마우스패드 위에 놓임
-    frozenset({"MOUSE",    "MOUSEPAD"}):   0.60,  # 마우스가 마우스패드 위에 놓임
+    frozenset({"MONITOR",    "KEYBOARD"}):  0.35,  # 키보드가 모니터 하단과 살짝 겹쳐도 허용
+    frozenset({"MONITOR",    "DESK_SHELF"}):0.30,
+    frozenset({"DESK_SHELF", "KEYBOARD"}):  0.40,  # 모니터 받침대 앞에 키보드 배치 허용
+    frozenset({"KEYBOARD",   "MOUSEPAD"}):  0.50,  # 키보드가 마우스패드 위에 놓임
+    frozenset({"MOUSE",      "MOUSEPAD"}):  0.60,  # 마우스가 마우스패드 위에 놓임
 }
 _DEFAULT_OVERLAP_THR = 0.10
 
@@ -653,9 +655,10 @@ def calc_placements_from_available_space(
                 )
                 if _fb is None:
                     continue
-                # MONITOR와는 overlap 허용, 나머지와는 엄격히
-                _non_mon = [i for i in placed_front_items if i["cat"] != "MONITOR"]
-                if any(bbox_iou(_fb, i["region"]) >= _DEFAULT_OVERLAP_THR for i in _non_mon):
+                # MONITOR, DESK_SHELF와의 overlap 허용 — 키보드는 받침대 앞에 배치 가능
+                _non_critical = [i for i in placed_front_items
+                                 if i["cat"] not in {"MONITOR", "DESK_SHELF"}]
+                if any(bbox_iou(_fb, i["region"]) >= _DEFAULT_OVERLAP_THR for i in _non_critical):
                     continue
                 _fs = score_region_for_product(cat, _forced_rx, _fry, placed_norm, relation_state)
                 best_score = max(_fs, -0.49)  # 강제 후보는 score 하한 보장
@@ -1323,6 +1326,10 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 prod_img.save(_prod_debug_dir / f"{cat}_{p.image_id}_raw.png")
                 prod_alpha = prepare_product_image_for_composite(prod_img)
                 prod_alpha.save(_prod_debug_dir / f"{cat}_{p.image_id}_alpha.png")
+                _alpha_cov = float((np.array(prod_alpha.getchannel("A")) > 127).mean())
+                if _alpha_cov > 0.80:
+                    print(f"  [WARNING] {cat} id={p.image_id}: alpha_coverage={_alpha_cov:.2f}"
+                          f" — multi-object/lifestyle 이미지 의심, 단품 이미지로 교체 필요")
                 prod_img = prod_img.convert("RGB")
 
                 # cv_composite 모드: 전 카테고리 단순 합성
