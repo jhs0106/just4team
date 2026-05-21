@@ -283,12 +283,21 @@ class ControlNetInpaintProcessor:
             _fpw = max(8, int(bw * 0.90))
             print(f"  [KEYBOARD stretch] width → {_fpw} (bbox_w={bw:.0f}, fill={_fpw/max(bw,1):.2f})")
 
-        # MONITOR 최소 fill 0.80: 가로가 너무 좁으면 aspect ratio 유지하며 확장
-        if cat == "MONITOR" and _fpw < bw * 0.80:
-            _mon_w = max(8, int(bw * 0.85))
+        # MONITOR 최소 fill 0.82: aspect ratio 유지하며 확장, height cap 초과 시 height 기준 재계산
+        _monitor_min_fill_applied = False
+        if cat == "MONITOR" and _fpw < bw * 0.82:
+            _mon_w = max(8, int(bw * 0.88))
             _mon_h = int(prod_rgba.height * _mon_w / max(prod_rgba.width, 1))
             if _mon_h <= bh:
                 _fpw, _fph = _mon_w, _mon_h
+                _monitor_min_fill_applied = True
+            else:
+                # height가 bbox를 넘으면 height 기준으로 최대 너비 재계산
+                _mon_w2 = int(bh * prod_rgba.width / max(prod_rgba.height, 1))
+                if _mon_w2 > _fpw:
+                    _fpw, _fph = _mon_w2, bh
+                    _monitor_min_fill_applied = True
+            if _monitor_min_fill_applied:
                 print(f"  [MONITOR min fill] width → {_fpw} (fill={_fpw/max(bw,1):.2f})")
 
         _prod_fit = prod_rgba.resize((_fpw, _fph), Image.Resampling.LANCZOS)
@@ -389,26 +398,54 @@ class ControlNetInpaintProcessor:
         result_sd_pass1 = self.pipe(**pipe_kwargs).images[0]
         result_sd = result_sd_pass1
 
-        # Inner detail preservation: 제품 중심부는 composite(원본 디테일) 70%, 경계/배경은 SD 결과
+        # 3-zone blend: inner(65% composite) / edge ring(25% composite) / background(0%)
+        _blend_inner_arr = _blend_edge_arr = _blend_result_arr = None
         if _has_alpha and _pc2x > _pc1x and _pc2y > _pc1y:
             _min_dim = max(1, min(_fpw, _fph))
-            _ek_size = max(3, min(9, _min_dim // 7))
-            if _ek_size % 2 == 0:
-                _ek_size += 1
+            _ek_inner = max(5, min(15, _min_dim // 5))
+            if _ek_inner % 2 == 0:
+                _ek_inner += 1
+            _ek_edge = max(3, min(9, _min_dim // 10))
+            if _ek_edge % 2 == 0:
+                _ek_edge += 1
             _ia = np.array(_prod_fit.getchannel("A")).astype(np.float32) / 255.0
             _sil_w = np.zeros((sd_h, sd_w), dtype=np.float32)
             _sil_w[_pc1y:_pc2y, _pc1x:_pc2x] = _ia[_src1y:_src2y, _src1x:_src2x]
-            _ek = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ek_size, _ek_size))
-            _inner = cv2.erode((_sil_w * 255).astype(np.uint8), _ek).astype(np.float32) / 255.0
-            _blur_k = max(3, _ek_size * 2 + 1)
-            if _blur_k % 2 == 0:
-                _blur_k += 1
-            _blend_w = cv2.GaussianBlur(_inner, (_blur_k, _blur_k), 0) * 0.70
+            _sil_uint8 = (_sil_w * 255).astype(np.uint8)
+            _k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ek_inner, _ek_inner))
+            _inner_raw = cv2.erode(_sil_uint8, _k_inner).astype(np.float32) / 255.0
+            _blur_inner = max(3, _ek_inner * 2 + 1)
+            if _blur_inner % 2 == 0:
+                _blur_inner += 1
+            _inner_smooth = cv2.GaussianBlur(_inner_raw, (_blur_inner, _blur_inner), 0)
+            _k_edge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ek_edge, _ek_edge))
+            _sil_light = cv2.erode(_sil_uint8, _k_edge).astype(np.float32) / 255.0
+            _blur_edge = max(3, _ek_edge * 2 + 1)
+            if _blur_edge % 2 == 0:
+                _blur_edge += 1
+            _sil_light_smooth = cv2.GaussianBlur(_sil_light, (_blur_edge, _blur_edge), 0)
+            _edge_ring_smooth = np.clip(_sil_light_smooth - _inner_smooth, 0.0, 1.0)
+            _blend_w = np.clip(_inner_smooth * 0.65 + _edge_ring_smooth * 0.25, 0.0, 1.0)
+            # dark rim occlusion: KEYBOARD/MOUSE — contact 하단 2~4px 어둡게
+            if cat in ("KEYBOARD", "MOUSE"):
+                _rim_h = max(2, min(4, max(_fph, 1) // 20))
+                _rim_y1 = max(0, _pc2y - _rim_h)
+                _rim_mask = np.zeros((sd_h, sd_w), dtype=np.float32)
+                _rim_mask[_rim_y1:_pc2y, _pc1x:_pc2x] = _sil_w[_rim_y1:_pc2y, _pc1x:_pc2x]
+                _rim_mask = cv2.GaussianBlur(_rim_mask, (5, 5), 0)
+                _ra_arr = np.array(result_sd).astype(np.float32)
+                result_sd = Image.fromarray(
+                    np.clip(_ra_arr * (1.0 - _rim_mask[:, :, np.newaxis] * 0.30), 0, 255).astype(np.uint8)
+                )
             _ca = np.array(composite_sd).astype(np.float32)
             _ra = np.array(result_sd).astype(np.float32)
-            result_sd = Image.fromarray(
-                np.clip(_ca * _blend_w[:, :, np.newaxis] + _ra * (1 - _blend_w[:, :, np.newaxis]), 0, 255).astype(np.uint8)
-            )
+            _blended = np.clip(
+                _ca * _blend_w[:, :, np.newaxis] + _ra * (1 - _blend_w[:, :, np.newaxis]), 0, 255
+            ).astype(np.uint8)
+            result_sd = Image.fromarray(_blended)
+            _blend_inner_arr  = (_inner_smooth * 255).astype(np.uint8)
+            _blend_edge_arr   = (_edge_ring_smooth * 255).astype(np.uint8)
+            _blend_result_arr = _blended
 
         # refine mask: pass2 비활성화 상태에서도 debug/paste용으로 silhouette 확장만
         _refine_mask_arr = np.array(mask_sd)
@@ -442,6 +479,10 @@ class ControlNetInpaintProcessor:
                 final_paste_mask.save(_ddir / f"{_prefix}_final_paste_mask.png")
                 result_sd_pass1.save(_ddir / f"{_prefix}_pass1_result_sd.png")
                 prod_ip.save(_ddir / f"{_prefix}_prod_ip.png")
+                if _blend_inner_arr is not None:
+                    Image.fromarray(_blend_inner_arr).save(_ddir / f"{_prefix}_inner_mask.png")
+                    Image.fromarray(_blend_edge_arr).save(_ddir / f"{_prefix}_edge_ring_mask.png")
+                    Image.fromarray(_blend_result_arr).save(_ddir / f"{_prefix}_blend_result.png")
                 _m = debug_meta or {}
                 _actual_img_w = int(_fpw * cw / max(sd_w, 1))
                 _actual_img_h = int(_fph * ch / max(sd_h, 1))
@@ -468,6 +509,7 @@ class ControlNetInpaintProcessor:
                     "mask_type":                    mask_type,
                     "final_paste_mask_type":        "silhouette_blur_r3",
                     "pass2_enabled":                False,
+                    "monitor_min_fill_applied":     _monitor_min_fill_applied,
                     "has_lora":                     self._has_lora,
                     "lora_scale_applied":           _effective_lora_scale if self._has_lora else None,
                     "prompt_has_lora_token":        bool(lora_token),

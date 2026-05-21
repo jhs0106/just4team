@@ -978,7 +978,7 @@ def composite_product_simple(
     return out.convert("RGB")
 
 
-def _add_contact_shadow(
+def _add_shadows(
     base: Image.Image,
     region: tuple,
     category: str,
@@ -1015,45 +1015,69 @@ def _add_contact_shadow(
 
     _cx  = (_contact_x1 + _contact_x2) // 2
     _cw  = max(1, _contact_x2 - _contact_x1)
-    shadow = np.zeros((h, w), dtype=np.float32)
+
+    # cast shadow offset: light source 기준 우측+하단
+    _cast_ox = max(1, int(pw * 0.12))
+    _cast_oy = max(1, int(ph * 0.06))
+    _cast_cx = min(w - 1, _cx + _cast_ox)
+    _cast_cy = min(h - 1, _contact_y + _cast_oy)
+
+    contact_shadow = np.zeros((h, w), dtype=np.float32)
+    cast_shadow    = np.zeros((h, w), dtype=np.float32)
 
     if cat == "MONITOR":
-        # 스탠드 alpha contact가 좁아도 shadow는 최소 bbox 너비의 20% 보장
         _shadow_half_w = max(_cw // 4, pw // 5, 40)
-        cv2.ellipse(shadow, (_cx, _contact_y), (_shadow_half_w, 10), 0, 0, 360, 1.0, -1)
-        blur_k, strength = 25, 0.38
+        cv2.ellipse(contact_shadow, (_cx, _contact_y), (_shadow_half_w, 10), 0, 0, 360, 1.0, -1)
+        contact_blur_k, contact_str = 13, 0.52
+        _cast_hw = max(_shadow_half_w * 2, pw // 3, 60)
+        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (_cast_hw, 15), 0, 0, 360, 1.0, -1)
+        cast_blur_k, cast_str = 31, 0.15
     elif cat == "KEYBOARD":
-        shadow[max(0, _contact_y - 6):min(h, _contact_y + 8),
-               max(0, _contact_x1):min(w, _contact_x2)] = 1.0
-        blur_k, strength = 19, 0.35
+        contact_shadow[max(0, _contact_y - 4):min(h, _contact_y + 6),
+                       max(0, _contact_x1):min(w, _contact_x2)] = 1.0
+        contact_blur_k, contact_str = 11, 0.50
+        cast_shadow[max(0, _cast_cy - 5):min(h, _cast_cy + 8),
+                    max(0, _contact_x1 + _cast_ox):min(w, _contact_x2 + _cast_ox)] = 1.0
+        cast_blur_k, cast_str = 25, 0.14
     elif cat == "MOUSE":
-        cv2.ellipse(shadow, (_cx, _contact_y), (max(_cw // 2, 20), 9), 0, 0, 360, 1.0, -1)
-        blur_k, strength = 19, 0.42
+        cv2.ellipse(contact_shadow, (_cx, _contact_y), (max(_cw // 2, 20), 9), 0, 0, 360, 1.0, -1)
+        contact_blur_k, contact_str = 9, 0.55
+        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (max(_cw, 30), 14), 0, 0, 360, 1.0, -1)
+        cast_blur_k, cast_str = 21, 0.15
     elif cat == "DESK_LAMP":
-        cv2.ellipse(shadow, (_cx, _contact_y), (max(_cw // 2, 22), 12), 0, 0, 360, 1.0, -1)
-        blur_k, strength = 21, 0.28
+        cv2.ellipse(contact_shadow, (_cx, _contact_y), (max(_cw // 2, 22), 12), 0, 0, 360, 1.0, -1)
+        contact_blur_k, contact_str = 13, 0.45
+        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (max(_cw, 30), 18), 0, 0, 360, 1.0, -1)
+        cast_blur_k, cast_str = 27, 0.13
     else:
-        cv2.ellipse(shadow, (_cx, _contact_y), (max(_cw // 3, 18), 9), 0, 0, 360, 1.0, -1)
-        blur_k, strength = 17, 0.25
+        cv2.ellipse(contact_shadow, (_cx, _contact_y), (max(_cw // 3, 18), 9), 0, 0, 360, 1.0, -1)
+        contact_blur_k, contact_str = 11, 0.45
+        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (max(_cw // 2, 20), 12), 0, 0, 360, 1.0, -1)
+        cast_blur_k, cast_str = 19, 0.13
 
-    shadow = cv2.GaussianBlur(shadow, (blur_k, blur_k), 0)
-    shadow = np.clip(shadow * strength, 0.0, 0.45)
+    contact_shadow = cv2.GaussianBlur(contact_shadow, (contact_blur_k, contact_blur_k), 0)
+    contact_shadow = np.clip(contact_shadow * contact_str, 0.0, 0.50)
+    cast_shadow    = cv2.GaussianBlur(cast_shadow,    (cast_blur_k,    cast_blur_k),    0)
+    cast_shadow    = np.clip(cast_shadow    * cast_str,    0.0, 0.30)
+    combined       = np.clip(contact_shadow + cast_shadow, 0.0, 0.55)
 
     if debug_dir is not None:
         try:
             import json as _j
             _dd = Path(debug_dir)
             _dd.mkdir(parents=True, exist_ok=True)
-            Image.fromarray((shadow * 255).astype(np.uint8)).save(_dd / f"{cat}_shadow_mask.png")
+            Image.fromarray((contact_shadow * 255).astype(np.uint8)).save(_dd / f"{cat}_contact_shadow_mask.png")
+            Image.fromarray((cast_shadow    * 255).astype(np.uint8)).save(_dd / f"{cat}_cast_shadow_mask.png")
+            Image.fromarray((combined       * 255).astype(np.uint8)).save(_dd / f"{cat}_combined_shadow_mask.png")
             _shadow_info = {
-                "contact_y":      int(_contact_y),
-                "contact_x1":     int(_contact_x1),
-                "contact_x2":     int(_contact_x2),
-                "shadow_strength": float(strength),
-                "shadow_bbox":    [int(_contact_x1),
-                                   max(0,  int(_contact_y) - blur_k),
-                                   int(_contact_x2),
-                                   min(h,  int(_contact_y) + blur_k)],
+                "contact_y":              int(_contact_y),
+                "contact_x1":             int(_contact_x1),
+                "contact_x2":             int(_contact_x2),
+                "contact_shadow_opacity": float(contact_str),
+                "contact_shadow_blur":    int(contact_blur_k),
+                "cast_shadow_opacity":    float(cast_str),
+                "cast_shadow_blur":       int(cast_blur_k),
+                "cast_shadow_offset":     [int(_cast_ox), int(_cast_oy)],
             }
             _ci_path = _dd / f"{cat}_contact_info.json"
             _existing = _j.loads(_ci_path.read_text(encoding="utf-8")) if _ci_path.exists() else {}
@@ -1063,7 +1087,7 @@ def _add_contact_shadow(
             pass
 
     arr = np.array(base.convert("RGB")).astype(np.float32)
-    arr = arr * (1.0 - shadow[:, :, np.newaxis])
+    arr = arr * (1.0 - combined[:, :, np.newaxis])
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
@@ -1504,7 +1528,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if cat in _cv_only_set:
                     _record("cv_composite", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
-                    current = _add_contact_shadow(current, (x1, y1, x2, y2), cat,
+                    current = _add_shadows(current, (x1, y1, x2, y2), cat,
                                                   prod_alpha=prod_alpha,
                                                   debug_dir=_debug_dir / "products")
                     num_placed += 1
@@ -1515,7 +1539,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if _ar_invalid and not req.fixed_test_products:
                     _record("cv_fallback_aspect_invalid", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
-                    current = _add_contact_shadow(current, (x1, y1, x2, y2), cat,
+                    current = _add_shadows(current, (x1, y1, x2, y2), cat,
                                                   prod_alpha=prod_alpha,
                                                   debug_dir=_debug_dir / "products")
                     num_placed += 1
@@ -1588,7 +1612,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         _gen_results[cat]["fit_fill_ratio_h"] = round(_act_h / max(_tgt_h, 1), 3) if _act_h else None
                     except Exception:
                         pass
-                current = _add_contact_shadow(current, (x1, y1, x2, y2), cat,
+                current = _add_shadows(current, (x1, y1, x2, y2), cat,
                                               prod_alpha=prod_alpha,
                                               debug_dir=_debug_dir / "products")
                 num_placed += 1
@@ -1606,7 +1630,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                             variant_prefix="MONITOR_C_cn_0.10_ip_0.20",
                             cn_scales_override=[0.10, 0.25],
                         )
-                        _add_contact_shadow(_vC, (x1, y1, x2, y2), cat, prod_alpha=prod_alpha).save(
+                        _add_shadows(_vC, (x1, y1, x2, y2), cat, prod_alpha=prod_alpha).save(
                             _pdir / "MONITOR_C_cn_0.10_ip_0.20.png"
                         )
                         print("  [MONITOR variant C] 저장 완료")
@@ -1626,7 +1650,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                                 variant_prefix=f"{cat}_{_ls_name}",
                                 lora_scale_override=_ls_val,
                             )
-                            _add_contact_shadow(_ls_r, (x1, y1, x2, y2), cat, prod_alpha=prod_alpha).save(
+                            _add_shadows(_ls_r, (x1, y1, x2, y2), cat, prod_alpha=prod_alpha).save(
                                 _pdir / f"{cat}_{_ls_name}.png"
                             )
                             print(f"  [lora sweep] {cat} {_ls_name} 저장 완료")
