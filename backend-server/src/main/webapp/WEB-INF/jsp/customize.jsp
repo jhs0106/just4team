@@ -39,6 +39,7 @@
                                 <!-- FILE INPUT -->
                                 <input type="file"
                                        id="fileFront"
+                                       name="frontFile"
                                        accept="image/*"
                                        style="display:none"
                                        onchange="previewFrontFile(this)">
@@ -167,6 +168,7 @@
                                 <!-- FILE INPUT -->
                                 <input type="file"
                                        id="fileTop"
+                                       name="topFile"
                                        accept="image/*"
                                        style="display:none"
                                        onchange="previewTopFile(this)">
@@ -258,22 +260,11 @@
                                     <option value="minimalist">✨ Minimalist</option>
                                 </select>
                             </div>
-
-                            <!-- Hidden input to send style data -->
-                            <input type="hidden"
-                                   name="topImageData"
-                                   id="topImageData">
                         </div>
                     </div>
 
                     <!-- Optional: JavaScript to sync the selection to the hidden input -->
-                    <script>
-                        // Capture the selection from the dropdown and update hidden input
-                        document.getElementById('styleSelect').addEventListener('change', function () {
-                            const selectedValue = this.value;
-                            document.getElementById('styleInput').value = selectedValue;
-                        });
-                    </script>
+
                     <!-- Budget Input -->
                     <div class="card mb-4">
                         <div class="card-body p-4">
@@ -290,6 +281,7 @@
 
                         </div>
                     </div>
+
 
                     <div class="text-center">
                         <button type="submit" class="btn btn-primary btn-lg px-5" id="submitBtn">
@@ -373,8 +365,10 @@ function takeFrontPhoto(){
     const imageData = canvas.toDataURL("image/png");
 
     document.getElementById("frontImageData").value = imageData;
-
+    console.log(document.getElementById("frontImageData").value);
     preview.src = imageData;
+
+    closeFrontCamera();
 
     alert("Front photo captured!");
 }

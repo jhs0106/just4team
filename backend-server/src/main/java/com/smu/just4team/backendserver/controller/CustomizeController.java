@@ -21,7 +21,7 @@ public class CustomizeController {
             @RequestParam("depth") String depth,
             @RequestParam("height") String height,
             @RequestParam("style") String style,
-            @RequestParam("prompt") String prompt,
+            @RequestParam(value = "prompt", required = false) String prompt,
             @RequestParam("budget") String budget,
 
             // FILE UPLOADS
@@ -53,6 +53,12 @@ public class CustomizeController {
         System.out.println("Prompt: " + prompt);
 
         System.out.println("Budget: " + budget);
+
+        System.out.println("Front length: " +
+                (frontImageData != null ? frontImageData.length() : 0));
+
+        System.out.println("Top length: " +
+                (topImageData != null ? topImageData.length() : 0));
 
         /* =========================
            FILE UPLOADS
