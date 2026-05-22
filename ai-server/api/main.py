@@ -671,7 +671,9 @@ def calc_placements_from_available_space(
                     overlap_reject += 1
                     continue
                 candidate_count += 1
-                s = score_region_for_product(cat, rx, ry, placed_norm, relation_state)
+                _rw = (fv_bbox[2] - fv_bbox[0]) / max(fv_dw, 1)
+                _rh = (fv_bbox[3] - fv_bbox[1]) / max(fv_dh, 1)
+                s = score_region_for_product(cat, rx, ry, placed_norm, relation_state, rw=_rw, rh=_rh)
                 if s < -0.5:
                     low_score_reject += 1
                     continue
@@ -696,7 +698,9 @@ def calc_placements_from_available_space(
                                  if i["cat"] not in {"MONITOR", "DESK_SHELF"}]
                 if any(bbox_iou(_fb, i["region"]) >= _DEFAULT_OVERLAP_THR for i in _non_critical):
                     continue
-                _fs = score_region_for_product(cat, _forced_rx, _fry, placed_norm, relation_state)
+                _rw_fb = (_fb[2] - _fb[0]) / max(fv_dw, 1)
+                _rh_fb = (_fb[3] - _fb[1]) / max(fv_dh, 1)
+                _fs = score_region_for_product(cat, _forced_rx, _fry, placed_norm, relation_state, rw=_rw_fb, rh=_rh_fb)
                 best_score = max(_fs, -0.49)  # 강제 후보는 score 하한 보장
                 best_cand  = {"region": _fb, "rx": _forced_rx, "ry": _fry, "region_id": -1}
                 print(f"  [KEYBOARD forced] rx={_forced_rx:.2f} ry={_fry:.2f} → {_fb}")
@@ -771,6 +775,55 @@ def calc_placements_from_available_space(
     return placements
 
 
+_RANKER_CAT_ID = {
+    "MONITOR": 0, "KEYBOARD": 1, "MOUSE": 2, "MOUSEPAD": 3,
+    "SPEAKER": 4, "DESK_LAMP": 5, "DESK_SHELF": 6,
+    "LAPTOP_STAND": 7, "DECO": 8, "CLOCK": 9,
+}
+# 학습 샘플 부족 카테고리 — rule-based 유지
+_RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD"}
+
+_layout_ranker: dict | None = None
+
+
+def _get_layout_ranker() -> dict | None:
+    global _layout_ranker
+    if _layout_ranker is not None:
+        return _layout_ranker
+    model_path = Path(__file__).parent.parent / "outputs" / "models" / "layout_ranker.pkl"
+    if not model_path.exists():
+        return None
+    try:
+        import pickle
+        with model_path.open("rb") as f:
+            _layout_ranker = pickle.load(f)
+        print(f"[LayoutRanker] 로드 완료 type={_layout_ranker['model_type']} AUC={_layout_ranker.get('val_auc')}")
+    except Exception as e:
+        print(f"[LayoutRanker] 로드 실패: {e}")
+    return _layout_ranker
+
+
+def _make_ranker_feature(
+    cat: str, rx: float, ry: float, rw: float, rh: float,
+    relation_state: dict, placed_norm: list,
+) -> list:
+    pref = _PREFERRED_POS.get(cat, {"rx": 0.5, "ry": 0.5})
+    dist_pref   = ((rx - pref["rx"])**2 + (ry - pref["ry"])**2) ** 0.5
+    edge_x      = min(rx, 1.0 - rx)
+    edge_y      = min(ry, 1.0 - ry)
+    monitor_rx  = float(relation_state.get("monitor_rx",  -1.0))
+    monitor_ry  = float(relation_state.get("monitor_ry",  -1.0))
+    keyboard_rx = float(relation_state.get("keyboard_rx", -1.0))
+    keyboard_ry = float(relation_state.get("keyboard_ry", -1.0))
+    return [
+        _RANKER_CAT_ID.get(cat, -1),
+        rx, ry, rw, rh,
+        dist_pref, edge_x, edge_y,
+        monitor_rx, monitor_ry, keyboard_rx, keyboard_ry,
+        len(placed_norm),
+    ]
+
+
 def bbox_iou(a, b) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -789,6 +842,8 @@ def score_region_for_product(
     ry: float,
     placed_norm: list,
     relation_state: dict,
+    rw: float | None = None,
+    rh: float | None = None,
 ) -> float:
     # 관계 기반 선호 위치 조정
     if cat == "KEYBOARD" and "monitor_rx" in relation_state:
@@ -837,6 +892,18 @@ def score_region_for_product(
     # 책상 가장자리 너무 가까우면 소폭 penalty
     if min(rx, 1 - rx, ry, 1 - ry) < 0.05:
         score -= 0.3
+
+    # learned layout ranker 블렌드 (샘플 충분한 카테고리, rw/rh 있을 때만)
+    if rw is not None and rh is not None and cat not in _RANKER_SKIP_CATS:
+        _ranker = _get_layout_ranker()
+        if _ranker is not None:
+            try:
+                _feat  = _make_ranker_feature(cat, rx, ry, rw, rh, relation_state, placed_norm)
+                _prob  = _ranker["model"].predict_proba([_feat])[0][1]
+                _learned = (_prob - 0.5) * 3.0  # [-1.5, 1.5]
+                score  = score * 0.3 + _learned * 0.7
+            except Exception:
+                pass
 
     return score
 
