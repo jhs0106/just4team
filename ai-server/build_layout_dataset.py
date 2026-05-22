@@ -7,9 +7,10 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent))
 from api.dino_processor import run_grounding_dino
 
-RAW_DIR   = Path("data/style_lora/raw")
-OUT_JSONL = Path("data/layout_dataset.jsonl")
-CKPT_FILE = Path("data/.layout_dataset_ckpt.json")
+RAW_DIR        = Path("data/style_lora/raw")
+OUT_JSONL      = Path("data/layout_dataset.jsonl")
+CKPT_FILE      = Path("data/.layout_dataset_ckpt.json")
+FRONTVIEW_LIST = Path("data/frontview_images.json")
 
 DESK_PROMPT = "desk. table. wooden desk."
 OBJ_PROMPT  = (
@@ -97,11 +98,23 @@ def main():
         processed = set(json.loads(CKPT_FILE.read_text(encoding="utf-8")))
         print(f"[resume] 이미 처리됨: {len(processed)}개")
 
-    all_images = sorted(
-        p for p in RAW_DIR.rglob("*")
-        if p.suffix.lower() in IMG_EXTS and str(p) not in processed
-    )
-    print(f"[build] 처리 대상: {len(all_images)}개")
+    # front-view 필터링 목록이 있으면 해당 이미지만 처리
+    if FRONTVIEW_LIST.exists():
+        _fv_data   = json.loads(FRONTVIEW_LIST.read_text(encoding="utf-8"))
+        _fv_paths  = set(_fv_data.get("front_view", []))
+        all_images = sorted(
+            p for p in RAW_DIR.rglob("*")
+            if p.suffix.lower() in IMG_EXTS
+            and str(p) in _fv_paths
+            and str(p) not in processed
+        )
+        print(f"[build] front-view 필터 적용: {len(_fv_paths)}장 중 처리 대상 {len(all_images)}개")
+    else:
+        all_images = sorted(
+            p for p in RAW_DIR.rglob("*")
+            if p.suffix.lower() in IMG_EXTS and str(p) not in processed
+        )
+        print(f"[build] 처리 대상: {len(all_images)}개 (front-view 필터 없음)")
 
     stats = {"total": 0, "desk_fail": 0, "no_objects": 0, "written": 0, "error": 0}
 
