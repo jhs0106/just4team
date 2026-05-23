@@ -1,0 +1,5 @@
+{
+  "has_lora": true,
+  "lora_path_exists": true,
+  "generation_mode": "controlnet"
+}
