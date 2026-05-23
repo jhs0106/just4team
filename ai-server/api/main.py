@@ -630,11 +630,16 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 cv_base, sil = composite_one_with_silhouette(
                     cv_base, prod_img, (x1, y1, x2, y2), category=cat,
                 )
+                # B: SD 보조 그림자 — CV로 contact/cast shadow 미리 깔기.
+                # Stage 3 SD는 그림자 위에서 color/lighting harmonization만 담당
+                prod_alpha = prepare_product_image_for_composite(prod_img)
+                cv_base    = _add_shadows(cv_base, (x1, y1, x2, y2), cat,
+                                          prod_alpha=prod_alpha, debug_dir=_prod_debug_dir)
                 silhouettes.append(sil)
                 cats_for_prompt.append(cat)
                 placed_meta.append({"category": cat, "image_id": p.image_id, "region": [x1, y1, x2, y2]})
                 num_placed += 1
-                print(f"  [Composite] {cat} 완료 (n={num_placed})")
+                print(f"  [Composite+Shadow] {cat} 완료 (n={num_placed})")
             except Exception as _e:
                 msg = f"{cat}: composite failed: {_e}"
                 run_errors.append(msg)

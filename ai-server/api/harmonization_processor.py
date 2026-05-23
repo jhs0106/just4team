@@ -127,10 +127,10 @@ class HarmonizationProcessor:
         self,
         size:            tuple[int, int],
         silhouettes:     list[Image.Image],
-        seam_width:      int   = 14,
-        shadow_height:   int   = 36,
-        seam_strength:   float = 0.42,
-        shadow_strength: float = 0.36,
+        seam_width:      int   = 28,
+        shadow_height:   int   = 80,
+        seam_strength:   float = 0.65,
+        shadow_strength: float = 0.55,
     ) -> tuple[Image.Image, Image.Image]:
         # 반환: (strength_map_gray_0_255, binary_mask_for_pipe)
         # strength_map: per-pixel 강도. 제품 내부=0, seam ring=seam_strength, 아래 그림자 영역=gradient.
@@ -188,14 +188,14 @@ class HarmonizationProcessor:
         silhouettes:         list[Image.Image],
         categories:          list[str],
         style:               str,
-        num_inference_steps: int   = 28,
-        guidance_scale:      float = 7.0,
-        seam_strength:       float = 0.42,
-        shadow_strength:     float = 0.36,
-        seam_width_px:       int   = 14,
-        shadow_height_px:    int   = 36,
-        cn_depth_scale:      float = 0.55,
-        cn_canny_scale:      float = 0.50,
+        num_inference_steps: int   = 30,
+        guidance_scale:      float = 7.5,
+        seam_strength:       float = 0.65,
+        shadow_strength:     float = 0.55,
+        seam_width_px:       int   = 28,
+        shadow_height_px:    int   = 80,
+        cn_depth_scale:      float = 0.40,
+        cn_canny_scale:      float = 0.35,
         lora_scale:          float = 0.30,
         debug_dir:           Path | None = None,
     ) -> Image.Image:
@@ -212,7 +212,7 @@ class HarmonizationProcessor:
             seam_strength=seam_strength, shadow_strength=shadow_strength,
         )
 
-        sd_w, sd_h  = self._sd_size(orig_w, orig_h, base=512)
+        sd_w, sd_h  = self._sd_size(orig_w, orig_h, base=768)
         comp_sd     = composite_full.resize((sd_w, sd_h), Image.LANCZOS).convert("RGB")
         binary_sd   = binary_full.resize((sd_w, sd_h), Image.NEAREST)
         strength_sd = strength_full.resize((sd_w, sd_h), Image.BILINEAR)
@@ -230,8 +230,11 @@ class HarmonizationProcessor:
         lora_token = "JU_Style, " if (self._has_lora and lora_scale > 0) else ""
         prompt = (
             f"{lora_token}{style} style desk setup with {product_str}, "
-            "natural lighting, soft contact shadows, cohesive scene, "
-            "photorealistic, sharp focus, professional product photography"
+            "objects firmly grounded on wooden desk surface, "
+            "realistic dark contact shadows directly beneath each object, "
+            "soft ambient cast shadows, warm indoor lighting from above, "
+            "cohesive color temperature, no floating objects, "
+            "photorealistic interior photography, sharp focus, professional"
         )
         negative_prompt = _NEGATIVE_PROMPT
 
