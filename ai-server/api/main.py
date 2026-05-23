@@ -271,8 +271,8 @@ _PLACEMENT_ORDER = {
     "DECO":         90,
 }
 
-# CV 합성 전용 카테고리 (ControlNet 생성 금지)
-_CV_ONLY_CATS = {"MONITOR", "DESK_SHELF", "KEYBOARD", "DESK_LAMP"}
+# CV 합성 전용 카테고리 (ControlNet 생성 금지) — 현재 비활성화, 전 카테고리 SD inpainting 사용
+_CV_ONLY_CATS: set[str] = set()
 
 # cv_composite 모드에서 composite_product_simple에 적용할 카테고리별 최대 scale
 _CV_CAT_MAX_SCALE: dict[str, float] = {
@@ -311,11 +311,11 @@ _MIN_FRONT_SIZE = {
 
 # 카테고리별 tight_crop aspect ratio (w/h) 허용 범위 — 범위 밖이면 잘못된 제품 이미지
 _CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
-    "KEYBOARD":  (3.0, 99.0),   # 키보드는 가로로 매우 긴 형태여야 함
-    "MOUSE":     (0.6, 1.8),    # 마우스는 정방형에 가까운 형태여야 함
-    "MONITOR":   (1.2, 3.0),    # 모니터는 가로가 세로보다 넓어야 함
-    "SPEAKER":   (0.4, 2.0),
-    "DESK_LAMP": (0.3, 2.5),
+    "KEYBOARD":  (2.0, 99.0),   # TKL/75% 키보드(~2.5) 포함
+    "MOUSE":     (0.5, 2.0),
+    "MONITOR":   (0.9, 3.5),    # 스탠드 포함 tight crop 시 1.0 근처도 허용
+    "SPEAKER":   (0.3, 2.5),
+    "DESK_LAMP": (0.2, 3.0),
 }
 
 # scoring으로 선택된 anchor → front-view bbox 변환 시 카테고리별 y 보정 (px)

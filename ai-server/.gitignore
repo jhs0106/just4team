@@ -12,9 +12,6 @@ __pycache__/
 data/style_lora/raw/
 data/style_lora/processed/
 
-# 테스트 결과 이미지 (생성물)
-outputs/test_*/
-
 # 로그
 logs/
 

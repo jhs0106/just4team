@@ -454,6 +454,88 @@ def test_generate(phase: int | None = None):
     print(f"  products_list.json         — 사용된 제품/좌표 목록")
 
 
+def multi_run(styles: list[str] | None = None, phase: int = 3):
+    # 여러 스타일 × phase 순차 실행 — 스타일별 서브디렉토리에 결과 저장
+    styles = styles or ["white", "black"]
+    counts = _PHASE_COUNTS.get(phase)
+    run_root = Path("outputs/test_results") / datetime.now().strftime("%Y%m%d_%H%M%S") / "multi"
+
+    r = requests.get(f"{BASE}/health")
+    if r.status_code != 200:
+        raise ConnectionError("서버 응답 없음.")
+    print(f"서버 상태: OK")
+    print(f"실행 계획: {styles} × phase {phase}")
+    print(f"저장 위치: {run_root.resolve()}\n")
+
+    if not DESK_IMAGE.exists():
+        raise FileNotFoundError(f"이미지 없음: {DESK_IMAGE}")
+
+    TOP_VIEW = Path("data/test/desk_top_image2.jpg")
+    desk_image_b64 = to_b64(DESK_IMAGE)
+    top_view_b64   = to_b64(TOP_VIEW) if TOP_VIEW.exists() else None
+    summary = []
+
+    for style in styles:
+        out_dir = run_root / style
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"=== [{style}] 시작 ===")
+
+        desk = select_desk(style)
+        desk_width_mm = None
+        if desk:
+            m = parse_metadata(desk.get("metadata", ""))
+            desk_width_mm = m.get("width_mm")
+            print(f"  책상: {desk['title'][:40]}  ({desk_width_mm}mm)")
+
+        csv_products = select_products(style, counts)
+        print(f"  제품 {len(csv_products)}개: {[p['category'] for p in csv_products]}")
+
+        def _payload(p: dict) -> dict:
+            m = parse_metadata(p.get("metadata", ""))
+            item = {"category": p["category"], "name": p["title"], "image_id": int(p["id"])}
+            if m.get("width_mm"): item["width_mm"] = m["width_mm"]
+            if m.get("depth_mm"): item["depth_mm"] = m["depth_mm"]
+            return item
+
+        payload = {
+            "image_base64": desk_image_b64,
+            "style":        style,
+            "products":     [_payload(p) for p in csv_products],
+        }
+        if desk_width_mm:
+            payload["desk_width_mm"] = desk_width_mm
+        if top_view_b64:
+            payload["top_view_image_base64"] = top_view_b64
+
+        t = time.time()
+        resp = requests.post(f"{BASE}/generate", json=payload)
+        if resp.status_code != 200:
+            print(f"  요청 실패: HTTP {resp.status_code} — {resp.text[:200]}")
+            summary.append({"style": style, "ok": False})
+            continue
+
+        result = poll(resp.json()["job_id"], f"generate/{style}")
+        elapsed = time.time() - t
+
+        if result.get("cleaned_image"):
+            save_b64(result["cleaned_image"],    out_dir / "step1_cleaned.png")
+        if result.get("composited_image"):
+            save_b64(result["composited_image"], out_dir / "step2_composited.png")
+        if result.get("result_image"):
+            save_b64(result["result_image"],     out_dir / "final.png")
+
+        print(f"  제거 {result['num_removed']}개 / 배치 {result['num_placed']}개 / {elapsed:.1f}s")
+        print(f"  → {out_dir}/final.png\n")
+        summary.append({"style": style, "ok": True, "placed": result["num_placed"], "elapsed": elapsed})
+
+    print("=== 멀티런 완료 ===")
+    for s in summary:
+        if s["ok"]:
+            print(f"  [{s['style']}] 배치 {s['placed']}개 ({s['elapsed']:.1f}s)  → {run_root/s['style']}/final.png")
+        else:
+            print(f"  [{s['style']}] 실패")
+
+
 if __name__ == "__main__":
     import sys
 
@@ -466,7 +548,11 @@ if __name__ == "__main__":
         elif cmd == "generate":
             phase = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None
             test_generate(phase)
+        elif cmd == "multi":
+            styles = sys.argv[2].split(",") if len(sys.argv) > 2 else None
+            phase  = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 3
+            multi_run(styles, phase)
         else:
-            print("사용법: python test_pipeline.py [remove|place|generate [1|2|3]]")
+            print("사용법: python test_pipeline.py [remove|place|generate [1|2|3]|multi [styles] [phase]]")
     else:
         main()
