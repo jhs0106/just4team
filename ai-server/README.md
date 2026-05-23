@@ -1,34 +1,166 @@
 # Deskterior AI Server
 
-사용자의 실제 책상 사진(정면)을 받아, 예산·스타일 조건에 맞게 추천된 제품들이 책상 위에 배치된 데스크테리어 이미지를 생성하는 AI 서버.
+사용자의 실제 책상 사진(정면)과 예산·스타일 조건으로 추천된 제품 목록을 받아, 그 제품들이 책상 위에 자연스럽게 배치된 데스크테리어 시뮬레이션 이미지를 생성하는 AI 서버.
 
 ---
 
-## 서비스 흐름
+## 핵심 설계 원칙
 
-```
-사용자 입력: 책상 사진(정면) + 예산 + 스타일
-    ↓
-Spring Boot + Jina CLIP: 예산·스타일에 맞는 제품 추천 → 제품 목록 AI 서버로 전달
-    ↓
-AI 서버: 책상 위 기존 물체 제거 → 추천 제품 배치 이미지 생성
-    ↓
-사용자: 생성 이미지(레이아웃 시뮬레이션) + 실제 제품 카드(구매 링크) 나란히 표시
-```
+**1. 제품 픽셀은 절대 변형하지 않는다 (anti-hallucination)**
+- 생성형 LLM 이미지 모델(Gemini, ChatGPT image gen 등)은 제품을 텍스트로 그려내므로 hallucination 발생
+- 본 시스템은 **DB의 실제 제품 이미지 픽셀을 그대로 사용** → 사용자가 보는 제품 = 실제 구매 가능한 제품
+- SD(Stable Diffusion)는 제품을 *생성*하는 도구가 아니라 *조화시키는(harmonize)* 도구로만 사용
 
-> 이미지는 "이 책상에 이 카테고리 제품들을 올려두면 이런 셋업이 됨"을 보여주는 레이아웃 시뮬레이션입니다.
-> 이미지 속 제품이 실제 DB 제품과 픽셀 단위로 동일할 필요는 없습니다. 실제 제품 정보는 별도 카드로 표시됩니다.
+**2. SD의 역할은 seam/그림자/조명 매칭에 한정**
+- CV로 합성한 책상 이미지를 SD가 받아, 제품 경계선·그림자·조명만 자연스럽게 다듬음
+- per-pixel strength map으로 제품 내부는 strength=0 → SD가 절대 손대지 못함
+- seam ring(경계 띠) 0.42, 그림자 영역 0.36 강도로만 SD diffusion 적용
+
+**3. 사용자의 실제 책상을 보존**
+- 책상 사진 입력 → LaMa로 기존 물체만 제거 → 책상 자체의 색감·질감·원근 유지
+- 책상 스타일 변환(img2img) 단계 없음
 
 ---
 
-## 파이프라인
+## 4-Stage 파이프라인
 
 ```
-Step 1  POST /remove         책상 위 기존 물체 제거    Grounding DINO + SAM-2 + LaMa
-Step 2  POST /product_place  제품 inpainting 배치      SD Inpainting (제품 수만큼 반복)
-
-보조    POST /segment        마우스패드 세그멘테이션    SAM-2 (px/mm 스케일 계산용)
+[사용자 입력] desk_image + style + product_list
+        │
+        ▼
+┌──────────────────────────────────────────────────────────┐
+│ Stage 1 — Object Removal                                 │
+│   Grounding DINO 검출 → SAM-2 마스크 → LaMa inpainting   │
+│   결과: 빈 책상 이미지 (cleaned_desk)                     │
+└──────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌──────────────────────────────────────────────────────────┐
+│ Stage 2 — Layout & Multi-Product CV Composite            │
+│   placement.py: top-view 공간 분석 + 학습된 ranker        │
+│     → 제품별 bbox 위치 산출                                │
+│   composite_one_with_silhouette: 모든 제품을 한 번에       │
+│     cleaned_desk 위에 alpha composite                     │
+│     + 각 제품의 silhouette 마스크 추출                     │
+│   결과: composite_full + silhouettes[]                    │
+└──────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌──────────────────────────────────────────────────────────┐
+│ Stage 3 — Global Harmonization Pass (단일 SD 호출)        │
+│   harmonization_processor.py                              │
+│                                                           │
+│   1. strength_map 생성 (per-pixel float):                 │
+│        제품 내부      → 0.00 (절대 보존)                   │
+│        seam ring 14px → 0.42 (경계 자연스럽게)             │
+│        그림자 영역 36px → 0.36 (gradient, 그림자 생성)     │
+│        그 외 책상     → 0.00                              │
+│                                                           │
+│   2. SD1.5 ControlNet Inpaint (1회만 호출):                │
+│        image=composite_full                               │
+│        mask=binary(strength>0)                            │
+│        control=[depth, canny] from composite_full         │
+│        LoRA=JU_DeskStyle 0.30 (배경 스타일에만)            │
+│                                                           │
+│   3. Per-pixel differential blend:                        │
+│        final = composite × (1-s) + sd_output × s          │
+│        → 제품 내부 픽셀 100% 보존                          │
+│                                                           │
+│   결과: harmonized_image                                  │
+└──────────────────────────────────────────────────────────┘
+        │
+        ▼
+[출력] result_image (base64)
 ```
+
+### 이전 방식 대비 이점
+
+| 항목 | 옛 방식 (per-product SD 생성) | 새 방식 (harmonize) |
+|---|---|---|
+| 제품 픽셀 정확도 | ~60% (IP-Adapter 참조 생성) | **100%** (CV composite) |
+| SD 호출 횟수 | N개 제품 × 1회 (5~10회) | **1회** (제품 수 무관) |
+| 제품 간 조명 일관성 | 제품마다 따로 → 일관성 깨짐 | **하나의 SD pass로 통일** |
+| seam 후처리 | 3-zone blend, rim darkening 등 | **strength_map 자체가 해결** |
+| Inference 시간 (5개 기준) | ~50초 | **~12초 (4×)** |
+
+---
+
+## 엔드포인트
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET  | `/health` | 서버 상태 |
+| GET  | `/styles` | 지원 스타일 목록 |
+| GET  | `/jobs/{job_id}` | 비동기 작업 결과 폴링 |
+| POST | `/generate` | **권장: 4-stage 풀 파이프라인** |
+| POST | `/remove` | Stage 1만 (책상 위 물체 제거) |
+| POST | `/product_place` | 단일 영역 inpainting (legacy, 호환용) |
+| POST | `/segment` | SAM-2 포인트 세그멘테이션 |
+
+비동기 호출: POST 요청 시 즉시 `job_id` 반환 → `GET /jobs/{job_id}`로 폴링.
+
+---
+
+### POST `/generate` — 4-stage 풀 파이프라인 (권장)
+
+```json
+{
+  "image_base64":          "<책상 정면 사진>",
+  "style":                 "white",
+  "products": [
+    { "category": "MONITOR",   "name": "LG 27인치", "image_id": 236, "width_mm": 600, "depth_mm": 200 },
+    { "category": "KEYBOARD",  "name": "MX Keys",  "image_id": 441, "width_mm": 295, "depth_mm": 132 },
+    { "category": "MOUSE",     "name": "MX Master","image_id": 557, "width_mm": 124, "depth_mm": 84 },
+    { "category": "SPEAKER",   "name": "...",      "image_id": 1472, "width_mm": 100, "depth_mm": 120 },
+    { "category": "DESK_LAMP", "name": "...",      "image_id": 1881, "width_mm": 80,  "depth_mm": 80 }
+  ],
+  "desk_width_mm":         1400,
+  "desk_depth_mm":         700,
+  "top_view_image_base64": "<탑뷰 사진 — 선택>",
+  "mode":                  "own_desk",
+  "generation_mode":       "harmonize",
+  "removal_strategy":      "combined"
+}
+```
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `style` | 필수 | `white` `black` `modern` `gaming` `cozy` `nordic` `retro` `industrial` `general` |
+| `products[].image_id` | — | `data/test/processed_images/{id}.png` 파일 번호 |
+| `products[].width_mm`/`depth_mm` | — | 실측치. 없으면 CSV 카탈로그 기본값 사용 |
+| `desk_width_mm`/`desk_depth_mm` | — | 책상 실측치. 픽셀 스케일 변환에 사용 |
+| `mode` | `own_desk` | `add` (유지+추가) / `own_desk` (전체 제거+추가) / `replace` / `empty_desk` |
+| `generation_mode` | `harmonize` | **`harmonize`** (기본, 신규) / `cv_composite` (SD 미사용) / `placement_only` (배치만) |
+| `removal_strategy` | `combined` | `combined` (마스크 합쳐 1회 LaMa) / `sequential` (제품별) / `none` |
+
+**완료 응답:**
+```json
+{
+  "status":          "done",
+  "cleaned_image":   "<Stage 1 결과>",
+  "result_image":    "<Stage 3 최종 결과>",
+  "num_removed":     3,
+  "num_placed":      5
+}
+```
+
+**디버그 출력 (`outputs/debug/<timestamp>/`):**
+- `cleaned_front.png` — Stage 1 결과
+- `composite_full.png` — Stage 2 결과 (제품 전부 합성)
+- `harmonize_strength_map.png` — Stage 3 per-pixel strength
+- `harmonize_binary_mask.png` — SD inpaint 마스크
+- `harmonize_depth.png` / `harmonize_canny.png` — ControlNet 입력
+- `harmonize_sd_raw.png` — SD 출력 (blend 전)
+- `harmonize_final.png` — differential blend 후 최종
+- `harmonize_meta.json` — 모든 하이퍼파라미터·프롬프트 기록
+- `products_list.json` — 제품별 배치 정보·점수
+- `placement_debug.png` — 배치 시각화 (bbox + 점수)
+
+---
+
+### POST `/remove`, `/product_place`, `/segment`
+
+레거시·서브 엔드포인트. 자세한 설명은 [api/main.py](api/main.py) 참고.
 
 ---
 
@@ -36,218 +168,35 @@ Step 2  POST /product_place  제품 inpainting 배치      SD Inpainting (제품
 
 | 역할 | 모델 |
 |---|---|
-| 물체 감지 (텍스트 기반) | Grounding DINO `IDEA-Research/grounding-dino-tiny` |
-| 물체 세그멘테이션 | SAM-2 `facebook/sam2.1-hiera-large` |
-| 물체 제거 | LaMa `simple-lama-inpainting` |
-| 제품 배치 inpainting | SD Inpainting `runwayml/stable-diffusion-inpainting` |
+| 텍스트 기반 물체 검출 | Grounding DINO `IDEA-Research/grounding-dino-tiny` |
+| 세그멘테이션 | SAM-2 `facebook/sam2.1-hiera-large` |
+| 물체 제거 inpainting | LaMa `simple-lama-inpainting` |
+| Depth 추출 | DPT-Large `Intel/dpt-large` |
+| Harmonization SD backbone | `runwayml/stable-diffusion-v1-5` (Inpaint) |
+| ControlNet | depth `lllyasviel/sd-controlnet-depth` + canny `lllyasviel/sd-controlnet-canny` |
+| 배치 위치 ranker | LightGBM (22 features, `outputs/models/layout_ranker.txt`) |
+| Style LoRA (선택) | `outputs/models/lora_external/JU_DeskStyle` |
 
 ---
 
 ## 실행
 
-```bash
-# venv 활성화
-.\venv\Scripts\Activate.ps1   # Windows PowerShell
-# 또는
-.\venv\Scripts\activate.bat   # Windows CMD
+```powershell
+# 가상환경 활성화
+.\venv\Scripts\Activate.ps1
 
-# 서버 실행 (--reload: 코드 변경 시 자동 반영)
+# 서버 실행
 uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+# 헬스체크
+curl http://localhost:8000/health
 ```
 
----
-
-## API
-
-모든 POST 요청은 비동기입니다. `job_id`를 즉시 반환하고 `GET /jobs/{job_id}`로 결과를 폴링합니다.
-
-### `GET /health`
-서버 상태 확인.
-
-### `GET /styles`
-지원 스타일 목록: `white` `black` `modern` `gaming` `cozy` `nordic` `retro` `industrial`
-
-### `GET /jobs/{job_id}`
-작업 상태 조회. `status`: `pending` → `running` → `done` / `failed`
-
----
-
-### `POST /remove` — Step 1: 물체 제거
-
-감지 방식은 요청 내용에 따라 자동 선택됩니다.
-
-| 조건 | 사용 방식 |
-|---|---|
-| `prompt` 있음 | Grounding DINO → SAM-2 (지정한 물체만) |
-| `top_view_image_base64` 있음 | 탑뷰 SAM-2 Auto |
-| 둘 다 없음 | SAM-2 Auto (전체 자동 감지) |
-
-**Request**
-```json
-{
-  "image_base64": "...",
-  "prompt": "keyboard. mouse. monitor. headset.",
-  "max_area_ratio": 0.20
-}
-```
-
-| 파라미터 | 기본값 | 설명 |
-|---|---|---|
-| `prompt` | `null` | 제거할 물체 텍스트. `"물체1. 물체2."` 형식 |
-| `top_view_image_base64` | `null` | 탑뷰 이미지 (prompt 없을 때 사용) |
-| `max_area_ratio` | `0.20` | 이 비율 초과 마스크는 책상/배경으로 간주해 제외 |
-
-**완료 후 (`GET /jobs/{job_id}`)**
-```json
-{
-  "status": "done",
-  "cleaned_image": "...",
-  "mask_image": "...",
-  "detection_overlay": "...",
-  "num_objects": 3
-}
-```
-
----
-
-### `POST /product_place` — Step 2: 제품 배치
-
-마스크 영역에 텍스트 프롬프트 기반으로 제품을 생성합니다. 제품 수만큼 반복 호출합니다.
-
-**Request**
-```json
-{
-  "image_base64": "...",
-  "mask_base64": "...",
-  "prompt": "white mechanical keyboard on desk mat"
-}
-```
-
-| 파라미터 | 기본값 | 설명 |
-|---|---|---|
-| `prompt` | 필수 | 제품 설명. 스타일 포함 권장 (예: `"white wireless mouse"`) |
-| `num_inference_steps` | `30` | |
-| `guidance_scale` | `12.0` | 높을수록 프롬프트 충실도 증가 |
-
-**완료 후 (`GET /jobs/{job_id}`)**
-```json
-{
-  "status": "done",
-  "result_image": "..."
-}
-```
-
----
-
-### `POST /segment` — SAM-2 포인트 세그멘테이션
-
-정규화 좌표(0~1)로 클릭 포인트를 지정하면 해당 물체의 마스크를 반환합니다.
-마우스패드를 클릭해 px/mm 스케일 계산에 사용합니다.
-
-**Request**
-```json
-{
-  "image_base64": "...",
-  "point_x": 0.30,
-  "point_y": 0.75,
-  "label": 1
-}
-```
-
-**완료 후 (`GET /jobs/{job_id}`)**
-```json
-{
-  "status": "done",
-  "mask_base64": "...",
-  "overlay_base64": "..."
-}
-```
-
----
-
-### `POST /generate` — 전체 파이프라인 단일 호출 ⚠️ 임시 스펙
-
-> **Spring Boot 연동 형식이 아직 팀 내 합의되지 않았습니다.**
-> 아래 스펙은 파이프라인 테스트를 위해 임시로 정한 것으로, 실제 연동 시 변경될 수 있습니다.
-
-Step 1(물체 제거) → Step 2(제품 배치)를 한 번의 호출로 처리합니다.
-Spring Boot는 이 엔드포인트만 호출하면 됩니다.
-
-**Request**
-```json
-{
-  "image_base64": "...",
-  "style": "white",
-  "products": [
-    { "category": "KEYBOARD", "name": "로지텍 MX Keys Mini" },
-    { "category": "MOUSE",    "name": "로지텍 MX Master 3" },
-    { "category": "MONITOR",  "name": "LG 27인치 4K 모니터" }
-  ]
-}
-```
-
-| 파라미터 | 기본값 | 설명 |
-|---|---|---|
-| `style` | 필수 | 사용자 선택 스타일. `white` `black` `gaming` `cozy` `modern` `nordic` `retro` `industrial` |
-| `products` | 필수 | Spring Boot가 추천한 제품 목록. `category` + `name` |
-| `max_area_ratio` | `0.20` | 이 비율 초과 마스크는 책상/배경으로 간주해 제외 |
-
-**지원 카테고리 (`category` 값)**
-```
-KEYBOARD / MOUSE / MONITOR / SPEAKER / DESK_LAMP / DESK_SHELF / LAPTOP_STAND / DECO / CLOCK
-```
-
-**완료 후 (`GET /jobs/{job_id}`)**
-```json
-{
-  "status": "done",
-  "result_image": "..."
-}
-```
-
-> **미합의 사항 (팀 협의 필요)**
-> - `category` 값이 Spring Boot DB 카테고리명과 일치하는지 확인 필요
-> - `name`을 한국어로 받을지 영어로 받을지 결정 필요
-
----
-
-## 호출 예시 (Python)
-
-```python
-import requests, time, base64
-from pathlib import Path
-
-BASE = "http://localhost:8000"
-
-def poll(job_id):
-    while True:
-        res = requests.get(f"{BASE}/jobs/{job_id}").json()
-        if res["status"] == "done":
-            return res
-        if res["status"] == "failed":
-            raise RuntimeError(res.get("error"))
-        time.sleep(5)
-
-desk_b64 = base64.b64encode(Path("desk.jpg").read_bytes()).decode()
-
-# Step 1: 물체 제거
-r = requests.post(f"{BASE}/remove", json={
-    "image_base64": desk_b64,
-    "prompt": "keyboard. mouse. monitor. headset.",
-}).json()
-cleaned = poll(r["job_id"])["cleaned_image"]
-
-# Step 2: 제품 배치 (제품 수만큼 반복)
-current = cleaned
-for prompt, mask_b64 in products:  # Spring Boot에서 받은 제품 목록
-    r = requests.post(f"{BASE}/product_place", json={
-        "image_base64": current,
-        "mask_base64": mask_b64,
-        "prompt": prompt,
-    }).json()
-    current = poll(r["job_id"])["result_image"]
-
-# current = 최종 이미지 (base64)
+**테스트 (golden path):**
+```powershell
+python test_pipeline.py
+# 또는 멀티 스타일
+python test_pipeline.py multi white,black 3
 ```
 
 ---
@@ -257,21 +206,52 @@ for prompt, mask_b64 in products:  # Spring Boot에서 받은 제품 목록
 ```
 ai-server/
 ├── api/
-│   ├── main.py                     # FastAPI 앱, 엔드포인트
-│   ├── models.py                   # Pydantic 요청/응답 모델
-│   ├── object_removal_processor.py # Step 1: DINO + SAM-2 + LaMa 오케스트레이터
-│   ├── dino_processor.py           # Grounding DINO 텍스트 기반 물체 검출
-│   ├── sam2_processor.py           # SAM-2 세그멘테이션
-│   ├── lama_processor.py           # LaMa 물체 제거 inpainting
-│   └── product_inpaint_processor.py # Step 2: SD Inpainting 제품 배치
+│   ├── main.py                     # FastAPI 앱 + 엔드포인트 + _run_generate
+│   ├── models.py                   # Pydantic 요청/응답
+│   ├── config.py                   # 카테고리 상수 (mm, 종횡비, 배치 순서)
+│   ├── utils.py                    # b64, 카테고리 normalize, CSV 카탈로그
+│   ├── composite.py                # CV composite + silhouette + _add_shadows
+│   ├── placement.py                # 공간 분석 + 학습된 layout ranker (22 feat)
+│   ├── space_analysis.py           # top-view 가용 공간 분석
+│   ├── harmonization_processor.py  # ★ Stage 3 핵심: SD1.5 ControlNet harmonize
+│   ├── object_removal_processor.py # Stage 1 오케스트레이터
+│   ├── dino_processor.py           # Grounding DINO
+│   ├── sam2_processor.py           # SAM-2
+│   ├── lama_processor.py           # LaMa
+│   ├── product_inpaint_processor.py # /product_place 엔드포인트 전용 (legacy)
+│   └── mask_utils.py
 ├── configs/
-│   └── config.yaml                 # 서버 설정
-├── data/
-│   └── test/                       # 테스트 데이터 (git 미포함, 직접 배치)
+│   └── config.yaml
+├── data/test/
+│   ├── desk_image.jpg              # 테스트용 책상 사진 (git 미포함)
+│   ├── products.csv                # 제품 카탈로그
+│   └── processed_images/<id>.png   # 제품 이미지 (alpha 채널 권장)
 ├── outputs/
-│   └── test_results/               # 파이프라인 테스트 결과
+│   ├── debug/<timestamp>/          # 실행별 디버그 산출물
+│   ├── test_results/               # 테스트 파이프라인 결과
+│   └── models/
+│       ├── layout_ranker.txt       # LightGBM 가중치
+│       └── lora_external/          # JU_DeskStyle LoRA (PEFT)
 ├── logs/
-│   └── server_errors.log           # 서버 에러 로그
+│   └── server_errors.log
 ├── requirements.txt
-└── test_pipeline.py                # 전체 파이프라인 통합 테스트
+├── test_pipeline.py                # 통합 테스트 스크립트
+├── README.md                       # ★ 이 파일
+└── CLAUDE.md                       # 개발 컨텍스트 (Claude Code용)
 ```
+
+---
+
+## 환경
+
+- Python 3.12 권장
+- diffusers 0.37.1, transformers, peft (LoRA), lightgbm (ranker)
+- CUDA GPU 권장 (12GB+ VRAM). harmonize는 단일 SD pass라 7~8GB로도 동작 가능.
+
+---
+
+## Spring Boot 연동 시 합의 필요 사항
+
+- `products[].category` 값이 Spring Boot DB 카테고리명과 일치하는지 확인
+- `image_id`로 AI 서버 `processed_images/<id>.png`를 찾는데, Spring Boot가 이 ID를 어떻게 넘겨줄지 협의
+- `top_view_image_base64`는 선택. 없으면 front-view 기반 fallback 배치로 동작

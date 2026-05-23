@@ -61,12 +61,11 @@ from .models import (
 from .object_removal_processor import get_object_removal_processor
 from .lama_processor import get_lama_processor
 from .product_inpaint_processor import get_product_inpaint_processor
-from .controlnet_inpaint_processor import get_controlnet_inpaint_processor
-from .sd35_inpaint_processor import get_sd35_inpaint_processor
+from .harmonization_processor import get_harmonization_processor
 from .sam2_processor import get_sam2_processor
 from .config import (
-    _CV_ONLY_CATS, _CAT_ASPECT_VALID, _PLACEMENT_ORDER,
-    _CONTACT_Y_OFFSET, _FRONT_CATS, _BACK_CATS, _REMOVAL_PROMPT,
+    _PLACEMENT_ORDER, _CONTACT_Y_OFFSET,
+    _FRONT_CATS, _BACK_CATS, _REMOVAL_PROMPT,
 )
 from .utils import (
     b64_to_image, image_to_b64,
@@ -74,12 +73,12 @@ from .utils import (
 )
 from .composite import (
     prepare_product_image_for_composite, composite_product_simple,
+    composite_one_with_silhouette,
     _add_shadows, _detect_desk_bbox, _calc_regions,
 )
 from .placement import (
     calc_placements_from_available_space, bbox_iou,
     _match_products_to_detections, _region_from_detection_center,
-    _make_rect_mask,
 )
 
 job_store: dict = {}
@@ -307,25 +306,20 @@ def _run_generate(job_id: str, req: GenerateRequest):
         current.save(_debug_dir / "cleaned_front.png")
         job_store[job_id].cleaned_image = image_to_b64(current)
 
-        import os as _os
-        _use_sd35 = _os.environ.get("USE_SD35", "1") == "1"
-        if _use_sd35:
-            cn_proc = get_sd35_inpaint_processor()
-            _backbone = "sd3.5-medium"
-            print("[Generate] backbone=SD3.5-medium")
-        else:
-            cn_proc = get_controlnet_inpaint_processor()
-            _backbone = "sd1.5-controlnet"
-            print("[Generate] backbone=SD1.5+ControlNet")
+        # pipeline_mode: harmonize (기본, 새 4-stage) | cv_composite (SD 미사용) | placement_only (배치만)
+        # 'controlnet'은 backward-compat: harmonize로 alias
+        _pipeline_mode = getattr(req, "generation_mode", "harmonize")
+        if _pipeline_mode == "controlnet":
+            _pipeline_mode = "harmonize"
+        print(f"[Generate] pipeline_mode={_pipeline_mode}")
 
         import json as _jmeta
         _lora_ext_dir = Path(__file__).parent.parent / "outputs" / "models" / "lora_external"
         (_debug_dir / "generation_meta.json").write_text(
             _jmeta.dumps({
-                "backbone":         _backbone,
-                "has_lora":         cn_proc._has_lora,
+                "backbone":         "sd1.5-controlnet (harmonization)",
+                "pipeline_mode":    _pipeline_mode,
                 "lora_path_exists": _lora_ext_dir.exists(),
-                "generation_mode":  getattr(req, "generation_mode", "controlnet"),
             }, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -337,159 +331,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         num_placed   = 0
         run_errors:  list[str]  = []
-        gen_mode     = getattr(req, "generation_mode", "controlnet")
-        _gen_results: dict[str, dict] = {}
-
-        def _run_cn(p, x1, y1, x2, y2):
-            nonlocal current, num_placed, run_errors
-            cat       = normalize_category(p.category)
-            _ar_range = _CAT_ASPECT_VALID.get(cat)
-
-            def _record(route, status, error=None, ar=None, ar_valid=None, debug_json=False):
-                _gen_results[cat] = {
-                    "generation_route":   route,
-                    "generation_status":  status,
-                    "generation_error":   error,
-                    "aspect_ratio":       round(ar, 3) if ar is not None else None,
-                    "aspect_ratio_valid": ar_valid,
-                    "aspect_ratio_range": list(_ar_range) if _ar_range else None,
-                    "debug_json_created": debug_json,
-                }
-
-            if p.image_id is None:
-                msg = f"{cat}: image_id=None"
-                run_errors.append(msg)
-                print(f"  [_run_cn SKIP] {msg}")
-                _record("skipped_no_image", "skipped", error=msg)
-                return
-            prod_path = find_product_image(p.image_id)
-            if prod_path is None:
-                msg = f"{cat}: product image not found for image_id={p.image_id}"
-                run_errors.append(msg)
-                print(f"  [_run_cn SKIP] {msg}")
-                log.error("_run_cn SKIP %s", msg)
-                _record("skipped_no_file", "skipped", error=msg)
-                return
-            print(f"  [_run_cn] prod_path={prod_path}")
-            try:
-                prod_img        = Image.open(prod_path)
-                _raw_w, _raw_h  = prod_img.size
-                _prod_debug_dir = _debug_dir / "products"
-                _prod_debug_dir.mkdir(exist_ok=True)
-                prod_img.save(_prod_debug_dir / f"{cat}_{p.image_id}_raw.png")
-                prod_alpha = prepare_product_image_for_composite(prod_img)
-                prod_alpha.save(_prod_debug_dir / f"{cat}_{p.image_id}_alpha.png")
-                _alpha_cov = float((np.array(prod_alpha.getchannel("A")) > 127).mean())
-                if _alpha_cov > 0.80:
-                    print(f"  [WARNING] {cat} id={p.image_id}: alpha_coverage={_alpha_cov:.2f}"
-                          f" — multi-object/lifestyle 이미지 의심, 단품 이미지로 교체 필요")
-
-                _ar       = prod_alpha.width / max(prod_alpha.height, 1)
-                _ar_valid   = True
-                _ar_invalid = False
-                if _ar_range is not None:
-                    _ar_min, _ar_max = _ar_range
-                    if not (_ar_min <= _ar <= _ar_max):
-                        _ar_invalid = True
-                        _ar_valid   = False
-                        msg = (f"{cat} id={p.image_id}: aspect_ratio={_ar:.2f} "
-                               f"out of [{_ar_min}, {_ar_max}]")
-                        run_errors.append(msg)
-                        print(f"  [WARNING] {msg} — CV fallback")
-
-                if cat in _CV_ONLY_CATS:
-                    _record("cv_composite", "done", ar=_ar, ar_valid=_ar_valid)
-                    current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
-                    current = _add_shadows(current, (x1, y1, x2, y2), cat,
-                                           prod_alpha=prod_alpha, debug_dir=_debug_dir / "products")
-                    num_placed += 1
-                    print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
-                    return
-
-                if _ar_invalid:
-                    _record("cv_fallback_aspect_invalid", "done", ar=_ar, ar_valid=_ar_valid)
-                    current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
-                    current = _add_shadows(current, (x1, y1, x2, y2), cat,
-                                           prod_alpha=prod_alpha, debug_dir=_debug_dir / "products")
-                    num_placed += 1
-                    print(f"  [_run_cn CV fallback] {cat} (num_placed={num_placed})")
-                    return
-
-                _prod_rgb  = prod_img.convert("RGB")
-                brightness = float(np.array(_prod_rgb).mean())
-                print(f"  [_run_cn] {cat} brightness={brightness:.1f}")
-
-                if brightness < 40:
-                    ip_scale = 0.0
-                    print(f"  [_run_cn] {cat} 이미지 너무 어두움 → IP-Adapter 비활성화")
-                elif cat == "DESK_SHELF":
-                    ip_scale = 0.0
-                elif cat == "MONITOR":
-                    ip_scale = 0.35
-                elif cat == "SPEAKER":
-                    ip_scale = 0.40
-                elif cat == "DESK_LAMP":
-                    ip_scale = 0.20
-                elif cat in ("MOUSE", "MOUSEPAD"):
-                    ip_scale = 0.50
-                else:
-                    ip_scale = 0.40
-
-                mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
-                context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
-                _route         = "controlnet_forced_invalid_ar" if _ar_invalid else "controlnet"
-                print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ip_scale={ip_scale} route={_route}")
-                _debug_meta = {
-                    "image_id":           p.image_id,
-                    "width_mm":           getattr(p, "width_mm", None),
-                    "depth_mm":           getattr(p, "depth_mm", None),
-                    "height_mm":          getattr(p, "height_mm", None),
-                    "product_raw_w":      _raw_w,
-                    "product_raw_h":      _raw_h,
-                    "aspect_ratio":       round(_ar, 3),
-                    "aspect_ratio_valid": _ar_valid,
-                }
-                _record(_route, "done", ar=_ar, ar_valid=_ar_valid)
-                current = cn_proc.generate_product(
-                    image=current, mask=mask, product_image=prod_alpha,
-                    category=p.category, style=req.style.value,
-                    context_region=context_region,
-                    ip_adapter_scale=ip_scale,
-                    debug_dir=_debug_dir / "products",
-                    debug_meta=_debug_meta,
-                )
-                _dbg_json_path = _debug_dir / "products" / f"{cat}_debug.json"
-                _dbg_exists    = _dbg_json_path.exists()
-                _gen_results[cat]["debug_json_created"] = _dbg_exists
-                if _dbg_exists:
-                    try:
-                        import json as _j
-                        _dbg_data = _j.loads(_dbg_json_path.read_text(encoding="utf-8"))
-                        _act_w = _dbg_data.get("actual_composite_width_px")
-                        _act_h = _dbg_data.get("actual_composite_height_px")
-                        _tgt_w, _tgt_h = x2 - x1, y2 - y1
-                        _gen_results[cat]["actual_composite_width_px"]  = _act_w
-                        _gen_results[cat]["actual_composite_height_px"] = _act_h
-                        _gen_results[cat]["target_bbox_width_px"]       = _tgt_w
-                        _gen_results[cat]["target_bbox_height_px"]      = _tgt_h
-                        _gen_results[cat]["fit_fill_ratio_w"] = round(_act_w / max(_tgt_w, 1), 3) if _act_w else None
-                        _gen_results[cat]["fit_fill_ratio_h"] = round(_act_h / max(_tgt_h, 1), 3) if _act_h else None
-                    except Exception:
-                        pass
-                current = _add_shadows(current, (x1, y1, x2, y2), cat,
-                                       prod_alpha=prod_alpha, debug_dir=_debug_dir / "products")
-                num_placed += 1
-                print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
-            except Exception as _e:
-                msg = f"{p.category}: ControlNet generation failed: {_e}"
-                run_errors.append(msg)
-                print(f"  [_run_cn ERROR] {msg}")
-                log.error("_run_cn ERROR %s\n%s", msg, traceback.format_exc())
-                if cat not in _gen_results:
-                    _record("skipped_error", "failed", error=str(_e))
-                else:
-                    _gen_results[cat]["generation_status"] = "failed"
-                    _gen_results[cat]["generation_error"]  = str(_e)
+        gen_mode     = _pipeline_mode
 
         # ── 배치 위치 결정: top-view available space 우선, 없으면 _calc_regions ──
         placement_items:    list[dict] = []
@@ -701,6 +543,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
             return
 
         if gen_mode == "cv_composite":
+            # SD 미사용 모드 — 그림자도 SD가 안 만들어주므로 _add_shadows 직접 호출
             for item in placement_items:
                 p   = item["product"]
                 cat = normalize_category(p.category)
@@ -711,8 +554,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if prod_path is None:
                     run_errors.append(f"{cat}: image not found id={p.image_id}")
                     continue
-                prod_img = Image.open(prod_path)
-                current  = composite_product_simple(current, prod_img, item["region"], category=cat)
+                prod_img   = Image.open(prod_path)
+                prod_alpha = prepare_product_image_for_composite(prod_img)
+                current    = composite_product_simple(current, prod_img, item["region"], category=cat)
+                current    = _add_shadows(current, item["region"], cat,
+                                          prod_alpha=prod_alpha, debug_dir=_debug_dir / "products")
                 num_placed += 1
                 print(f"  [cv_composite] {cat} 합성 완료 (num_placed={num_placed})")
 
@@ -747,49 +593,97 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         placement_items[_si]["product"] = _sp0_prod
                     print(f"[Speaker] 스테레오형(AR={_sp0_ar:.2f}) → 동일 이미지 {len(_sp_items)}개 배치")
 
-        # ── controlnet 모드 ──────────────────────────────────────────
+        # ── Stage 2: Multi-product CV composite (모든 제품을 한 번에 합성) ──
+        # 각 제품의 silhouette을 추출해서 Stage 3의 strength_map 계산에 사용
+        cv_base = current.copy()
+        silhouettes:    list[Image.Image] = []
+        cats_for_prompt: list[str]        = []
+        placed_meta:    list[dict]        = []
+
         for item in placement_items:
             p   = item["product"]
             cat = normalize_category(p.category)
+            x1, y1, x2, y2 = item["region"]
+
             if cat == "DECO" and (item.get("score") is None or item.get("score", 0) <= 0):
-                print(f"  [Generate SKIP] DECO score={item.get('score')} ≤ 0 → 생성 제외")
+                print(f"  [Composite SKIP] DECO score={item.get('score')} ≤ 0")
                 continue
-            print(f"  [Generate] 처리: {p.category} image_id={p.image_id} region={item['region']}")
-            _run_cn(p, *item["region"])
+            if p.image_id is None:
+                msg = f"{cat}: image_id=None"
+                run_errors.append(msg)
+                print(f"  [Composite SKIP] {msg}")
+                continue
+            prod_path = find_product_image(p.image_id)
+            if prod_path is None:
+                msg = f"{cat}: image not found id={p.image_id}"
+                run_errors.append(msg)
+                print(f"  [Composite SKIP] {msg}")
+                continue
 
-        print(f"[Generate] num_placed={num_placed}")
+            try:
+                prod_img        = Image.open(prod_path)
+                _prod_debug_dir = _debug_dir / "products"
+                _prod_debug_dir.mkdir(exist_ok=True)
+                prod_img.save(_prod_debug_dir / f"{cat}_{p.image_id}_raw.png")
 
-        for _entry in _products_info:
-            _gr = _gen_results.get(_entry.get("category"), {})
-            _entry["generation_route"]   = _gr.get("generation_route")
-            _entry["generation_status"]  = _gr.get("generation_status")
-            _entry["generation_error"]   = _gr.get("generation_error")
-            _entry["aspect_ratio"]       = _gr.get("aspect_ratio")
-            _entry["aspect_ratio_valid"] = _gr.get("aspect_ratio_valid")
-            _entry["aspect_ratio_range"] = _gr.get("aspect_ratio_range")
-            _entry["debug_json_created"]          = _gr.get("debug_json_created", False)
-            _entry["actual_composite_width_px"]   = _gr.get("actual_composite_width_px")
-            _entry["actual_composite_height_px"]  = _gr.get("actual_composite_height_px")
-            _entry["target_bbox_width_px"]        = _gr.get("target_bbox_width_px")
-            _entry["target_bbox_height_px"]       = _gr.get("target_bbox_height_px")
-            _entry["fit_fill_ratio_w"]            = _gr.get("fit_fill_ratio_w")
-            _entry["fit_fill_ratio_h"]            = _gr.get("fit_fill_ratio_h")
-        (_debug_dir / "products_list.json").write_text(
-            _json.dumps(_products_list_meta, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        print(f"[Generate] products_list.json 업데이트 (generation_route 포함)")
+                cv_base, sil = composite_one_with_silhouette(
+                    cv_base, prod_img, (x1, y1, x2, y2), category=cat,
+                )
+                silhouettes.append(sil)
+                cats_for_prompt.append(cat)
+                placed_meta.append({"category": cat, "image_id": p.image_id, "region": [x1, y1, x2, y2]})
+                num_placed += 1
+                print(f"  [Composite] {cat} 완료 (n={num_placed})")
+            except Exception as _e:
+                msg = f"{cat}: composite failed: {_e}"
+                run_errors.append(msg)
+                print(f"  [Composite ERROR] {msg}")
+                log.error("Composite ERROR %s\n%s", msg, traceback.format_exc())
+
+        cv_base.save(_debug_dir / "composite_full.png")
+        print(f"[Generate] Stage 2 완료: {num_placed}개 제품 합성")
 
         if num_placed == 0:
             job_store[job_id].status = JobStatus.failed
             job_store[job_id].error  = (
-                "제품 생성이 0개 수행되었습니다: "
+                "composite 0개: "
                 + (" | ".join(run_errors[:5]) if run_errors else "알 수 없는 오류")
             )
             return
 
+        # ── Stage 3: Global Harmonization Pass (단일 SD 호출) ──
+        print(f"[Generate] Stage 3 시작: harmonization pass")
+        proc = get_harmonization_processor()
+        try:
+            result = proc.harmonize(
+                composite_full=cv_base,
+                silhouettes=silhouettes,
+                categories=cats_for_prompt,
+                style=req.style.value,
+                debug_dir=_debug_dir,
+            )
+            print("[Generate] Stage 3 완료")
+        except Exception as _e:
+            msg = f"harmonization failed: {_e}"
+            run_errors.append(msg)
+            print(f"  [Harmonize ERROR] {msg}")
+            log.error("Harmonize ERROR %s\n%s", msg, traceback.format_exc())
+            # SD 실패시 CV composite 결과만으로 fallback
+            result = cv_base
+            print("[Generate] fallback: CV composite 결과 그대로 사용")
+
+        for _entry in _products_info:
+            _cat_entry = _entry.get("category")
+            _entry["generation_route"]  = "harmonize" if any(m["category"] == _cat_entry for m in placed_meta) else "skipped"
+            _entry["generation_status"] = "done"      if any(m["category"] == _cat_entry for m in placed_meta) else "skipped"
+        (_debug_dir / "products_list.json").write_text(
+            _json.dumps(_products_list_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
         job_store[job_id].num_placed   = num_placed
-        job_store[job_id].result_image = image_to_b64(current)
+        job_store[job_id].result_image = image_to_b64(result)
         job_store[job_id].status       = JobStatus.done
+        print(f"[Generate] 완료. num_placed={num_placed}")
 
     except Exception as e:
         job_store[job_id].status = JobStatus.failed

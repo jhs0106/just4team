@@ -105,6 +105,50 @@ def composite_product_simple(
     return out.convert("RGB")
 
 
+def composite_one_with_silhouette(
+    base: Image.Image,
+    product_img: Image.Image,
+    region: tuple,
+    edge_feather: int = 4,
+    category: str = "",
+) -> tuple[Image.Image, Image.Image]:
+    # composite_product_simple과 동일한 합성 + base 크기 grayscale silhouette 반환
+    # silhouette은 feather 전 sharp alpha를 사용 — strength_map의 seam ring 계산을 위함
+    x1, y1, x2, y2 = region
+    target_w = max(1, x2 - x1)
+    target_h = max(1, y2 - y1)
+
+    prod    = prepare_product_image_for_composite(product_img)
+    _max_sc = _CV_CAT_MAX_SCALE.get(category, 1.0)
+    scale   = min(target_w / max(prod.width, 1), target_h / max(prod.height, 1), _max_sc)
+    new_w   = max(30, int(prod.width * scale))
+    new_h   = max(30, int(prod.height * scale))
+    if (new_w, new_h) != (prod.width, prod.height):
+        prod = prod.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    alpha_sharp = prod.getchannel("A").copy()
+
+    if edge_feather > 0:
+        alpha_arr  = np.array(alpha_sharp)
+        ksize      = edge_feather * 2 + 1
+        alpha_blur = cv2.GaussianBlur(alpha_arr, (ksize, ksize), 0)
+        prod_arr   = np.array(prod)
+        prod_arr[:, :, 3] = alpha_blur
+        prod = Image.fromarray(prod_arr)
+
+    px       = x1 + (target_w - prod.width) // 2
+    py       = y2 - prod.height
+    paste_xy = (max(0, px), max(0, py))
+
+    out = base.convert("RGBA")
+    out.alpha_composite(prod, paste_xy)
+
+    silhouette = Image.new("L", base.size, 0)
+    silhouette.paste(alpha_sharp, paste_xy)
+
+    return out.convert("RGB"), silhouette
+
+
 def _add_shadows(
     base: Image.Image,
     region: tuple,
