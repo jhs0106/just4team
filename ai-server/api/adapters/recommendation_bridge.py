@@ -7,7 +7,10 @@
 #   - MONITOR_ARM, DESK 카테고리: skip
 #   - LIGHTING: AI 서버에 정식 추가됨 (config.py 참조)
 
+from pathlib import Path
+
 from ..models import GenerateRequest, ProductItem, RemoveMode, StyleName
+from ..utils import find_product_image
 from .style_mapper import map_to_style
 
 
@@ -54,8 +57,10 @@ def setup_to_generate_request(
     desk_depth_mm:        int   | None  = None,
     top_view_image_b64:   str   | None  = None,
     mode:                 RemoveMode    = RemoveMode.own_desk,
-    generation_mode:      str           = "harmonize",
+    generation_mode:      str           = "controlnet",
     removal_strategy:     str           = "combined",
+    verify_images:        bool          = True,
+    on_missing:           str           = "skip",
 ) -> GenerateRequest:
     # SetupRecommender.recommend_setup()의 setup dict 1개를 받아 GenerateRequest로 변환.
     #
@@ -69,11 +74,16 @@ def setup_to_generate_request(
     #       ...
     #     }
     #   }
+    #
+    # verify_images=True면 각 image_id가 AI 서버의 processed_images/{id}.png에 존재하는지 확인.
+    # on_missing: "skip"(누락 제품 제외) | "raise"(예외 발생)
     items = setup.get("items") or {}
     if not items:
         raise ValueError("setup['items']가 비어있음")
 
     products: list[ProductItem] = []
+    missing_ids: list[tuple[str, int]] = []
+
     for rec_cat, item in items.items():
         ai_cat = _CATEGORY_MAP.get(rec_cat)
         if ai_cat is None:
@@ -82,18 +92,37 @@ def setup_to_generate_request(
         product_id = item.get("id")
         if product_id is None:
             continue
+        pid = int(product_id)
+
+        # ID 존재 검증 — recommendation DB id와 AI 서버 파일명 일치 여부 확인
+        if verify_images:
+            prod_path = find_product_image(pid)
+            if prod_path is None:
+                msg = f"{ai_cat}(image_id={pid}): processed_images/{pid}.png 없음"
+                if on_missing == "raise":
+                    raise FileNotFoundError(msg)
+                missing_ids.append((ai_cat, pid))
+                continue
 
         width_mm, depth_mm = _extract_size(item)
         products.append(ProductItem(
             category=ai_cat,
             name=str(item.get("title") or ai_cat),
-            image_id=int(product_id),
+            image_id=pid,
             width_mm=width_mm,
             depth_mm=depth_mm,
         ))
 
+    if missing_ids:
+        print(f"[recommendation_bridge] 이미지 누락 제품 {len(missing_ids)}개 skip:")
+        for cat, pid in missing_ids:
+            print(f"  - {cat}: image_id={pid}")
+
     if not products:
-        raise ValueError("매핑된 제품이 없음 (모두 skip 카테고리)")
+        raise ValueError(
+            "매핑된 제품이 없음 (모두 skip 카테고리 또는 이미지 누락). "
+            f"missing_ids={missing_ids}"
+        )
 
     style = map_to_style(color_text=color_text, theme_text=theme_text)
 
@@ -119,11 +148,12 @@ def setups_to_generate_requests(
     desk_depth_mm:        int   | None  = None,
     top_view_image_b64:   str   | None  = None,
     mode:                 RemoveMode    = RemoveMode.own_desk,
-    generation_mode:      str           = "harmonize",
+    generation_mode:      str           = "controlnet",
     removal_strategy:     str           = "combined",
+    verify_images:        bool          = True,
+    on_missing:           str           = "skip",
 ) -> list[GenerateRequest]:
     # 여러 setup(top-3 등)을 각각 GenerateRequest로 변환.
-    # 사용자에게 여러 후보를 보여주려는 경우 사용.
     return [
         setup_to_generate_request(
             setup=s,
@@ -136,6 +166,8 @@ def setups_to_generate_requests(
             mode=mode,
             generation_mode=generation_mode,
             removal_strategy=removal_strategy,
+            verify_images=verify_images,
+            on_missing=on_missing,
         )
         for s in setups
     ]

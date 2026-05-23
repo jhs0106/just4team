@@ -11,7 +11,7 @@ from .config import (
     _OVERLAP_TOLERANCE, _DEFAULT_OVERLAP_THR,
     _FRONT_HEIGHT_RATIO, _DESK_W_RATIO,
     _DINO_LABEL_TO_CATEGORY, _RANKER_CAT_ID, _RANKER_SKIP_CATS,
-    _FRONT_CATS, _BACK_CATS, _REMOVAL_PROMPT,
+    _FRONT_CATS, _BACK_CATS, _REMOVAL_PROMPT, _CAT_RY_RANGE,
 )
 from .utils import normalize_category
 from .composite import _detect_desk_bbox, _calc_regions
@@ -100,52 +100,42 @@ def _front_bbox_for_anchor(
     desk_width_mm: int | None,
     relation_state: dict,
 ) -> tuple[int, int, int, int] | None:
-    ps     = 0.60 + 0.40 * ry
-    fv_pw  = max(40, min(int(w_mm * fv_dw / (desk_width_mm or 1200) * ps), int(fv_dw * 0.65)))
-    fv_ph  = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
-    min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
-    fv_pw  = max(fv_pw, min_w)
-    fv_ph  = max(fv_ph, min_h)
-    _y_override = False
-    _rx_adj = rx
+    # ranker가 선택한 (rx, ry)를 front-view bbox로 변환.
+    # ry는 카테고리별 안전 범위(_CAT_RY_RANGE)로 clamp하여 비현실적 배치 방지.
+    # 카테고리간 관계 제약(예: KEYBOARD가 MONITOR 아래 와야 함)은 별도 강제.
 
+    # 1. ry를 안전 범위로 clamp
+    ry_min, ry_max = _CAT_RY_RANGE.get(cat, (0.10, 0.85))
+    ry_clamped     = max(ry_min, min(ry_max, ry))
+
+    # 2. 픽셀 크기 계산 (perspective scale은 clamp된 ry 사용)
+    ps = 0.60 + 0.40 * ry_clamped
+    fv_pw = max(40, min(int(w_mm * fv_dw / (desk_width_mm or 1200) * ps), int(fv_dw * 0.65)))
+    fv_ph = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
+    min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
+    fv_pw = max(fv_pw, min_w)
+    fv_ph = max(fv_ph, min_h)
+
+    # 3. 카테고리별 px 크기 보정 (mm 기반 계산이 너무 작거나 클 때 cap)
+    _rx_adj = rx
     if cat == "MONITOR":
         fv_pw = max(min(int(fv_dw * 0.48), 420), 240)
         fv_ph = int(fv_pw * 0.60)
-        _monitor_contact_y = int(fv_dy1 + fv_dh * 0.28)
-        y2 = _monitor_contact_y
-        y1 = max(int(fv_h * 0.05), y2 - fv_ph)
-        relation_state["monitor_contact_y"] = y2
-        _y_override = True
     elif cat == "KEYBOARD":
         fv_pw = max(min(int(fv_dw * 0.38), 360), 220)
         fv_ph = max(int(fv_pw * 0.20), 45)
         if "monitor_rx" in relation_state:
-            _rx_adj = relation_state["monitor_rx"]
-        _kb_base_y = int(fv_dy1 + fv_dh * 0.62) + _CONTACT_Y_OFFSET["KEYBOARD"]
-        y2 = min(_kb_base_y, int(fv_dy2 - 15))
-        y1 = y2 - fv_ph
-        _mon_y2 = relation_state.get("monitor_contact_y", 0)
-        if y1 < _mon_y2 + 20:
-            y1 = _mon_y2 + 20
-            y2 = y1 + fv_ph
-        relation_state["keyboard_y2"] = y2
-        _y_override = True
-    elif cat == "DESK_LAMP":
-        fv_pw = max(fv_pw, 90)
-        fv_ph = max(fv_ph, 130)
-        _rx_adj = max(rx, 0.12) if rx < 0.5 else min(rx, 0.88)
-        y2 = int(fv_dy1 + fv_dh * 0.45)
-        y1 = y2 - fv_ph
-        _y_override = True
+            _rx_adj = relation_state["monitor_rx"]  # 키보드는 모니터 가로축 정렬
     elif cat == "DESK_SHELF":
         fv_pw = max(min(int(fv_dw * 0.40), 320), 150)
         fv_ph = max(int(fv_pw * 0.20), 30)
         if "monitor_rx" in relation_state:
             _rx_adj = relation_state["monitor_rx"]
-        y2 = int(fv_dy1 + fv_dh * 0.35)
-        y1 = y2 - fv_ph
-        _y_override = True
+    elif cat == "DESK_LAMP":
+        fv_pw = max(fv_pw, 90)
+        fv_ph = max(fv_ph, 130)
+        # 책상 중앙 회피 (모니터 가림 방지) — rx만 약간 조정
+        _rx_adj = max(rx, 0.12) if rx < 0.5 else min(rx, 0.88)
     elif cat == "SPEAKER":
         fv_pw = max(fv_pw, 60)
         fv_ph = max(fv_ph, 60)
@@ -155,31 +145,85 @@ def _front_bbox_for_anchor(
     elif cat == "MOUSE":
         fv_pw = max(fv_pw, 60)
         fv_ph = max(int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"]), 45)
-        _mouse_base_y = relation_state.get("keyboard_y2", int(fv_dy1 + fv_dh * 0.62))
-        y2 = min(_mouse_base_y + _CONTACT_Y_OFFSET["MOUSE"], int(fv_dy2 - 15))
-        y1 = y2 - fv_ph
-        _kb_y1 = relation_state.get("keyboard_front_y1", 0)
-        if y1 < _kb_y1:
-            y1 = _kb_y1
-            y2 = y1 + fv_ph
-        _y_override = True
     elif cat == "MOUSEPAD":
         fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
+    elif cat == "LIGHTING":
+        # 모니터 위 가로 라이트바 — 모니터 가로폭과 비슷하게, 매우 얇음
+        if "monitor_rx" in relation_state:
+            _rx_adj = relation_state["monitor_rx"]
+        fv_pw = max(min(int(fv_dw * 0.45), 380), 200)
+        fv_ph = max(int(fv_pw * _FRONT_HEIGHT_RATIO.get("LIGHTING", 0.08)), 14)
 
+    # 4. x 좌표 (rx 또는 카테고리 의존성 사용)
     _kb_x2 = relation_state.get("keyboard_front_x2") if cat == "MOUSE" else None
     if _kb_x2 is not None:
+        # MOUSE는 KEYBOARD 우측에 붙임 (사용자 손 위치)
         x1 = max(0, _kb_x2 - fv_pw // 4)
         x2 = min(fv_w, x1 + fv_pw)
     else:
         fv_cx = fv_dx1 + _rx_adj * fv_dw
         x1    = max(0, int(fv_cx - fv_pw // 2))
         x2    = min(fv_w, x1 + fv_pw)
-    if not _y_override:
-        y2 = min(fv_dy2, int(fv_dy1 + ry * fv_dh))
-        y1 = max(0, y2 - fv_ph)
-    else:
-        y1 = max(0, y1)
-        y2 = min(fv_h, y2)
+
+    # 5. y 좌표 — clamp된 ry를 base로 사용 (★ 모든 카테고리 통일)
+    #    이전엔 카테고리별 하드코딩 % 값으로 덮어써서 ranker 결과 무시됐음
+    y2 = min(fv_dy2, max(fv_dy1, int(fv_dy1 + ry_clamped * fv_dh)))
+    y1 = max(0, y2 - fv_ph)
+
+    # 6. 카테고리간 관계 강제 (안전판)
+    if cat == "MONITOR":
+        # 모니터 상단이 책상 위로 충분히 솟아야 함
+        y1 = max(int(fv_h * 0.05), y1)
+        y2 = y1 + fv_ph
+        relation_state["monitor_contact_y"] = y2
+    elif cat == "DESK_SHELF":
+        # 모니터와 비슷한 깊이
+        if "monitor_contact_y" in relation_state:
+            _mon_y2 = relation_state["monitor_contact_y"]
+            y2 = min(y2, _mon_y2 + int(fv_dh * 0.05))
+            y1 = y2 - fv_ph
+    elif cat == "KEYBOARD":
+        # 모니터 아래로 와야 함 (모니터에 안 가려지게)
+        _mon_y2 = relation_state.get("monitor_contact_y", 0)
+        if y1 < _mon_y2 + 20:
+            y1 = _mon_y2 + 20
+            y2 = y1 + fv_ph
+        # 책상 앞 가장자리 넘지 않게
+        y2 = min(y2, int(fv_dy2 - 15))
+        y1 = y2 - fv_ph
+        # CONTACT_Y_OFFSET 적용 (시각적 접지 보정)
+        _offset = _CONTACT_Y_OFFSET.get("KEYBOARD", 0)
+        y2 = min(y2 + _offset, int(fv_dy2 - 15))
+        y1 = y2 - fv_ph
+        relation_state["keyboard_y2"] = y2
+        relation_state["keyboard_front_y1"] = y1
+    elif cat == "MOUSE":
+        # 키보드와 같은 깊이 (책상 면이 같으므로)
+        _kb_y2 = relation_state.get("keyboard_y2")
+        if _kb_y2 is not None:
+            _offset = _CONTACT_Y_OFFSET.get("MOUSE", 0)
+            y2 = min(_kb_y2 + _offset, int(fv_dy2 - 15))
+            y1 = y2 - fv_ph
+            _kb_y1 = relation_state.get("keyboard_front_y1", 0)
+            if y1 < _kb_y1:
+                y1 = _kb_y1
+                y2 = y1 + fv_ph
+    elif cat == "LIGHTING":
+        # 모니터 상단에 부착 — monitor_contact_y에서 모니터 높이만큼 위로 가서 위쪽 5~10px
+        _mon_y2 = relation_state.get("monitor_contact_y")
+        if _mon_y2 is not None:
+            # 모니터 본체 위쪽 가장자리 추정 (모니터 높이 ≈ fv_dh × 0.60)
+            _mon_top_estimate = max(int(fv_h * 0.05), _mon_y2 - int(fv_dh * 0.60))
+            y2 = _mon_top_estimate + max(2, fv_ph // 3)  # 라이트바 하단이 모니터 상단 살짝 가림
+            y1 = y2 - fv_ph
+        # 화면 상단 안전
+        if y1 < int(fv_h * 0.02):
+            y1 = int(fv_h * 0.02)
+            y2 = y1 + fv_ph
+
+    # 7. 화면 경계 안전화
+    y1 = max(0, y1)
+    y2 = min(fv_h, y2)
 
     if x2 <= x1 or y2 <= y1:
         return None

@@ -23,46 +23,61 @@ def _letterbox_512(img: Image.Image) -> Image.Image:
     return canvas
 
 _CAT_PROMPT = {
-    "KEYBOARD":     "keyboard flat on desk, front view, natural lighting",
-    "MOUSE":        "wireless mouse on desk, top-front view, natural lighting",
+    "KEYBOARD":     "keyboard on desk, front view, natural lighting, sharp detail",
+    "MOUSE":        "wireless mouse on desk, top-front view, natural lighting, sharp detail",
     "MOUSEPAD":     "desk mat on desk surface, thin flat rectangle, natural lighting",
-    "MONITOR":      "monitor black screen, thin bezel, front view, natural lighting",
-    "SPEAKER":      "desktop speaker on desk, front view, natural lighting",
-    "DESK_LAMP":    "desk lamp with base and arm, standing on desk, natural lighting",
+    "MONITOR":      "computer monitor with thin bezel and stand, front view, natural lighting, sharp detail",
+    "SPEAKER":      "desktop speaker on desk, front view, natural lighting, sharp detail",
+    "DESK_LAMP":    "desk lamp with base and arm, standing on desk, natural lighting, sharp detail",
     "DESK_SHELF":   "monitor riser shelf on desk, open storage below, natural lighting",
     "LAPTOP_STAND": "laptop stand on desk, angled metal, natural lighting",
-    "DECO":         "desk decoration on desk surface, natural lighting",
+    "DECO":         "small desk decoration on desk surface, natural lighting",
     "CLOCK":        "digital desk clock, visible face, natural lighting",
 }
 
+# === Negative prompt 정책 ===
+# 모든 카테고리에 공통으로 차단할 것 (퀄리티 + 명백한 실패 케이스).
+# QR/barcode는 2026-05-24 MONITOR 사태 직후 추가 — IP-Adapter conditioning이
+# 약할 때 SD가 학습 데이터의 모니터 화면을 따라 QR/barcode를 그리는 경향 관찰됨.
+# "screen content"류 단어는 의도적으로 제외 — 모니터의 자연 화면 표시 허용.
 _NEGATIVE_PROMPT = (
-    "blurry, low quality, distorted, watermark, text, person, face, "
-    "floating, deformed, ugly, empty desk, bare desk, no product, "
+    "blurry, low quality, distorted, watermark, qr code, barcode, text overlay, "
+    "person, face, floating, deformed, ugly, empty desk, bare desk, no product, "
     "missing object, invisible, transparent, same as background, "
-    "colorful screen, bright screen, screen content, display image, glowing screen"
+    "extra objects, duplicate, multiple monitors, multiple keyboards"
 )
 
+# === 카테고리별 추가 Negative prompt ===
+# 각 카테고리에서 자주 발생하는 hallucination 패턴 차단.
+# 추가 시 영향 범위 명시 필수.
 _CAT_NEGATIVE = {
+    # MONITOR: QR/barcode/scrambled text 패턴 차단. 화면 콘텐츠는 허용 (negative에 screen 키워드 X)
     "MONITOR": (
-        "keyboard, laptop, shelf, wallpaper, sunset, landscape, "
-        "image on screen, glowing screen, lit screen, bright display, neon"
+        "keyboard, laptop, shelf, qr code, barcode, scrambled text, "
+        "garbled letters, gibberish, distorted screen, broken display"
     ),
+    # DESK_LAMP: 케이블만 그려지는 케이스, 기반 부재 차단
     "DESK_LAMP": (
         "cable only, wire only, floating line, no base, broken lamp, "
         "thin random curve, snake, cord"
     ),
+    # MOUSE: 키보드/모니터로 그려지는 케이스 차단
     "MOUSE": (
         "large object, keyboard, monitor, floating, deformed mouse"
     ),
+    # KEYBOARD: 모니터/세로 물체로 그려지는 케이스 차단
     "KEYBOARD": (
         "monitor, laptop screen, vertical object, floating keys"
     ),
+    # MOUSEPAD: 두꺼운 물체로 그려지는 케이스 차단
     "MOUSEPAD": (
         "thick object, monitor, keyboard, floating mat"
     ),
+    # DESK_SHELF: 벽 선반/액자로 그려지는 케이스 차단
     "DESK_SHELF": (
         "monitor, laptop, items on shelf, picture frame, wall shelf"
     ),
+    # SPEAKER: 손잡이/액자/문 같은 잘못된 형태 차단
     "SPEAKER": (
         "handle, picture frame, door, arch shape, bracket"
     ),
@@ -367,7 +382,18 @@ class ControlNetInpaintProcessor:
         result_sd_pass1 = self.pipe(**pipe_kwargs).images[0]
         result_sd = result_sd_pass1
 
-        # 3-zone blend: inner(65% composite) / edge ring(25% composite) / background(0%)
+        # === 3-zone blend 정책 ===
+        # SD 결과(result_sd)와 CV pre-composite(composite_sd)를 silhouette 기반 zone별 가중치로 blend.
+        # 목표: 제품 외형은 어느 정도 보존(SD가 완전 새로 그리지 않게) + 경계는 자연스럽게.
+        #
+        # zone        | composite 비중 | SD 비중 | 의도
+        # ------------|---------------|--------|--------
+        # inner       | 0.65          | 0.35   | 제품 내부 — DB 픽셀 65% 유지 (얼굴/로고 인식 가능)
+        # edge ring   | 0.25          | 0.75   | 경계 — SD가 책상 톤과 융합하도록
+        # background  | 0.00          | 1.00   | 배경 — SD가 책상 환경 자유 생성
+        #
+        # 카테고리별 차등 적용은 향후 실험 — 우선 단일 가중치로 통일.
+        # 변경 시 docs/ARCHITECTURE.md §4.7 참조.
         _blend_inner_arr = _blend_edge_arr = _blend_result_arr = None
         if _has_alpha and _pc2x > _pc1x and _pc2y > _pc1y:
             _min_dim = max(1, min(_fpw, _fph))

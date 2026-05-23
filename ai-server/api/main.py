@@ -62,7 +62,8 @@ from .object_removal_processor import get_object_removal_processor
 from .lama_processor import get_lama_processor
 from .product_inpaint_processor import get_product_inpaint_processor
 from .controlnet_inpaint_processor import get_controlnet_inpaint_processor
-from .harmonization_processor import get_harmonization_processor
+# harmonization_processor: 2026-05-23 실험 → 환경 hallucination 문제로 폐기.
+# 파일은 보존하지만 import하지 않음. 자세한 내용: docs/ARCHITECTURE.md §4.3
 from .sam2_processor import get_sam2_processor
 from .config import (
     _CV_ONLY_CATS, _CAT_ASPECT_VALID, _PLACEMENT_ORDER,
@@ -397,22 +398,36 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"  [_run_cn CV] {cat} 완료 (num_placed={num_placed})")
                     return
 
+                # === IP-Adapter scale 정책 ===
+                # 제품 reference 이미지의 영향 강도. 너무 약하면 hallucination(QR/JG79 등),
+                # 너무 강하면 SD가 원본 이미지를 거의 그대로 복사하여 어색.
+                #
+                # 카테고리 | scale | 근거
+                # --------|-------|-----
+                # MONITOR  | 0.60  | 화면 hallucination 방지 위해 강하게 (2026-05-24 QR 사태 후 0.35→0.60)
+                # MOUSE    | 0.60  | 작은 디테일 보존 필요 (버튼/스크롤휠)
+                # MOUSEPAD | 0.60  | 표면 패턴/로고 보존
+                # SPEAKER  | 0.55  | 형태 다양성 큼, 중간 강도
+                # DEFAULT  | 0.55  | 일반 카테고리 안전 기본값
+                # DESK_LAMP| 0.40  | 어두운 부분 많아 너무 강하면 음영 어색
+                # DESK_SHELF | 0.35 | 책상 위에 얹는 단순 구조, 강한 참조 불필요
+                # brightness<40 | 0.0 | 너무 어두운 이미지(lifestyle 컷)는 IP-Adapter가 망침
                 _prod_rgb  = prod_img.convert("RGB")
                 brightness = float(np.array(_prod_rgb).mean())
                 if brightness < 40:
                     ip_scale = 0.0
                 elif cat == "DESK_SHELF":
-                    ip_scale = 0.0
-                elif cat == "MONITOR":
                     ip_scale = 0.35
+                elif cat == "MONITOR":
+                    ip_scale = 0.60
                 elif cat == "SPEAKER":
-                    ip_scale = 0.40
+                    ip_scale = 0.55
                 elif cat == "DESK_LAMP":
-                    ip_scale = 0.20
-                elif cat in ("MOUSE", "MOUSEPAD"):
-                    ip_scale = 0.50
-                else:
                     ip_scale = 0.40
+                elif cat in ("MOUSE", "MOUSEPAD"):
+                    ip_scale = 0.60
+                else:
+                    ip_scale = 0.55
 
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None

@@ -158,6 +158,14 @@ def _add_shadows(
     prod_alpha: Image.Image | None = None,
     debug_dir: Path | None = None,
 ) -> Image.Image:
+    # === 그림자 광원 방향 정책 ===
+    # 광원: 상단 좌측 (실내 형광등/창문 기준 자연스러운 위치).
+    # → cast shadow는 항상 제품 우측 아래로 떨어짐 (_cast_ox = +pw*0.12, _cast_oy = +ph*0.06).
+    # contact shadow는 제품 바로 아래 (접지점 ellipse/rectangle).
+    #
+    # 한계: 실제 사용자 책상 사진의 조명 방향과 무관하게 고정.
+    # 책상 사진이 우측 광원이면 시각적으로 어색할 수 있음.
+    # 추후: 책상 사진에서 광원 방향 자동 추정 (DPT depth 분석 등) → 향후 작업.
     x1, y1, x2, y2 = region
     w, h = base.size
     cat  = category.upper()

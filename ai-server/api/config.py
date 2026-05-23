@@ -98,6 +98,24 @@ _CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
     "LIGHTING":  (5.0, 30.0),
 }
 
+# 카테고리별 ry(top-view depth axis) 안전 범위.
+# ranker가 산출한 ry를 front-view bbox로 변환할 때 이 범위로 clamp하여
+# 비현실적 배치(예: 모니터가 책상 앞쪽 끝에 옴)를 방지함.
+# ry: 0=책상 back edge(벽 쪽), 1=책상 front edge(사용자 쪽)
+_CAT_RY_RANGE: dict[str, tuple[float, float]] = {
+    "MONITOR":      (0.18, 0.35),   # 책상 뒤 1/3 (모니터는 보통 책상 뒤)
+    "DESK_SHELF":   (0.15, 0.32),   # 모니터 받침대 — 모니터와 비슷한 깊이
+    "LIGHTING":     (0.05, 0.20),   # 모니터 위쪽 (벽 가까이)
+    "DESK_LAMP":    (0.20, 0.50),   # 책상 뒤~중간
+    "SPEAKER":      (0.18, 0.45),   # 책상 뒤~중간
+    "LAPTOP_STAND": (0.30, 0.55),   # 책상 중간
+    "DECO":         (0.20, 0.55),   # 자유로움
+    "CLOCK":        (0.18, 0.45),   # 자유로움
+    "KEYBOARD":     (0.55, 0.78),   # 책상 앞 (사용자 가까이)
+    "MOUSE":        (0.55, 0.78),   # 키보드와 같은 깊이
+    "MOUSEPAD":     (0.55, 0.78),   # 키보드/마우스 영역
+}
+
 _CONTACT_Y_OFFSET = {
     "KEYBOARD": 32,
     "MOUSE":    20,
@@ -173,12 +191,26 @@ _RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD", "LIGHTING"}
 _FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
 _BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK", "LIGHTING"}
 
+# === LaMa removal prompt 정책 ===
+# Grounding DINO로 검출할 "책상 위 제거 대상 물체" 텍스트 목록.
+# 단어 추가 시 false-positive 위험 평가 필수:
+#   - 일반명사("desk", "wall" 등): 책상 자체/벽 잡힐 위험 → 금지
+#   - 가구류("shelf", "chair" 등): 옆 가구 잡힐 위험 → max_area_ratio 필터로 1차 방어
+#   - 합성어/특수어("light bar"): DINO가 "light"만 매칭하여 책상 밝은 영역 잡을 위험
+# 안전하게 후보 단어 추가 후 desk_image.jpg/desk_image2.jpg로 검출 결과 검증할 것.
+# 검증 안 된 단어는 추가하지 말 것.
 _REMOVAL_PROMPT = (
+    # PC 및 컴퓨터 주변기기
     "laptop. laptop computer. notebook computer. monitor. keyboard. mouse. "
-    "mouse pad. mousepad. headset. cup. mug. book. books. book stack. "
+    "mouse pad. mousepad. headset. "
+    # 책상 위 일상 소품
+    "cup. mug. book. books. book stack. "
     "notebook. notepad. paper. document. folder. file. binder. "
     "pen. pencil. pen holder. pencil holder. ruler. scissors. tape. "
+    # 전자기기
     "phone. smartphone. tablet. speaker. desk lamp. lamp. "
-    "clock. digital clock. diffuser. perfume bottle. vase. "
-    "light bar. screen bar. monitor light."
+    # 장식 소품
+    "clock. digital clock. diffuser. perfume bottle. vase."
+    # 주의: "light bar", "screen bar", "monitor light"는 false-positive 위험으로 제외.
+    # LIGHTING 카테고리는 사용자가 입력으로 명시 시에만 생성, 기존 물체 제거 대상 아님.
 )

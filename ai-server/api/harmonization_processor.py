@@ -1,3 +1,18 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  [DEPRECATED] 이 모듈은 더 이상 사용되지 않습니다.                 ║
+# ║                                                                  ║
+# ║  2026-05-23~24 실험: CV composite + 단일 SD harmonization으로     ║
+# ║  Visual-RAG faithfulness 보장하려 했으나, 환경 영역(seam/그림자)   ║
+# ║  에서 SD가 hallucinated 객체(유령 받침대, 가짜 글로우 등)를       ║
+# ║  생성하는 문제로 폐기.                                            ║
+# ║                                                                  ║
+# ║  현재는 controlnet_inpaint_processor.py의 per-product SD          ║
+# ║  generation 방식을 사용. main.py는 이 파일을 import하지 않음.     ║
+# ║                                                                  ║
+# ║  파일은 실험 흔적으로 보존. 임의로 호출하지 말 것.                 ║
+# ║  자세한 내용은 docs/ARCHITECTURE.md §4.3 참조.                    ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
 import json
 from pathlib import Path
 
@@ -29,6 +44,29 @@ _NEGATIVE_PROMPT = (
     "colorful screen, bright screen, screen content, display image, glowing screen, "
     "wrong perspective, tilted, rotated, replaced object"
 )
+
+
+# style별 mood/lighting 키워드 — SD가 분위기를 강하게 잡도록 명시적 차등화
+_STYLE_PROMPT_MODIFIER: dict[str, str] = {
+    "white":      ("minimalist clean white desk setup, bright soft daylight, "
+                   "scandinavian aesthetic, light wood tones, airy and spacious"),
+    "black":      ("dark moody black desk setup, dim warm ambient lighting, "
+                   "sleek matte black surfaces, dramatic shadows, sophisticated atmosphere"),
+    "gaming":     ("RGB illuminated gaming desk setup, vibrant neon accent lights "
+                   "(purple, cyan, red glow), dramatic colored ambient lighting, "
+                   "dark surroundings with bright LED highlights, esports vibe"),
+    "cozy":       ("cozy warm desk setup, soft amber lighting, natural wood textures, "
+                   "comfortable and intimate atmosphere, hygge style"),
+    "nordic":     ("nordic minimalist desk setup, neutral tones, soft natural light, "
+                   "clean lines, scandinavian simplicity, light beige and white"),
+    "modern":     ("modern contemporary desk setup, balanced neutral lighting, "
+                   "sleek surfaces, refined and professional aesthetic"),
+    "retro":      ("retro vintage desk setup, warm tungsten lighting, "
+                   "70s 80s aesthetic, earthy tones, nostalgic mood"),
+    "industrial": ("industrial loft desk setup, exposed metal and concrete, "
+                   "moody warehouse lighting, raw textures, urban aesthetic"),
+    "general":    ("clean desk setup, balanced natural lighting"),
+}
 
 
 class HarmonizationProcessor:
@@ -228,16 +266,29 @@ class HarmonizationProcessor:
         product_terms = [_CAT_KEYWORDS.get(c, c.lower()) for c in unique_cats]
         product_str   = ", ".join(product_terms) if product_terms else "desk accessories"
 
-        lora_token = "JU_Style, " if (self._has_lora and lora_scale > 0) else ""
+        lora_token   = "JU_Style, " if (self._has_lora and lora_scale > 0) else ""
+        style_modifier = _STYLE_PROMPT_MODIFIER.get(style, _STYLE_PROMPT_MODIFIER["general"])
         prompt = (
-            f"{lora_token}{style} style desk setup with {product_str}, "
-            "objects firmly grounded on wooden desk surface, "
+            f"{lora_token}{style_modifier}, "
+            f"with {product_str}, "
+            "objects firmly grounded on desk surface, "
             "realistic dark contact shadows directly beneath each object, "
-            "soft ambient cast shadows, warm indoor lighting from above, "
-            "cohesive color temperature, no floating objects, "
+            "soft ambient cast shadows, "
+            "cohesive color temperature matching the style, "
+            "no floating objects, "
             "photorealistic interior photography, sharp focus, professional"
         )
-        negative_prompt = _NEGATIVE_PROMPT
+        # gaming style은 negative에서 일부 "colorful screen" 같은 제약을 풀어 RGB 표현 허용
+        if style == "gaming":
+            negative_prompt = (
+                "blurry, low quality, distorted, watermark, text, person, face, "
+                "deformed, ugly, missing object, extra objects, duplicate objects, "
+                "floating, levitating, melted, smeared, "
+                "wrong perspective, tilted, rotated, replaced object, "
+                "bright white background, plain office lighting"
+            )
+        else:
+            negative_prompt = _NEGATIVE_PROMPT
 
         self.pipe.to(self.device)
         pipe_kwargs = dict(
