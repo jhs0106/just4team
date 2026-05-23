@@ -138,6 +138,13 @@ def parse_metadata(meta_str: str) -> dict:
         return {}
 
 
+# 결과 품질이 나쁜 제품 ID 블랙리스트 (배경 제거 시 베젤·받침대까지 제거되어 화면 콘텐츠만 남는 등)
+PRODUCT_BLACKLIST_IDS: set[int] = {
+    196,   # MONITOR — 베젤 제거되어 화면 콘텐츠만 남음
+    247,   # MONITOR — 동일 문제
+}
+
+
 def load_products_by_style(style: str) -> dict[str, list[dict]]:
     keywords = STYLE_KEYWORDS.get(style, [])
     by_cat: dict[str, list[dict]] = {}
@@ -145,6 +152,12 @@ def load_products_by_style(style: str) -> dict[str, list[dict]]:
         for row in csv.DictReader(f):
             cat = row["category"]
             if cat in ("DESK", "LIGHTING"):  # LIGHTING은 배치 미지원
+                continue
+            try:
+                pid = int(row["id"])
+            except (KeyError, ValueError):
+                continue
+            if pid in PRODUCT_BLACKLIST_IDS:
                 continue
             if any(kw in row["title"] for kw in keywords):
                 by_cat.setdefault(cat, []).append(row)

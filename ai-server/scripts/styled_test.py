@@ -1,0 +1,243 @@
+# 임시 통합 테스트 — 실제 recommendation 시스템 없이 사용자 입력만 모사.
+#
+# 사용자 입력:
+#   --style:  black | white | gaming 중 선택
+#   --budget: 예산 (원 단위) — CSV에 가격 없으므로 모의 가격으로 계산
+#
+# 동작:
+#   1. data/test/products.csv에서 style 키워드 매칭 제품을 카테고리별 후보로 모음
+#   2. 모의 가격(카테고리 평균치)을 부여하고 예산 내에서 조합 가능한 것만 통과
+#   3. AI 서버 /generate 호출 → 결과 이미지 저장
+#
+# style 생성 품질 검증이 목적이므로 책상 사진은 data/test/desk_image.jpg 고정 사용.
+
+import argparse
+import base64
+import csv
+import random
+import sys
+import time
+from pathlib import Path
+
+import requests
+
+
+REPO_ROOT     = Path(__file__).resolve().parents[2]
+AI_SERVER     = "http://localhost:8000"
+DESK_IMAGE    = REPO_ROOT / "ai-server" / "data" / "test" / "desk_image2.jpg"
+DESK_TOP_IMG  = REPO_ROOT / "ai-server" / "data" / "test" / "desk_top_image2.jpg"
+PRODUCTS_CSV  = REPO_ROOT / "ai-server" / "data" / "test" / "products.csv"
+
+
+# style별 CSV 키워드 매칭
+STYLE_KEYWORDS: dict[str, list[str]] = {
+    "white":  ["화이트", "white", "흰",   "아이보리"],
+    "black":  ["블랙",   "black", "검정", "다크",  "dark"],
+    "gaming": ["게이밍", "gaming", "RGB", "rgb",  "esports", "리그",
+               "기계식", "기계식 키보드"],
+}
+
+
+# 결과 품질이 나쁜 제품 ID — 베젤 제거된 모니터·듀얼 컷 등
+PRODUCT_BLACKLIST_IDS: set[int] = {
+    196,   # MONITOR: 베젤만 제거된 화면 이미지
+    247,   # MONITOR: 동일
+    235,   # MONITOR: 듀얼 컷 마케팅 이미지
+}
+
+
+# 카테고리별 모의 가격 (CSV에 가격 없으므로 평균치로 budget 계산)
+MOCK_PRICES_KRW: dict[str, int] = {
+    "MONITOR":      350000,
+    "KEYBOARD":      80000,
+    "MOUSE":         50000,
+    "MOUSEPAD":      20000,
+    "SPEAKER":       80000,
+    "DESK_LAMP":     50000,
+    "DESK_SHELF":    40000,
+    "LAPTOP_STAND":  30000,
+    "CLOCK":         30000,
+    "DECO":          20000,
+    "LIGHTING":      80000,
+}
+
+
+# 카테고리별 표준 치수 (mm) — AI 서버 CSV 카탈로그에 없을 때 폴백
+DEFAULT_SIZES_MM: dict[str, tuple[int, int]] = {
+    "MONITOR":      (600, 200),
+    "KEYBOARD":     (440, 130),
+    "MOUSE":        (70,  120),
+    "MOUSEPAD":     (900, 400),
+    "SPEAKER":      (90,  120),
+    "DESK_LAMP":    (80,  400),
+    "DESK_SHELF":   (600, 200),
+    "LAPTOP_STAND": (280, 250),
+    "CLOCK":        (100, 100),
+    "DECO":         (80,  80),
+    "LIGHTING":     (500, 50),
+}
+
+
+def to_b64(path: Path) -> str:
+    return base64.b64encode(path.read_bytes()).decode("utf-8")
+
+
+def load_products_by_style(style: str) -> dict[str, list[dict]]:
+    # style 키워드와 title이 매칭되는 제품을 카테고리별로 모음. 블랙리스트 ID 제외.
+    keywords = STYLE_KEYWORDS.get(style, [])
+    by_cat: dict[str, list[dict]] = {}
+    with open(PRODUCTS_CSV, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            cat = row["category"]
+            if cat in ("DESK",):
+                continue
+            try:
+                pid = int(row["id"])
+            except (KeyError, ValueError):
+                continue
+            if pid in PRODUCT_BLACKLIST_IDS:
+                continue
+            title = row.get("title", "")
+            if any(kw in title for kw in keywords):
+                by_cat.setdefault(cat, []).append({"id": pid, "title": title, "category": cat})
+    return by_cat
+
+
+def select_setup(style: str, budget: int,
+                 wanted_cats: list[str]) -> tuple[list[dict], int]:
+    # style 매칭 제품 후보에서 카테고리별 1개씩 골라 budget 안에서 통과되는 조합 반환.
+    # 가격은 모의 (MOCK_PRICES_KRW). budget 내에 못 들어가면 비싼 카테고리부터 drop.
+    by_cat = load_products_by_style(style)
+    selected: list[dict] = []
+    total = 0
+    drop_order = sorted(wanted_cats, key=lambda c: MOCK_PRICES_KRW.get(c, 0), reverse=True)
+
+    for cat in wanted_cats:
+        pool = by_cat.get(cat, [])
+        if not pool:
+            print(f"  [skip] {cat} — '{style}' 키워드 매칭 제품 없음")
+            continue
+        price = MOCK_PRICES_KRW.get(cat, 0)
+        if total + price > budget:
+            print(f"  [skip] {cat} — 예산 초과 (현재 {total:,} + {price:,} > {budget:,})")
+            continue
+        chosen = random.choice(pool)
+        chosen["mock_price"] = price
+        selected.append(chosen)
+        total += price
+        print(f"  [pick] {cat:10} id={chosen['id']:5} price={price:,}원 → 누적 {total:,}원")
+
+    return selected, total
+
+
+def build_payload(selected: list[dict], style: str,
+                  desk_width_mm: int, desk_depth_mm: int,
+                  top_view_b64: str | None = None) -> dict:
+    products = []
+    for item in selected:
+        cat = item["category"]
+        w, d = DEFAULT_SIZES_MM.get(cat, (None, None))
+        products.append({
+            "category":  cat,
+            "name":      item["title"][:50],
+            "image_id":  item["id"],
+            "width_mm":  w,
+            "depth_mm":  d,
+        })
+    return {
+        "image_base64":          to_b64(DESK_IMAGE),
+        "style":                 style,
+        "products":              products,
+        "desk_width_mm":         desk_width_mm,
+        "desk_depth_mm":         desk_depth_mm,
+        "top_view_image_base64": top_view_b64,
+        "mode":                  "own_desk",
+        "generation_mode":       "harmonize",
+        "removal_strategy":      "combined",
+    }
+
+
+def poll(job_id: str, timeout: float = 300.0) -> dict:
+    t0 = time.time()
+    while True:
+        if time.time() - t0 > timeout:
+            raise TimeoutError(f"job {job_id} 타임아웃")
+        res = requests.get(f"{AI_SERVER}/jobs/{job_id}", timeout=10).json()
+        st  = res.get("status")
+        if st == "done":
+            return res
+        if st == "failed":
+            raise RuntimeError(f"job 실패: {res.get('error')}")
+        time.sleep(3)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="style+budget 입력 기반 임시 통합 테스트")
+    parser.add_argument("--style",  type=str, required=True,
+                        choices=["black", "white", "gaming"],
+                        help="black / white / gaming 중 선택")
+    parser.add_argument("--budget", type=int, required=True,
+                        help="예산 (원 단위, 예: 500000)")
+    parser.add_argument("--categories", type=str,
+                        default="MONITOR,KEYBOARD,MOUSE,SPEAKER,DESK_LAMP",
+                        help="포함할 카테고리 (쉼표 구분)")
+    parser.add_argument("--desk-width-mm",  type=int, default=1400)
+    parser.add_argument("--desk-depth-mm",  type=int, default=700)
+    parser.add_argument("--top-view",       type=Path, default=None)
+    parser.add_argument("--seed",           type=int, default=None,
+                        help="random seed (재현성)")
+    args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    if not DESK_IMAGE.exists():
+        print(f"[ERROR] 책상 이미지 없음: {DESK_IMAGE}")
+        sys.exit(1)
+
+    cats = [c.strip() for c in args.categories.split(",") if c.strip()]
+    print(f"\n=== Styled Test ===")
+    print(f"style:      {args.style}")
+    print(f"budget:     {args.budget:,}원")
+    print(f"categories: {cats}")
+    print(f"desk:       {args.desk_width_mm}x{args.desk_depth_mm}mm\n")
+
+    print(f"[1/3] 제품 선택 (style={args.style!r}, budget={args.budget:,}원)")
+    selected, total = select_setup(args.style, args.budget, cats)
+    if not selected:
+        print(f"[ERROR] 선택된 제품 없음")
+        sys.exit(1)
+    print(f"  → {len(selected)}개 제품, 총 {total:,}원 (예산 {args.budget:,}원의 {total/args.budget*100:.1f}%)\n")
+
+    print(f"[2/3] AI 서버 호출")
+    # 명시적 --top-view 없으면 desk_image2와 짝인 desk_top_image2 자동 사용
+    if args.top_view:
+        top_b64 = to_b64(args.top_view)
+    elif DESK_TOP_IMG.exists():
+        top_b64 = to_b64(DESK_TOP_IMG)
+        print(f"  top-view 자동 사용: {DESK_TOP_IMG.name}")
+    else:
+        top_b64 = None
+    payload = build_payload(selected, args.style, args.desk_width_mm, args.desk_depth_mm, top_b64)
+    resp    = requests.post(f"{AI_SERVER}/generate", json=payload, timeout=30)
+    resp.raise_for_status()
+    job_id  = resp.json()["job_id"]
+    print(f"  job_id={job_id}")
+
+    print(f"[3/3] polling...")
+    t0 = time.time()
+    result = poll(job_id)
+    elapsed = time.time() - t0
+    print(f"  완료: num_removed={result.get('num_removed')}, "
+          f"num_placed={result.get('num_placed')}, elapsed={elapsed:.1f}s")
+
+    out_dir = REPO_ROOT / "ai-server" / "outputs" / "styled_test"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts  = time.strftime("%Y%m%d_%H%M%S")
+    out = out_dir / f"{ts}_{args.style}_budget{args.budget}.png"
+    out.write_bytes(base64.b64decode(result["result_image"]))
+    print(f"\n결과 이미지: {out}")
+
+
+if __name__ == "__main__":
+    main()
