@@ -23,46 +23,16 @@ def _letterbox_512(img: Image.Image) -> Image.Image:
     return canvas
 
 _CAT_PROMPT = {
-    "KEYBOARD": (
-        "low profile keyboard lying flat on desk, front perspective, "
-        "rectangular keys visible, natural lighting"
-    ),
-    "MOUSE": (
-        "small wireless mouse resting on desk surface, top-front view, "
-        "soft contact shadow, natural lighting"
-    ),
-    "MOUSEPAD": (
-        "flat desk mat mouse pad lying on desk surface, thin rectangular mat, "
-        "natural lighting"
-    ),
-    "MONITOR": (
-        "computer monitor with completely black screen powered off, "
-        "thin bezel, narrow silver stand, standing on wooden desk, "
-        "front view, blank dark screen, no display content, natural lighting"
-    ),
-    "SPEAKER": (
-        "small desktop speaker standing on desk, front view, "
-        "compact rectangular speaker, natural lighting"
-    ),
-    "DESK_LAMP": (
-        "modern desk lamp with visible round base, vertical arm and lampshade, "
-        "standing on desk, not a cable, natural lighting"
-    ),
-    "DESK_SHELF": (
-        "monitor riser shelf on desk, horizontal wooden shelf, "
-        "open storage space below, natural lighting"
-    ),
-    "LAPTOP_STAND": (
-        "laptop stand on desk, angled metal stand, natural lighting"
-    ),
-    "DECO": (
-        "small desk decoration object placed on desk surface, "
-        "realistic scale, natural lighting"
-    ),
-    "CLOCK": (
-        "small digital desk clock standing on desk, visible clock face, "
-        "natural lighting"
-    ),
+    "KEYBOARD":     "keyboard flat on desk, front view, natural lighting",
+    "MOUSE":        "wireless mouse on desk, top-front view, natural lighting",
+    "MOUSEPAD":     "desk mat on desk surface, thin flat rectangle, natural lighting",
+    "MONITOR":      "monitor black screen, thin bezel, front view, natural lighting",
+    "SPEAKER":      "desktop speaker on desk, front view, natural lighting",
+    "DESK_LAMP":    "desk lamp with base and arm, standing on desk, natural lighting",
+    "DESK_SHELF":   "monitor riser shelf on desk, open storage below, natural lighting",
+    "LAPTOP_STAND": "laptop stand on desk, angled metal, natural lighting",
+    "DECO":         "desk decoration on desk surface, natural lighting",
+    "CLOCK":        "digital desk clock, visible face, natural lighting",
 }
 
 _NEGATIVE_PROMPT = (
@@ -367,9 +337,8 @@ class ControlNetInpaintProcessor:
         cat_desc = _CAT_PROMPT.get(cat, "product on desk, natural lighting")
         lora_token = "JU_Style, " if (self._has_lora and _effective_lora_scale > 0) else ""
         prompt   = (
-            f"{lora_token}{cat_desc}, {style} color scheme, "
-            "placed on desk surface, drop shadow, realistic product photo, "
-            "sharp focus, high detail, photorealistic, 8k"
+            f"{lora_token}{cat_desc}, {style} style, "
+            "on desk surface, drop shadow, photorealistic, sharp focus"
         )
         negative_prompt = _NEGATIVE_PROMPT + (
             ", " + _CAT_NEGATIVE[cat] if cat in _CAT_NEGATIVE else ""

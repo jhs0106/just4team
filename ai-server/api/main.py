@@ -326,7 +326,7 @@ _CONTACT_Y_OFFSET = {
 
 # 카테고리 쌍별 허용 IoU 상한 — 이 값 이상이면 overlap으로 거부
 _OVERLAP_TOLERANCE: dict = {
-    frozenset({"MONITOR",    "KEYBOARD"}):  0.35,  # 키보드가 모니터 하단과 살짝 겹쳐도 허용
+    frozenset({"MONITOR",    "KEYBOARD"}):  0.05,  # 모니터-키보드 overlap 금지
     frozenset({"MONITOR",    "DESK_SHELF"}):0.30,
     frozenset({"DESK_SHELF", "KEYBOARD"}):  0.40,  # 모니터 받침대 앞에 키보드 배치 허용
     frozenset({"KEYBOARD",   "MOUSEPAD"}):  0.50,  # 키보드가 마우스패드 위에 놓임
@@ -500,10 +500,14 @@ def _front_bbox_for_anchor(
         fv_ph = max(int(fv_pw * 0.20), 45)
         if "monitor_rx" in relation_state:
             _rx_adj = relation_state["monitor_rx"]
-        # 사용자 쪽으로 +32px 내려서 모니터 바로 아래 붙는 현상 완화
         _kb_base_y = int(fv_dy1 + fv_dh * 0.62) + _CONTACT_Y_OFFSET["KEYBOARD"]
         y2 = min(_kb_base_y, int(fv_dy2 - 15))
         y1 = y2 - fv_ph
+        # 모니터 하단 기준 최소 20px 아래에 키보드 상단 위치 보장
+        _mon_y2 = relation_state.get("monitor_contact_y", 0)
+        if y1 < _mon_y2 + 20:
+            y1 = _mon_y2 + 20
+            y2 = y1 + fv_ph
         relation_state["keyboard_y2"] = y2  # MOUSE y 정렬용
         _y_override = True
     elif cat == "DESK_LAMP":
@@ -530,17 +534,27 @@ def _front_bbox_for_anchor(
     elif cat == "MOUSE":
         fv_pw = max(fv_pw, 60)
         fv_ph = max(int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"]), 45)
-        # keyboard y2 기준으로 정렬 (+20px), chair 영역 침범 방지
         _mouse_base_y = relation_state.get("keyboard_y2", int(fv_dy1 + fv_dh * 0.62))
         y2 = min(_mouse_base_y + _CONTACT_Y_OFFSET["MOUSE"], int(fv_dy2 - 15))
         y1 = y2 - fv_ph
+        # 키보드 상단보다 위로 올라가지 않도록
+        _kb_y1 = relation_state.get("keyboard_front_y1", 0)
+        if y1 < _kb_y1:
+            y1 = _kb_y1
+            y2 = y1 + fv_ph
         _y_override = True
     elif cat == "MOUSEPAD":
         fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
 
-    fv_cx = fv_dx1 + _rx_adj * fv_dw
-    x1 = max(0, int(fv_cx - fv_pw // 2))
-    x2 = min(fv_w, x1 + fv_pw)
+    # MOUSE는 키보드 오른쪽 edge 기준으로 x 위치 고정
+    _kb_x2 = relation_state.get("keyboard_front_x2") if cat == "MOUSE" else None
+    if _kb_x2 is not None:
+        x1 = max(0, _kb_x2 - fv_pw // 4)
+        x2 = min(fv_w, x1 + fv_pw)
+    else:
+        fv_cx = fv_dx1 + _rx_adj * fv_dw
+        x1 = max(0, int(fv_cx - fv_pw // 2))
+        x2 = min(fv_w, x1 + fv_pw)
     if not _y_override:
         y2 = min(fv_dy2, int(fv_dy1 + ry * fv_dh))
         y1 = max(0, y2 - fv_ph)
@@ -738,7 +752,14 @@ def calc_placements_from_available_space(
             placed_front_items.append({"region": (x1, y1, x2, y2), "cat": cat})
             relation_state[f"{cat.lower()}_rx"] = best_cand["rx"]
             relation_state[f"{cat.lower()}_ry"] = best_cand["ry"]
-            placed_norm.append({"rx": best_cand["rx"], "ry": best_cand["ry"], "cat": cat})
+            if cat == "KEYBOARD":
+                relation_state["keyboard_front_x2"] = x2
+                relation_state["keyboard_front_y1"] = y1
+            placed_norm.append({
+                "rx":  best_cand["rx"], "ry": best_cand["ry"],
+                "rw":  (x2 - x1) / max(fv_dw, 1), "rh": (y2 - y1) / max(fv_dh, 1),
+                "cat": cat,
+            })
         else:
             reason = ("no_non_overlapping_candidate" if candidate_count == 0
                       else "all_candidates_low_score")
@@ -807,20 +828,54 @@ def _make_ranker_feature(
     cat: str, rx: float, ry: float, rw: float, rh: float,
     relation_state: dict, placed_norm: list,
 ) -> list:
-    pref = _PREFERRED_POS.get(cat, {"rx": 0.5, "ry": 0.5})
+    pref        = _PREFERRED_POS.get(cat, {"rx": 0.5, "ry": 0.5})
     dist_pref   = ((rx - pref["rx"])**2 + (ry - pref["ry"])**2) ** 0.5
     edge_x      = min(rx, 1.0 - rx)
     edge_y      = min(ry, 1.0 - ry)
     monitor_rx  = float(relation_state.get("monitor_rx",  -1.0))
     monitor_ry  = float(relation_state.get("monitor_ry",  -1.0))
+    if monitor_rx >= 0:
+        dx_mon   = rx - monitor_rx
+        dy_mon   = ry - monitor_ry
+        dist_mon = (dx_mon**2 + dy_mon**2) ** 0.5
+    else:
+        dx_mon = dy_mon = dist_mon = -1.0
     keyboard_rx = float(relation_state.get("keyboard_rx", -1.0))
     keyboard_ry = float(relation_state.get("keyboard_ry", -1.0))
+    center_dist = ((rx - 0.5)**2 + (ry - 0.5)**2) ** 0.5
+    is_left  = 1 if rx < 0.35 else 0
+    is_right = 1 if rx > 0.65 else 0
+    is_back  = 1 if ry < 0.35 else 0
+    is_front = 1 if ry > 0.65 else 0
+    cand_box = [rx - rw/2, ry - rh/2, rx + rw/2, ry + rh/2]
+    overlap  = 0.0
+    for prev in placed_norm:
+        if prev.get("cat") == cat:
+            continue
+        prw = prev.get("rw", 0.10)
+        prh = prev.get("rh", 0.10)
+        pb  = [prev["rx"] - prw/2, prev["ry"] - prh/2, prev["rx"] + prw/2, prev["ry"] + prh/2]
+        ix1 = max(cand_box[0], pb[0]); iy1 = max(cand_box[1], pb[1])
+        ix2 = min(cand_box[2], pb[2]); iy2 = min(cand_box[3], pb[3])
+        iw  = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
+        inter   = iw * ih
+        a_area  = max(1e-8, (cand_box[2]-cand_box[0]) * (cand_box[3]-cand_box[1]))
+        b_area  = max(1e-8, (pb[2]-pb[0]) * (pb[3]-pb[1]))
+        iou     = inter / (a_area + b_area - inter + 1e-8)
+        overlap = max(overlap, iou)
+    n_others = len([p for p in placed_norm if p.get("cat") != cat])
     return [
         _RANKER_CAT_ID.get(cat, -1),
-        rx, ry, rw, rh,
-        dist_pref, edge_x, edge_y,
-        monitor_rx, monitor_ry, keyboard_rx, keyboard_ry,
-        len(placed_norm),
+        round(rx, 4), round(ry, 4), round(rw, 4), round(rh, 4),
+        round(dist_pref, 4),
+        round(edge_x, 4), round(edge_y, 4),
+        round(monitor_rx, 4), round(monitor_ry, 4),
+        round(dist_mon, 4), round(dx_mon, 4), round(dy_mon, 4),
+        round(keyboard_rx, 4), round(keyboard_ry, 4),
+        round(center_dist, 4),
+        is_left, is_right, is_back, is_front,
+        round(overlap, 4),
+        n_others,
     ]
 
 
@@ -1515,7 +1570,6 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 "has_lora":            cn_proc._has_lora,
                 "lora_path_exists":    _lora_ext_dir.exists(),
                 "generation_mode":     getattr(req, "generation_mode", "controlnet"),
-                "fixed_test_products": req.fixed_test_products,
             }, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -1588,11 +1642,10 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         msg = (f"{cat} id={p.image_id}: aspect_ratio={_ar:.2f} "
                                f"out of [{_ar_min}, {_ar_max}]")
                         run_errors.append(msg)
-                        print(f"  [WARNING] {msg} — {'강제 generate_product (fixed_test)' if req.fixed_test_products else 'CV fallback'}")
+                        print(f"  [WARNING] {msg} — CV fallback")
 
-                # cv_composite 모드 전용 CV path
-                _cv_only_set = _CV_ONLY_CATS if gen_mode == "cv_composite" else set()
-                if cat in _cv_only_set:
+                # _CV_ONLY_CATS: 항상 CV 합성 (SD inpainting 누적 아티팩트 방지)
+                if cat in _CV_ONLY_CATS:
                     _record("cv_composite", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
                     current = _add_shadows(current, (x1, y1, x2, y2), cat,
@@ -1602,8 +1655,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
                     return
 
-                # AR invalid: fixed_test → generate_product 강제, 일반 → CV fallback
-                if _ar_invalid and not req.fixed_test_products:
+                if _ar_invalid:
                     _record("cv_fallback_aspect_invalid", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
                     current = _add_shadows(current, (x1, y1, x2, y2), cat,
@@ -1649,9 +1701,6 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     "aspect_ratio_valid": _ar_valid,
                 }
                 _record(_route, "done", ar=_ar, ar_valid=_ar_valid)
-                _mon_variants = req.fixed_test_products and cat == "MONITOR"
-                _pre_generate = current.copy() if req.fixed_test_products else None
-                _vprefix = "MONITOR_A_current" if _mon_variants else None
                 current = cn_proc.generate_product(
                     image=current, mask=mask, product_image=prod_alpha,
                     category=p.category, style=req.style.value,
@@ -1659,10 +1708,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     ip_adapter_scale=ip_scale,
                     debug_dir=_debug_dir / "products",
                     debug_meta=_debug_meta,
-                    variant_prefix=_vprefix,
                 )
-                _dbg_json_path  = _debug_dir / "products" / f"{_vprefix or cat}_debug.json"
-                _dbg_exists     = _dbg_json_path.exists()
+                _dbg_json_path = _debug_dir / "products" / f"{cat}_debug.json"
+                _dbg_exists    = _dbg_json_path.exists()
                 _gen_results[cat]["debug_json_created"] = _dbg_exists
                 if _dbg_exists:
                     try:
@@ -1680,49 +1728,10 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     except Exception:
                         pass
                 current = _add_shadows(current, (x1, y1, x2, y2), cat,
-                                              prod_alpha=prod_alpha,
-                                              debug_dir=_debug_dir / "products")
+                                       prod_alpha=prod_alpha,
+                                       debug_dir=_debug_dir / "products")
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
-                if _mon_variants and _pre_generate is not None:
-                    _pdir = _debug_dir / "products"
-                    current.save(_pdir / "MONITOR_A_current.png")
-                    current.save(_pdir / "MONITOR_B_cn_0.08_ip_0.35.png")
-                    try:
-                        _vC = cn_proc.generate_product(
-                            image=_pre_generate, mask=mask, product_image=prod_alpha,
-                            category=p.category, style=req.style.value,
-                            context_region=context_region, ip_adapter_scale=0.20,
-                            debug_dir=_pdir, debug_meta=_debug_meta,
-                            variant_prefix="MONITOR_C_cn_0.10_ip_0.20",
-                            cn_scales_override=[0.10, 0.25],
-                        )
-                        _add_shadows(_vC, (x1, y1, x2, y2), cat, prod_alpha=prod_alpha).save(
-                            _pdir / "MONITOR_C_cn_0.10_ip_0.20.png"
-                        )
-                        print("  [MONITOR variant C] 저장 완료")
-                    except Exception as _ve:
-                        print(f"  [MONITOR variant C ERROR] {_ve}")
-                # LoRA scale sweep: MONITOR 제외, fixed_test 조건에서만
-                if req.fixed_test_products and cat != "MONITOR" and _pre_generate is not None:
-                    _pdir = _debug_dir / "products"
-                    current.save(_pdir / f"{cat}_lora_0.65.png")
-                    for _ls_name, _ls_val in [("no_lora", 0.0), ("lora_0.35", 0.35), ("lora_0.9", 0.9)]:
-                        try:
-                            _ls_r = cn_proc.generate_product(
-                                image=_pre_generate, mask=mask, product_image=prod_alpha,
-                                category=p.category, style=req.style.value,
-                                context_region=context_region, ip_adapter_scale=ip_scale,
-                                debug_dir=_pdir, debug_meta=_debug_meta,
-                                variant_prefix=f"{cat}_{_ls_name}",
-                                lora_scale_override=_ls_val,
-                            )
-                            _add_shadows(_ls_r, (x1, y1, x2, y2), cat, prod_alpha=prod_alpha).save(
-                                _pdir / f"{cat}_{_ls_name}.png"
-                            )
-                            print(f"  [lora sweep] {cat} {_ls_name} 저장 완료")
-                        except Exception as _lse:
-                            print(f"  [lora sweep ERROR] {cat} {_ls_name}: {_lse}")
             except Exception as _e:
                 msg = f"{p.category}: ControlNet generation failed: {_e}"
                 run_errors.append(msg)
@@ -1936,7 +1945,6 @@ def _run_generate(job_id: str, req: GenerateRequest):
             for _it in _unplaced_for_json
         ]
         _products_list_meta = {
-            "fixed_test_products": req.fixed_test_products,
             "generation_mode":     req.generation_mode,
             "products":            _products_info,
         }

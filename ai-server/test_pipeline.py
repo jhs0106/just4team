@@ -27,25 +27,6 @@ PRODUCTS_CSV = Path("data/test/products.csv")
 
 STYLE = "white"
 
-# ── 고정 테스트 제품 세트 ─────────────────────────────────────
-# True: 아래 TEST_FIXED_PRODUCTS 사용 / False: CSV 랜덤 선택
-USE_FIXED_PRODUCTS = True
-
-# 직접 검증된 단품 이미지 ID (find_valid_products.py 실행 후 채울 것)
-# None이면 해당 카테고리는 해당 phase에서 제외됨
-TEST_FIXED_PRODUCTS: dict[str, int | None] = {
-    "MONITOR":  300,   # 검정화면 단품 이미지
-    "KEYBOARD": 420,  # ar≥3.0 확인 후 테스트
-    "MOUSE":    560,   # ar=1.01 ✓  (031709 실행 확인됨)
-}
-
-# 단계별 카테고리 — None ID인 카테고리는 자동 제외
-FIXED_PHASE_CATS: dict[int, list[str]] = {
-    1: ["MONITOR"],
-    2: ["MONITOR", "KEYBOARD"],
-    3: ["MONITOR", "KEYBOARD", "MOUSE"],
-}
-
 # 마우스패드 클릭 포인트 (정규화 좌표) — 실제 마우스패드 위치에 맞게 조정
 MOUSEPAD_POINT_X  = 0.30
 MOUSEPAD_POINT_Y  = 0.75
@@ -105,9 +86,7 @@ STYLE_KEYWORDS = {
     "black": ["블랙", "black", "검정", "다크"],
 }
 
-
-# ── 유틸 ──────────────────────────────────────────────────────
-
+# 유틸
 def to_b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("utf-8")
 
@@ -146,7 +125,7 @@ def poll(job_id: str, label: str, interval: float = 5.0) -> dict:
         time.sleep(interval)
 
 
-# ── 제품 선택 ──────────────────────────────────────────────────
+# 제품 선택
 
 def parse_metadata(meta_str: str) -> dict:
     # CSV metadata 컬럼 파싱 (Python dict 리터럴 형식).
@@ -414,34 +393,21 @@ def test_generate(phase: int | None = None):
     else:
         print("책상: 스타일 매칭 없음 — 치수 미지정")
 
-    # ── 제품 선택: 고정 세트 or CSV 랜덤 ──────────────────────────
-    if USE_FIXED_PRODUCTS:
-        phase_cats = FIXED_PHASE_CATS.get(phase, list(TEST_FIXED_PRODUCTS.keys()))
-        products_payload = []
-        for cat in phase_cats:
-            img_id = TEST_FIXED_PRODUCTS.get(cat)
-            if img_id is None:
-                print(f"  [{cat}] image_id=None — 제외 (TEST_FIXED_PRODUCTS 미설정)")
-                continue
-            products_payload.append({"category": cat, "name": f"{cat} fixed-test", "image_id": img_id})
-        print(f"\n[고정 테스트 제품] phase={phase}  {len(products_payload)}개:")
-        for p in products_payload:
-            print(f"  [{p['category']}] image_id={p['image_id']}")
-    else:
-        csv_products = select_products(STYLE, counts)
-        print(f"\n[랜덤 선택 제품] {len(csv_products)}개:")
-        for p in csv_products:
-            m = parse_metadata(p.get("metadata", ""))
-            dims = f"  {m['width_mm']}x{m['depth_mm']}mm" if m.get("width_mm") else ""
-            print(f"  [{p['category']}] {p['title'][:35]}{dims}")
+    # ── 제품 선택: CSV 랜덤
+    csv_products = select_products(STYLE, counts)
+    print(f"\n[선택 제품] {len(csv_products)}개:")
+    for p in csv_products:
+        m = parse_metadata(p.get("metadata", ""))
+        dims = f"  {m['width_mm']}x{m['depth_mm']}mm" if m.get("width_mm") else ""
+        print(f"  [{p['category']}] {p['title'][:35]}{dims}")
 
-        def _csv_payload(p: dict) -> dict:
-            m = parse_metadata(p.get("metadata", ""))
-            item = {"category": p["category"], "name": p["title"], "image_id": int(p["id"])}
-            if m.get("width_mm"): item["width_mm"] = m["width_mm"]
-            if m.get("depth_mm"): item["depth_mm"] = m["depth_mm"]
-            return item
-        products_payload = [_csv_payload(p) for p in csv_products]
+    def _csv_payload(p: dict) -> dict:
+        m = parse_metadata(p.get("metadata", ""))
+        item = {"category": p["category"], "name": p["title"], "image_id": int(p["id"])}
+        if m.get("width_mm"): item["width_mm"] = m["width_mm"]
+        if m.get("depth_mm"): item["depth_mm"] = m["depth_mm"]
+        return item
+    products_payload = [_csv_payload(p) for p in csv_products]
 
     t = time.time()
     TOP_VIEW = Path("data/test/desk_top_image2.jpg")
@@ -449,7 +415,6 @@ def test_generate(phase: int | None = None):
         "image_base64":        to_b64(DESK_IMAGE),
         "style":               STYLE,
         "products":            products_payload,
-        "fixed_test_products": USE_FIXED_PRODUCTS,
     }
     if desk_width_mm:
         payload["desk_width_mm"] = desk_width_mm
