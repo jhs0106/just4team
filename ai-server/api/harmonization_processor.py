@@ -19,6 +19,7 @@ _CAT_KEYWORDS = {
     "LAPTOP_STAND": "laptop stand",
     "DECO":         "small desk decoration",
     "CLOCK":        "desk clock",
+    "LIGHTING":     "horizontal screen light bar on top of monitor",
 }
 
 _NEGATIVE_PROMPT = (

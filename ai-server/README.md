@@ -297,8 +297,48 @@ ai-server/
 
 ---
 
-## Spring Boot 연동 시 합의 필요 사항
+## Recommendation 시스템 통합 (2026-05-24)
 
-- `products[].category` 값이 Spring Boot DB 카테고리명과 일치하는지 확인
-- `image_id`로 AI 서버 `processed_images/<id>.png`를 찾는데, Spring Boot가 이 ID를 어떻게 넘겨줄지 협의
-- `top_view_image_base64`는 선택. 없으면 front-view 기반 fallback 배치로 동작
+`feature/recommendation` 브랜치(Jina CLIP v2 + PostgreSQL + pgvector 기반)와의 통합 어댑터를 추가함.
+
+```
+[사용자 입력]               책상 사진 + 색감 + 테마 + 예산 + 카테고리
+        ↓
+[Retrieval]                 SetupRecommender.recommend_setup()
+                            → setup dict (top-k 제품 조합)
+        ↓
+[Bridge]                    adapters.setup_to_generate_request()
+                            → GenerateRequest 변환
+        ↓
+[AI 서버 Visual-RAG]        POST /generate
+                            → harmonize 파이프라인 (Stage 1→2→3)
+        ↓
+[출력]                      최종 합성 이미지
+```
+
+**카테고리 매핑** (`api/adapters/recommendation_bridge.py`):
+- 10개 카테고리 1:1 매핑 (MONITOR/KEYBOARD/MOUSE/MOUSEPAD/SPEAKER/DESK_LAMP/DESK_SHELF/LAPTOP_STAND/CLOCK/DECO)
+- LIGHTING (모니터 위 라이트바): AI 서버에 정식 추가
+- DESK / MONITOR_ARM: skip (DESK는 사용자 사진 사용, MONITOR_ARM은 front-view에서 안 보임)
+
+**Style 매핑** (`api/adapters/style_mapper.py`):
+- 자유 한글 텍스트(`color_text`, `theme_text`) → StyleName enum
+- theme 우선, 매칭 없으면 color, 둘 다 없으면 general
+
+**End-to-end 데모**:
+```powershell
+# mock setup으로 어댑터 단독 테스트
+python ai-server/scripts/end_to_end_demo.py --mock
+
+# 실제 recommendation 모듈 사용 (feature/recommendation merge 후)
+python ai-server/scripts/end_to_end_demo.py `
+    --color-text 화이트 `
+    --theme-text 미니멀 `
+    --budget 300000 `
+    --categories MONITOR,KEYBOARD,MOUSE,DESK_LAMP,SPEAKER
+```
+
+**아직 미합의 사항**:
+- recommendation DB의 product.id와 AI 서버의 `processed_images/<id>.png` ID 체계 일치 여부
+- 책상 사진/크기 입력 UI 위치 (확인됨: 제품 추천 전 가장 초반 단계)
+- 제품 이미지 동기화 시점 (옵션 A 채택: recommendation이 사전 배경 제거)

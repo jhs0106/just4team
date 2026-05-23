@@ -17,6 +17,12 @@ _CATEGORY_ALIASES = {
     "DECO":          "DECO",
     "DECOR":         "DECO",
     "CLOCK":         "CLOCK",
+    "LIGHTING":      "LIGHTING",
+    "LIGHT BAR":     "LIGHTING",
+    "LIGHTBAR":      "LIGHTING",
+    "SCREEN BAR":    "LIGHTING",
+    "SCREENBAR":     "LIGHTING",
+    "MONITOR LIGHT": "LIGHTING",
 }
 
 _CATEGORY_DIMS_MM = {
@@ -30,10 +36,12 @@ _CATEGORY_DIMS_MM = {
     "LAPTOP_STAND": (280, 250),
     "DECO":         (80,  80),
     "CLOCK":        (100, 100),
+    "LIGHTING":     (500, 50),
 }
 
 _PLACEMENT_ORDER = {
     "MONITOR":      10,
+    "LIGHTING":     12,
     "KEYBOARD":     15,
     "DESK_SHELF":   20,
     "MOUSEPAD":     40,
@@ -53,6 +61,7 @@ _CV_CAT_MAX_SCALE: dict[str, float] = {
     "SPEAKER":    2.5,
     "DESK_LAMP":  2.5,
     "DESK_SHELF": 2.0,
+    "LIGHTING":   3.0,
 }
 
 _PREFERRED_POS = {
@@ -66,6 +75,7 @@ _PREFERRED_POS = {
     "DECO":         {"rx": 0.75, "ry": 0.35},
     "CLOCK":        {"rx": 0.80, "ry": 0.30},
     "LAPTOP_STAND": {"rx": 0.50, "ry": 0.45},
+    "LIGHTING":     {"rx": 0.50, "ry": 0.08},
 }
 
 _MIN_FRONT_SIZE = {
@@ -76,6 +86,7 @@ _MIN_FRONT_SIZE = {
     "DESK_LAMP": (80, 120),
     "DECO":      (45, 45),
     "CLOCK":     (55, 40),
+    "LIGHTING":  (200, 18),
 }
 
 _CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
@@ -84,6 +95,7 @@ _CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
     "MONITOR":   (0.9, 3.5),
     "SPEAKER":   (0.3, 2.5),
     "DESK_LAMP": (0.2, 3.0),
+    "LIGHTING":  (5.0, 30.0),
 }
 
 _CONTACT_Y_OFFSET = {
@@ -97,6 +109,7 @@ _OVERLAP_TOLERANCE: dict = {
     frozenset({"DESK_SHELF", "KEYBOARD"}):   0.40,
     frozenset({"KEYBOARD",   "MOUSEPAD"}):   0.50,
     frozenset({"MOUSE",      "MOUSEPAD"}):   0.60,
+    frozenset({"MONITOR",    "LIGHTING"}):   0.40,
 }
 _DEFAULT_OVERLAP_THR = 0.10
 
@@ -111,6 +124,7 @@ _FRONT_HEIGHT_RATIO = {
     "LAPTOP_STAND": 0.40,
     "DECO":         0.90,
     "CLOCK":        0.90,
+    "LIGHTING":     0.08,
 }
 
 _DESK_W_RATIO = {
@@ -124,6 +138,7 @@ _DESK_W_RATIO = {
     "LAPTOP_STAND": 0.22,
     "DECO":         0.07,
     "CLOCK":        0.08,
+    "LIGHTING":     0.38,
 }
 
 _DINO_LABEL_TO_CATEGORY = {
@@ -142,17 +157,21 @@ _DINO_LABEL_TO_CATEGORY = {
     "clock":         "CLOCK",
     "cup":           "DECO",
     "mug":           "DECO",
+    "light bar":     "LIGHTING",
+    "screen bar":    "LIGHTING",
 }
 
 _RANKER_CAT_ID = {
     "MONITOR": 0, "KEYBOARD": 1, "MOUSE": 2, "MOUSEPAD": 3,
     "SPEAKER": 4, "DESK_LAMP": 5, "DESK_SHELF": 6,
     "LAPTOP_STAND": 7, "DECO": 8, "CLOCK": 9,
+    "LIGHTING": 10,
 }
-_RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD"}
+# LIGHTING은 학습 샘플 없음 → ranker skip, rule_score만 사용
+_RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD", "LIGHTING"}
 
 _FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
-_BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK"}
+_BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK", "LIGHTING"}
 
 _REMOVAL_PROMPT = (
     "laptop. laptop computer. notebook computer. monitor. keyboard. mouse. "
@@ -160,5 +179,6 @@ _REMOVAL_PROMPT = (
     "notebook. notepad. paper. document. folder. file. binder. "
     "pen. pencil. pen holder. pencil holder. ruler. scissors. tape. "
     "phone. smartphone. tablet. speaker. desk lamp. lamp. "
-    "clock. digital clock. diffuser. perfume bottle. vase."
+    "clock. digital clock. diffuser. perfume bottle. vase. "
+    "light bar. screen bar. monitor light."
 )
