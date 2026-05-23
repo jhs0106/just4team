@@ -31,8 +31,10 @@ _NEGATIVE_PROMPT = (
 
 
 class HarmonizationProcessor:
-    # CV로 합성된 책상 이미지를 단일 SD pass로 자연스럽게 녹여주는 프로세서.
-    # 제품 픽셀은 strength_map의 0.0 영역으로 절대 보존, seam/그림자 영역만 SD가 생성.
+    # Visual-RAG의 [G] Generation 컴포넌트.
+    # Augmented context(composite_full)를 받아 retrieved fact 주변(seam/그림자/조명)만
+    # 조건부 생성. 제품 픽셀은 strength_map의 0.0 영역으로 100% 보존 (faithfulness guarantee).
+    # SD 1회만 호출 → 제품 간 조명 일관성 확보.
 
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"

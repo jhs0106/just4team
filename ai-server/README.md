@@ -1,24 +1,66 @@
 # Deskterior AI Server
 
+**프로젝트 주제: Visual-RAG 기반 데스크테리어 시뮬레이션 모델 설계 및 구현**
+
 사용자의 실제 책상 사진(정면)과 예산·스타일 조건으로 추천된 제품 목록을 받아, 그 제품들이 책상 위에 자연스럽게 배치된 데스크테리어 시뮬레이션 이미지를 생성하는 AI 서버.
 
 ---
 
-## 핵심 설계 원칙
+## ★ Architecture: Visual-RAG
 
-**1. 제품 픽셀은 절대 변형하지 않는다 (anti-hallucination)**
-- 생성형 LLM 이미지 모델(Gemini, ChatGPT image gen 등)은 제품을 텍스트로 그려내므로 hallucination 발생
-- 본 시스템은 **DB의 실제 제품 이미지 픽셀을 그대로 사용** → 사용자가 보는 제품 = 실제 구매 가능한 제품
-- SD(Stable Diffusion)는 제품을 *생성*하는 도구가 아니라 *조화시키는(harmonize)* 도구로만 사용
+본 시스템은 텍스트 도메인의 **RAG(Retrieval-Augmented Generation)** 아키텍처 패턴을 **visual modality**로 확장한 **Visual-RAG compound AI system**이다.
 
-**2. SD의 역할은 seam/그림자/조명 매칭에 한정**
-- CV로 합성한 책상 이미지를 SD가 받아, 제품 경계선·그림자·조명만 자연스럽게 다듬음
-- per-pixel strength map으로 제품 내부는 strength=0 → SD가 절대 손대지 못함
-- seam ring(경계 띠) 0.42, 그림자 영역 0.36 강도로만 SD diffusion 적용
+```
+Text-RAG (LLM):
+  query → [Retrieval] Vector DB → [Augmentation] context 주입 → [Generation] LLM 생성
+                                                                  ↑
+                                              retrieved fact가 hallucination 억제
 
-**3. 사용자의 실제 책상을 보존**
-- 책상 사진 입력 → LaMa로 기존 물체만 제거 → 책상 자체의 색감·질감·원근 유지
+Visual-RAG (본 시스템):
+  style + budget → [Retrieval] Jina CLIP + product DB
+                   → [Augmentation] 실제 제품 PNG 픽셀을 CV로 책상에 합성
+                                                ↑
+                                       retrieved fact를 generation context에 강제 주입
+                   → [Generation] SD1.5 ControlNet Inpaint
+                                                ↑
+                                       제품 픽셀 주변(seam/그림자/조명)만 conditional generation
+```
+
+### RAG 구성요소별 매핑
+
+| RAG 단계 | Text-RAG | Visual-RAG (본 시스템) | 구현 위치 |
+|---|---|---|---|
+| **R**etrieval | Vector DB 유사도 검색 | Jina CLIP + product DB 검색 | Spring Boot 서버 |
+| **A**ugmentation | retrieved doc를 prompt context에 삽입 | 제품 PNG를 CV alpha composite으로 책상에 주입 | `composite.composite_one_with_silhouette()` |
+| **G**eneration | LLM이 context 기반 응답 생성 | SD가 주입된 제품 주변(배경/seam/그림자)만 생성 | `harmonization_processor.harmonize()` |
+| **Faithfulness guarantee** | retrieved doc 인용 (원본 보존) | per-pixel strength_map의 제품 영역 = 0.0 (픽셀 불변) | `_build_strength_map()` |
+
+### 설계 원칙
+
+**1. Retrieval-augmented = 제품 identity hallucination 제거**
+- 순수 생성 모델(Gemini Nano Banana, ChatGPT image gen 등)은 제품을 텍스트로 그려내므로 hallucination 발생 — 키 배열·로고·베젤 두께 어긋남
+- Visual-RAG는 **DB의 실제 제품 PNG 픽셀을 그대로 retrieval하여 generation context에 inject** → 사용자가 보는 제품 = 실제 구매 가능한 제품 (픽셀 단위 일치)
+- 이는 RAG에서 retrieved document가 변형 없이 인용되는 것과 동일한 architectural guarantee
+
+**2. SD는 G(generation) 컴포넌트, conditional generation 담당**
+- SD는 제품을 *생성*하지 않음. 대신 retrieved fact 주변의 환경(seam, 그림자, 조명)을 *조건부 생성*
+- per-pixel strength_map: 제품 내부 = 0.00 (불변 보장), seam ring = 0.42, 그림자 = 0.36
+- differential blend로 SD output을 픽셀 단위 가중치 적용 → retrieval된 사실 보존 + 환경 자연스럽게 합성
+
+**3. 사용자의 실제 책상 보존**
+- LaMa로 기존 물체만 제거 → 책상 자체의 색감·질감·원근 유지
 - 책상 스타일 변환(img2img) 단계 없음
+
+### Hallucination 통제 범위
+
+| 영역 | hallucination 가능성 | 통제 방식 |
+|---|---|---|
+| 제품 외형·로고·디테일 | **0 (불가능)** | strength_map 제품 영역 = 0.0 |
+| 책상 자체 | **0 (불가능)** | strength_map 책상 영역 = 0.0 |
+| 제품 경계 seam 5~15px | 미세함 | ControlNet depth+canny로 구조 락 + strength 0.42 제한 |
+| 그림자·접지 영역 36px | 제한적 | ControlNet + strength 0.36 + gradient fade |
+
+순수 SD 생성 대비 **hallucination 영역을 화면의 ~10% 이하로 축소**하고, 그 안에서도 ControlNet으로 구조를 lock한다.
 
 ---
 
@@ -27,44 +69,49 @@
 ```
 [사용자 입력] desk_image + style + product_list
         │
+        │  ※ Retrieval(R) 단계는 Spring Boot + Jina CLIP에서 선행 수행 →
+        │     product_list[image_id]가 retrieved fact (실제 제품 PNG 참조)
         ▼
 ┌──────────────────────────────────────────────────────────┐
-│ Stage 1 — Object Removal                                 │
+│ Stage 1 — Object Removal (전처리)                         │
 │   Grounding DINO 검출 → SAM-2 마스크 → LaMa inpainting   │
 │   결과: 빈 책상 이미지 (cleaned_desk)                     │
 └──────────────────────────────────────────────────────────┘
         │
         ▼
 ┌──────────────────────────────────────────────────────────┐
-│ Stage 2 — Layout & Multi-Product CV Composite            │
-│   placement.py: top-view 공간 분석 + 학습된 ranker        │
-│     → 제품별 bbox 위치 산출                                │
-│   composite_one_with_silhouette: 모든 제품을 한 번에       │
-│     cleaned_desk 위에 alpha composite                     │
-│     + 각 제품의 silhouette 마스크 추출                     │
-│   결과: composite_full + silhouettes[]                    │
+│ Stage 2 — [Augmentation] Retrieval Injection             │
+│   placement.py: top-view 공간 분석 + LightGBM ranker      │
+│     → 제품별 bbox 위치 결정                                │
+│   composite_one_with_silhouette:                          │
+│     - retrieved 제품 PNG를 cleaned_desk에 alpha composite │
+│     - 모든 제품 한 번에 합성                                │
+│     - 각 제품 silhouette mask 추출 (Stage 3 입력용)         │
+│   결과: composite_full (RAG의 augmented context) +         │
+│         silhouettes[] (faithfulness mask)                 │
 └──────────────────────────────────────────────────────────┘
         │
         ▼
 ┌──────────────────────────────────────────────────────────┐
-│ Stage 3 — Global Harmonization Pass (단일 SD 호출)        │
-│   harmonization_processor.py                              │
+│ Stage 3 — [Generation] Conditional Generation            │
+│   harmonization_processor.py (단일 SD 호출)               │
 │                                                           │
-│   1. strength_map 생성 (per-pixel float):                 │
-│        제품 내부      → 0.00 (절대 보존)                   │
-│        seam ring 14px → 0.42 (경계 자연스럽게)             │
-│        그림자 영역 36px → 0.36 (gradient, 그림자 생성)     │
-│        그 외 책상     → 0.00                              │
+│   1. strength_map 생성 (faithfulness 보장):                │
+│        제품 내부      → 0.00 (retrieved fact 불변)         │
+│        seam ring 14px → 0.42 (환경 경계 생성)              │
+│        그림자 영역 36px → 0.36 gradient (그림자 생성)      │
+│        그 외 책상     → 0.00 (책상 자체 불변)              │
 │                                                           │
-│   2. SD1.5 ControlNet Inpaint (1회만 호출):                │
-│        image=composite_full                               │
-│        mask=binary(strength>0)                            │
-│        control=[depth, canny] from composite_full         │
-│        LoRA=JU_DeskStyle 0.30 (배경 스타일에만)            │
+│   2. SD1.5 ControlNet Inpaint (1회만):                     │
+│        image=composite_full       (= augmented context)   │
+│        mask=binary(strength>0)    (= generation 영역 한정) │
+│        control=[depth, canny]     (= 구조 제약)            │
+│        LoRA=JU_DeskStyle 0.30                              │
 │                                                           │
-│   3. Per-pixel differential blend:                        │
+│   3. Per-pixel differential blend (faithfulness 강제):     │
 │        final = composite × (1-s) + sd_output × s          │
-│        → 제품 내부 픽셀 100% 보존                          │
+│        s=0 → retrieved fact 100% 보존                      │
+│        s>0 → SD output 적용 (환경만)                       │
 │                                                           │
 │   결과: harmonized_image                                  │
 └──────────────────────────────────────────────────────────┘

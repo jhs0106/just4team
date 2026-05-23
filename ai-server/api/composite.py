@@ -112,8 +112,10 @@ def composite_one_with_silhouette(
     edge_feather: int = 4,
     category: str = "",
 ) -> tuple[Image.Image, Image.Image]:
-    # composite_product_simple과 동일한 합성 + base 크기 grayscale silhouette 반환
-    # silhouette은 feather 전 sharp alpha를 사용 — strength_map의 seam ring 계산을 위함
+    # Visual-RAG의 [A] Augmentation (retrieval injection) 핵심 함수.
+    # Retrieved 제품 PNG 픽셀을 cleaned_desk에 alpha composite으로 그대로 inject.
+    # silhouette은 feather 전 sharp alpha 사용 → Stage 3 strength_map의 seam ring 계산에 쓰여
+    # faithfulness guarantee(제품 영역 strength=0)를 정확히 만들어냄.
     x1, y1, x2, y2 = region
     target_w = max(1, x2 - x1)
     target_h = max(1, y2 - y1)

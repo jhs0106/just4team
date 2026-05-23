@@ -593,8 +593,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         placement_items[_si]["product"] = _sp0_prod
                     print(f"[Speaker] 스테레오형(AR={_sp0_ar:.2f}) → 동일 이미지 {len(_sp_items)}개 배치")
 
-        # ── Stage 2: Multi-product CV composite (모든 제품을 한 번에 합성) ──
-        # 각 제품의 silhouette을 추출해서 Stage 3의 strength_map 계산에 사용
+        # ── Stage 2 [A]: Retrieval Injection (Augmentation) ──
+        # Spring Boot에서 retrieve된 제품 PNG를 cleaned_desk에 한 번에 CV composite으로 inject.
+        # 각 제품 silhouette → Stage 3의 faithfulness mask (strength=0 영역) 계산 입력.
         cv_base = current.copy()
         silhouettes:    list[Image.Image] = []
         cats_for_prompt: list[str]        = []
@@ -651,8 +652,10 @@ def _run_generate(job_id: str, req: GenerateRequest):
             )
             return
 
-        # ── Stage 3: Global Harmonization Pass (단일 SD 호출) ──
-        print(f"[Generate] Stage 3 시작: harmonization pass")
+        # ── Stage 3 [G]: Conditional Generation (단일 SD 호출) ──
+        # Augmented context(cv_base) 위에서 retrieved fact 주변(seam/그림자/조명)만 SD가 생성.
+        # 제품 픽셀은 differential blend로 100% 보존 (Visual-RAG faithfulness guarantee).
+        print(f"[Generate] Stage 3 시작: conditional generation (Visual-RAG G)")
         proc = get_harmonization_processor()
         try:
             result = proc.harmonize(
