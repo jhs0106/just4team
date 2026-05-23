@@ -1,8 +1,5 @@
-import ast
-import csv
 import uuid
 import asyncio
-import base64
 import logging
 import traceback
 import torch
@@ -10,7 +7,6 @@ import numpy as np
 import cv2
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,7 +25,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("ai-server")
 
-# stdout을 파일에도 동시 기록 — 서버 터미널 접근 없이 print 로그 확인용
+
 class _Tee:
     def __init__(self, *files):
         self.files = files
@@ -51,6 +47,7 @@ class _Tee:
     def fileno(self):
         return self.files[0].fileno() if self.files else 1
 
+
 _stdout_log_file = open("logs/stdout.log", "a", encoding="utf-8")
 _sys.stdout = _Tee(_sys.__stdout__, _stdout_log_file)
 
@@ -61,27 +58,29 @@ from .models import (
     SegmentRequest, SegmentResult,
     GenerateRequest, GenerateResult,
 )
-from .space_analysis import (
-    analyze_space,
-    make_full_desk_mask, keep_largest_component,
-)
-from .mask_utils import postprocess_occupied_mask
 from .object_removal_processor import get_object_removal_processor
 from .lama_processor import get_lama_processor
 from .product_inpaint_processor import get_product_inpaint_processor
 from .controlnet_inpaint_processor import get_controlnet_inpaint_processor
+from .sd35_inpaint_processor import get_sd35_inpaint_processor
 from .sam2_processor import get_sam2_processor
-
-
-def b64_to_image(b64: str) -> Image.Image:
-    return Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
-
-
-def image_to_b64(image: Image.Image) -> str:
-    buf = BytesIO()
-    image.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
+from .config import (
+    _CV_ONLY_CATS, _CAT_ASPECT_VALID, _PLACEMENT_ORDER,
+    _CONTACT_Y_OFFSET, _FRONT_CATS, _BACK_CATS, _REMOVAL_PROMPT,
+)
+from .utils import (
+    b64_to_image, image_to_b64,
+    normalize_category, find_product_image, enrich_products_from_csv,
+)
+from .composite import (
+    prepare_product_image_for_composite, composite_product_simple,
+    _add_shadows, _detect_desk_bbox, _calc_regions,
+)
+from .placement import (
+    calc_placements_from_available_space, bbox_iou,
+    _match_products_to_detections, _region_from_detection_center,
+    _make_rect_mask,
+)
 
 job_store: dict = {}
 executor = ThreadPoolExecutor(max_workers=1)
@@ -128,1217 +127,6 @@ async def get_job(job_id: str):
     return job_store[job_id]
 
 
-PRODUCT_IMAGE_DIR = Path("data/test/processed_images")
-_CATALOG_CSV      = Path("data/test/products.csv")
-
-
-def find_product_image(image_id: int) -> Path | None:
-    for ext in [".png", ".jpg", ".jpeg", ".webp"]:
-        path = PRODUCT_IMAGE_DIR / f"{image_id}{ext}"
-        if path.exists():
-            return path
-    return None
-
-
-def _to_int_or_none(v):
-    try:
-        if v is None or v == "":
-            return None
-        return int(float(v))
-    except Exception:
-        return None
-
-
-_CATEGORY_ALIASES = {
-    "KEYBOARD":      "KEYBOARD",
-    "MOUSE":         "MOUSE",
-    "MOUSEPAD":      "MOUSEPAD",
-    "MOUSE_PAD":     "MOUSEPAD",
-    "MOUSE PAD":     "MOUSEPAD",
-    "MONITOR":       "MONITOR",
-    "SPEAKER":       "SPEAKER",
-    "LAMP":          "DESK_LAMP",
-    "DESK LAMP":     "DESK_LAMP",
-    "DESK_LAMP":     "DESK_LAMP",
-    "DESK SHELF":    "DESK_SHELF",
-    "DESK_SHELF":    "DESK_SHELF",
-    "MONITOR RISER": "DESK_SHELF",
-    "LAPTOP STAND":  "LAPTOP_STAND",
-    "LAPTOP_STAND":  "LAPTOP_STAND",
-    "DECO":          "DECO",
-    "DECOR":         "DECO",
-    "CLOCK":         "CLOCK",
-}
-
-
-def normalize_category(category: str) -> str:
-    key = category.strip().upper().replace("-", "_")
-    key_space = key.replace("_", " ")
-    return _CATEGORY_ALIASES.get(key, _CATEGORY_ALIASES.get(key_space, key))
-
-
-# ── products.csv 임시 DB ─────────────────────────────────────────────────────
-
-_product_catalog: dict = {}
-
-
-def load_product_catalog() -> dict:
-    global _product_catalog
-    if _product_catalog:
-        return _product_catalog
-    try:
-        with open(_CATALOG_CSV, encoding="utf-8", newline="") as f:
-            for row in csv.DictReader(f):
-                try:
-                    image_id = _to_int_or_none(row.get("id") or row.get("image_id"))
-                    if image_id is None:
-                        continue
-                    meta = {}
-                    if row.get("metadata"):
-                        try:
-                            meta = ast.literal_eval(row["metadata"])
-                        except Exception:
-                            meta = {}
-                    width_mm = (
-                        _to_int_or_none(row.get("width_mm"))
-                        or _to_int_or_none(meta.get("width_mm"))
-                    )
-                    depth_mm = (
-                        _to_int_or_none(row.get("depth_mm"))
-                        or _to_int_or_none(meta.get("depth_mm"))
-                    )
-                    _product_catalog[image_id] = {
-                        "category": normalize_category(row.get("category", "")),
-                        "title":    row.get("title") or row.get("name") or "",
-                        "width_mm": width_mm,
-                        "depth_mm": depth_mm,
-                    }
-                except Exception:
-                    continue
-        print(f"[Catalog] {len(_product_catalog)}개 제품 로드")
-    except FileNotFoundError:
-        print(f"[Catalog] {_CATALOG_CSV} 없음 — fallback 치수 사용")
-    return _product_catalog
-
-
-def enrich_products_from_csv(products: list) -> list:
-    catalog = load_product_catalog()
-    enriched = []
-    for p in products:
-        updates: dict = {}
-        norm_cat = normalize_category(p.category)
-        if norm_cat != p.category:
-            updates["category"] = norm_cat
-        if p.image_id is not None and p.image_id in catalog:
-            meta = catalog[p.image_id]
-            if not updates.get("category") and meta["category"]:
-                updates["category"] = meta["category"]
-            if p.width_mm is None and meta["width_mm"]:
-                updates["width_mm"] = meta["width_mm"]
-            if p.depth_mm is None and meta["depth_mm"]:
-                updates["depth_mm"] = meta["depth_mm"]
-        if updates:
-            p = p.model_copy(update=updates)
-        enriched.append(p)
-    return enriched
-
-
-# 카테고리별 기본 치수 (mm) — products.csv metadata 없을 때 fallback
-_CATEGORY_DIMS_MM = {
-    "KEYBOARD":     (440, 130),
-    "MOUSE":        (70,  120),
-    "MOUSEPAD":     (900, 400),
-    "MONITOR":      (600, 200),
-    "SPEAKER":      (90,  120),
-    "DESK_LAMP":    (80,  400),
-    "DESK_SHELF":   (600, 200),
-    "LAPTOP_STAND": (280, 250),
-    "DECO":         (80,  80),
-    "CLOCK":        (100, 100),
-}
-
-# MONITOR→KEYBOARD→MOUSE 순서여야 관계 기반 배치가 작동함
-# KEYBOARD(15)가 DESK_SHELF(20)보다 먼저: 핵심 제품이 모니터 아래 공간 선점
-_PLACEMENT_ORDER = {
-    "MONITOR":      10,
-    "KEYBOARD":     15,
-    "DESK_SHELF":   20,
-    "MOUSEPAD":     40,
-    "MOUSE":        50,
-    "SPEAKER":      60,
-    "DESK_LAMP":    70,
-    "CLOCK":        80,
-    "DECO":         90,
-}
-
-# CV 합성 전용 카테고리 (ControlNet 생성 금지) — 현재 비활성화, 전 카테고리 SD inpainting 사용
-_CV_ONLY_CATS: set[str] = set()
-
-# cv_composite 모드에서 composite_product_simple에 적용할 카테고리별 최대 scale
-_CV_CAT_MAX_SCALE: dict[str, float] = {
-    "KEYBOARD":   4.0,
-    "MOUSE":      3.0,
-    "MONITOR":    2.5,
-    "SPEAKER":    2.5,
-    "DESK_LAMP":  2.5,
-    "DESK_SHELF": 2.0,
-}
-
-# top-view 기준 선호 위치 (rx=0 좌/1 우, ry=0 뒤/1 앞)
-_PREFERRED_POS = {
-    "MONITOR":      {"rx": 0.50, "ry": 0.20},
-    "DESK_SHELF":   {"rx": 0.50, "ry": 0.20},
-    "KEYBOARD":     {"rx": 0.50, "ry": 0.62},
-    "MOUSEPAD":     {"rx": 0.50, "ry": 0.65},
-    "MOUSE":        {"rx": 0.70, "ry": 0.62},
-    "SPEAKER":      {"rx": 0.25, "ry": 0.25},
-    "DESK_LAMP":    {"rx": 0.12, "ry": 0.30},
-    "DECO":         {"rx": 0.75, "ry": 0.35},
-    "CLOCK":        {"rx": 0.80, "ry": 0.30},
-    "LAPTOP_STAND": {"rx": 0.50, "ry": 0.45},
-}
-
-# 제품별 최소 front-view bbox 크기 (px)
-_MIN_FRONT_SIZE = {
-    "MONITOR":   (220, 150),
-    "KEYBOARD":  (180, 45),
-    "MOUSE":     (70, 52),
-    "SPEAKER":   (55, 55),
-    "DESK_LAMP": (80, 120),
-    "DECO":      (45, 45),
-    "CLOCK":     (55, 40),
-}
-
-# 카테고리별 tight_crop aspect ratio (w/h) 허용 범위 — 범위 밖이면 잘못된 제품 이미지
-_CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
-    "KEYBOARD":  (2.0, 99.0),   # TKL/75% 키보드(~2.5) 포함
-    "MOUSE":     (0.5, 2.0),
-    "MONITOR":   (0.9, 3.5),    # 스탠드 포함 tight crop 시 1.0 근처도 허용
-    "SPEAKER":   (0.3, 2.5),
-    "DESK_LAMP": (0.2, 3.0),
-}
-
-# scoring으로 선택된 anchor → front-view bbox 변환 시 카테고리별 y 보정 (px)
-_CONTACT_Y_OFFSET = {
-    "KEYBOARD": 32,
-    "MOUSE":    20,
-}
-
-# 카테고리 쌍별 허용 IoU 상한 — 이 값 이상이면 overlap으로 거부
-_OVERLAP_TOLERANCE: dict = {
-    frozenset({"MONITOR",    "KEYBOARD"}):  0.05,  # 모니터-키보드 overlap 금지
-    frozenset({"MONITOR",    "DESK_SHELF"}):0.30,
-    frozenset({"DESK_SHELF", "KEYBOARD"}):  0.40,  # 모니터 받침대 앞에 키보드 배치 허용
-    frozenset({"KEYBOARD",   "MOUSEPAD"}):  0.50,  # 키보드가 마우스패드 위에 놓임
-    frozenset({"MOUSE",      "MOUSEPAD"}):  0.60,  # 마우스가 마우스패드 위에 놓임
-}
-_DEFAULT_OVERLAP_THR = 0.10
-
-
-def _overlap_threshold(cat_a: str, cat_b: str) -> float:
-    return _OVERLAP_TOLERANCE.get(frozenset({cat_a, cat_b}), _DEFAULT_OVERLAP_THR)
-
-
-# 45도 앵글 뷰에서 제품의 높이/너비 비율
-# 수직 제품(모니터·스탠드·램프)은 크고, 수평 제품(키보드·마우스패드)은 작음
-_FRONT_HEIGHT_RATIO = {
-    "MONITOR":      0.68,
-    "KEYBOARD":     0.22,
-    "MOUSE":        0.75,
-    "MOUSEPAD":     0.25,
-    "SPEAKER":      1.10,
-    "DESK_LAMP":    1.70,
-    "DESK_SHELF":   0.20,
-    "LAPTOP_STAND": 0.40,
-    "DECO":         0.90,
-    "CLOCK":        0.90,
-}
-
-# desk_width_mm 없을 때 책상 너비 대비 제품 너비 비율
-_DESK_W_RATIO = {
-    "KEYBOARD":     0.33,
-    "MOUSE":        0.07,
-    "MOUSEPAD":     0.55,
-    "MONITOR":      0.55,   # 넓게 잡아야 512×512 압축 후에도 가로 모니터로 보임
-    "SPEAKER":      0.09,
-    "DESK_LAMP":    0.06,
-    "DESK_SHELF":   0.45,
-    "LAPTOP_STAND": 0.22,
-    "DECO":         0.07,
-    "CLOCK":        0.08,
-}
-
-# DINO가 반환하는 label 문자열 → 우리 카테고리 매핑
-_DINO_LABEL_TO_CATEGORY = {
-    "keyboard":     "KEYBOARD",
-    "mouse":        "MOUSE",
-    "mouse pad":    "MOUSEPAD",
-    "mousepad":     "MOUSEPAD",
-    "monitor":      "MONITOR",
-    "speaker":      "SPEAKER",
-    "desk lamp":    "DESK_LAMP",
-    "lamp":         "DESK_LAMP",
-    "headset":      "HEADSET",
-    "desk shelf":   "DESK_SHELF",
-    "monitor riser":"DESK_SHELF",
-    "laptop stand": "LAPTOP_STAND",
-    "clock":        "CLOCK",
-    "cup":          "DECO",
-    "mug":          "DECO",
-}
-
-
-def _match_products_to_detections(products, detections) -> list:
-    # 요청 제품과 DINO 감지 결과를 카테고리 기준으로 매칭 → [{"product", "region"}]
-    # 매칭된 detection은 재사용하지 않음 (1:1 매칭)
-    available = list(detections)
-    matched = []
-    unmatched = []
-
-    for p in products:
-        cat = normalize_category(p.category)
-        found = None
-        for i, det in enumerate(available):
-            det_cat = _DINO_LABEL_TO_CATEGORY.get(det.label.lower(), "")
-            if det_cat == cat:
-                found = i
-                break
-        if found is not None:
-            det = available.pop(found)
-            matched.append({"product": p, "region": det.box_xyxy})
-            print(f"[Match] {cat} → DINO '{det.label}' bbox={det.box_xyxy}")
-        else:
-            unmatched.append(p)
-            print(f"[Match] {cat} → 감지된 영역 없음, fallback 사용")
-
-    return matched, unmatched
-
-
-
-def _make_rect_mask(img_w: int, img_h: int, x1: int, y1: int, x2: int, y2: int) -> Image.Image:
-    from PIL import ImageDraw
-    mask = Image.new("L", (img_w, img_h), 0)
-    ImageDraw.Draw(mask).rectangle([x1, y1, x2, y2], fill=255)
-    return mask
-
-
-def _region_from_detection_center(
-    img_w: int, img_h: int,
-    det_box: tuple,
-    product,
-    desk_bbox: tuple | None,
-    desk_width_mm: int | None,
-) -> tuple:
-    # DINO bbox → 중심 위치만 참조, 크기는 제품 실제 치수(mm)로 재계산
-    x1, y1, x2, y2 = det_box
-    cx     = (x1 + x2) // 2
-    cy_bot = y2  # 하단 기준 정렬
-
-    cat  = product.category.upper()
-    w_mm = getattr(product, "width_mm", None) or _CATEGORY_DIMS_MM.get(cat, (200, 200))[0]
-
-    if desk_bbox and desk_width_mm:
-        DW        = desk_bbox[2] - desk_bbox[0]
-        px_per_mm = DW / desk_width_mm
-        pw = int(w_mm * px_per_mm)
-    else:
-        ref_w = _CATEGORY_DIMS_MM.get(cat, (200, 200))[0]
-        pw = int(max(x2 - x1, 1) * w_mm / ref_w)
-
-    # height: DINO 감지 높이의 3배 기준으로 잡되 최소 80px 보장
-    # (고정 비율보다 실제 이미지 스케일 기반이 더 안정적)
-    det_h = max(y2 - y1, 1)
-    ph    = max(det_h * 3, 80)
-    pw    = max(pw, 60)
-
-    new_x1 = max(0,     cx - pw // 2)
-    new_x2 = min(img_w, new_x1 + pw)
-    new_y2 = min(img_h, cy_bot)
-    new_y1 = max(0,     new_y2 - ph)
-    return new_x1, new_y1, new_x2, new_y2
-
-
-
-def _sample_points_in_region(region: dict, n: int = 7) -> list[tuple[float, float]]:
-    bx = region["bbox_px"]
-    rx1, ry1 = float(bx["x"]), float(bx["y"])
-    rx2, ry2 = rx1 + float(bx["width"]), ry1 + float(bx["height"])
-    return [
-        (rx1 + (rx2 - rx1) * (gi + 0.5) / n,
-         ry1 + (ry2 - ry1) * (gj + 0.5) / n)
-        for gi in range(n) for gj in range(n)
-    ]
-
-
-def _front_bbox_for_anchor(
-    cat: str, rx: float, ry: float, w_mm: int,
-    fv_dx1: int, fv_dy1: int, fv_dx2: int, fv_dy2: int,
-    fv_dw: int, fv_dh: int, fv_w: int, fv_h: int,
-    desk_width_mm: int | None,
-    relation_state: dict,
-) -> tuple[int, int, int, int] | None:
-    ps     = 0.60 + 0.40 * ry
-    fv_pw  = max(40, min(int(w_mm * fv_dw / (desk_width_mm or 1200) * ps), int(fv_dw * 0.65)))
-    fv_ph  = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
-    min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
-    fv_pw  = max(fv_pw, min_w)
-    fv_ph  = max(fv_ph, min_h)
-    _y_override = False
-    _rx_adj = rx
-
-    if cat == "MONITOR":
-        fv_pw = max(min(int(fv_dw * 0.48), 420), 240)
-        fv_ph = int(fv_pw * 0.60)
-        # contact point: stand/base가 책상 뒷면(back line)에 닿는 위치
-        _monitor_contact_y = int(fv_dy1 + fv_dh * 0.28)
-        y2 = _monitor_contact_y
-        y1 = max(int(fv_h * 0.05), y2 - fv_ph)
-        relation_state["monitor_contact_y"] = y2
-        _y_override = True
-    elif cat == "KEYBOARD":
-        fv_pw = max(min(int(fv_dw * 0.38), 360), 220)
-        fv_ph = max(int(fv_pw * 0.20), 45)
-        if "monitor_rx" in relation_state:
-            _rx_adj = relation_state["monitor_rx"]
-        _kb_base_y = int(fv_dy1 + fv_dh * 0.62) + _CONTACT_Y_OFFSET["KEYBOARD"]
-        y2 = min(_kb_base_y, int(fv_dy2 - 15))
-        y1 = y2 - fv_ph
-        # 모니터 하단 기준 최소 20px 아래에 키보드 상단 위치 보장
-        _mon_y2 = relation_state.get("monitor_contact_y", 0)
-        if y1 < _mon_y2 + 20:
-            y1 = _mon_y2 + 20
-            y2 = y1 + fv_ph
-        relation_state["keyboard_y2"] = y2  # MOUSE y 정렬용
-        _y_override = True
-    elif cat == "DESK_LAMP":
-        fv_pw = max(fv_pw, 90)
-        fv_ph = max(fv_ph, 130)
-        _rx_adj = max(rx, 0.12) if rx < 0.5 else min(rx, 0.88)
-        y2 = int(fv_dy1 + fv_dh * 0.45)
-        y1 = y2 - fv_ph
-        _y_override = True
-    elif cat == "DESK_SHELF":
-        fv_pw = max(min(int(fv_dw * 0.40), 320), 150)
-        fv_ph = max(int(fv_pw * 0.20), 30)
-        if "monitor_rx" in relation_state:
-            _rx_adj = relation_state["monitor_rx"]
-        y2 = int(fv_dy1 + fv_dh * 0.35)
-        y1 = y2 - fv_ph
-        _y_override = True
-    elif cat == "SPEAKER":
-        fv_pw = max(fv_pw, 60)
-        fv_ph = max(fv_ph, 60)
-    elif cat == "DECO":
-        fv_pw = max(fv_pw, 45)
-        fv_ph = max(fv_ph, 45)
-    elif cat == "MOUSE":
-        fv_pw = max(fv_pw, 60)
-        fv_ph = max(int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"]), 45)
-        _mouse_base_y = relation_state.get("keyboard_y2", int(fv_dy1 + fv_dh * 0.62))
-        y2 = min(_mouse_base_y + _CONTACT_Y_OFFSET["MOUSE"], int(fv_dy2 - 15))
-        y1 = y2 - fv_ph
-        # 키보드 상단보다 위로 올라가지 않도록
-        _kb_y1 = relation_state.get("keyboard_front_y1", 0)
-        if y1 < _kb_y1:
-            y1 = _kb_y1
-            y2 = y1 + fv_ph
-        _y_override = True
-    elif cat == "MOUSEPAD":
-        fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
-
-    # MOUSE는 키보드 오른쪽 edge 기준으로 x 위치 고정
-    _kb_x2 = relation_state.get("keyboard_front_x2") if cat == "MOUSE" else None
-    if _kb_x2 is not None:
-        x1 = max(0, _kb_x2 - fv_pw // 4)
-        x2 = min(fv_w, x1 + fv_pw)
-    else:
-        fv_cx = fv_dx1 + _rx_adj * fv_dw
-        x1 = max(0, int(fv_cx - fv_pw // 2))
-        x2 = min(fv_w, x1 + fv_pw)
-    if not _y_override:
-        y2 = min(fv_dy2, int(fv_dy1 + ry * fv_dh))
-        y1 = max(0, y2 - fv_ph)
-    else:
-        y1 = max(0, y1)
-        y2 = min(fv_h, y2)
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return (x1, y1, x2, y2)
-
-
-def calc_placements_from_available_space(
-    front_image: Image.Image,
-    top_view_image: Image.Image,
-    products: list,
-    desk_width_mm: int | None,
-    desk_depth_mm: int | None,
-    mode: RemoveMode = RemoveMode.own_desk,
-    remover=None,
-    debug_dir: Path | None = None,
-) -> list[dict]:
-    if remover is None:
-        remover = get_object_removal_processor()
-
-    tv_w, tv_h = top_view_image.size
-    fv_w, fv_h = front_image.size
-
-    # 1. top-view occupied_mask
-    top_det    = remover.detect_with_prompt(
-        image=top_view_image, prompt=_REMOVAL_PROMPT, max_area_ratio=0.40,
-    )
-    occupied_np = _build_occupied_mask_from_detection(top_det, tv_w, tv_h)
-    occupied_np = postprocess_occupied_mask(occupied_np)
-
-    # 2. desk_mask (DINO+SAM2, 실패 시 full image)
-    desk_mask_np = remover.detect_desk_mask(top_view_image)
-    if desk_mask_np is None:
-        print("[AvailSpace] desk_mask 실패 → full image")
-        desk_mask_np = make_full_desk_mask((tv_h, tv_w))
-    else:
-        desk_mask_np = keep_largest_component(desk_mask_np)
-
-    # 3. available space 분석
-    desk_width_cm = (desk_width_mm / 10) if desk_width_mm else 120.0
-    desk_depth_cm = (desk_depth_mm / 10) if desk_depth_mm else desk_width_cm * 0.55
-
-    remove_mask = None if mode == RemoveMode.add else occupied_np
-
-    space_info        = analyze_space(
-        occupied_mask=occupied_np,
-        desk_width_cm=desk_width_cm,
-        desk_depth_cm=desk_depth_cm,
-        desk_mask=desk_mask_np,
-        remove_mask=remove_mask,
-    )
-    available_regions = space_info.get("available_regions", [])
-    cm_per_px         = space_info.get("cm_per_px", {"x": 0.1, "y": 0.1})
-    mm_per_px_x       = cm_per_px["x"] * 10
-    mm_per_px_y       = cm_per_px["y"] * 10
-
-    if not available_regions:
-        print("[AvailSpace] 가용 영역 없음 → fallback")
-        return []
-
-    # 4. top-view desk bbox (정규화 기준)
-    ys, xs = np.where(desk_mask_np > 0)
-    if len(xs) == 0:
-        return []
-    tv_dx1, tv_dy1 = int(xs.min()), int(ys.min())
-    tv_dx2, tv_dy2 = int(xs.max()), int(ys.max())
-    tv_dw = max(1, tv_dx2 - tv_dx1)
-    tv_dh = max(1, tv_dy2 - tv_dy1)
-
-    # 5. front-view desk bbox
-    fv_bbox = _detect_desk_bbox(front_image)
-    if fv_bbox:
-        fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox
-    else:
-        fv_dx1, fv_dy1 = 0, int(fv_h * 0.15)
-        fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.68)
-    # DINO가 의자 포함 전체를 책상으로 인식할 수 있으므로 항상 68%로 cap
-    fv_dy2 = min(fv_dy2, int(fv_h * 0.68))
-    fv_dw = max(1, fv_dx2 - fv_dx1)
-    fv_dh = max(1, fv_dy2 - fv_dy1)
-
-    # _PLACEMENT_ORDER 순으로 정렬 후 scoring 기반 배치
-    sorted_products = sorted(
-        [p for p in products if normalize_category(p.category) in _CATEGORY_DIMS_MM],
-        key=lambda p: _PLACEMENT_ORDER.get(normalize_category(p.category), 999),
-    )
-    for p in products:
-        if normalize_category(p.category) not in _CATEGORY_DIMS_MM:
-            print(f"[Placement SKIP] unsupported: {p.category}")
-
-    relation_state:     dict = {}
-    placed_norm:        list = []
-    placed_front_items: list = []  # {region, cat} — 카테고리별 overlap 임계값 적용용
-    placements:         list = []
-
-    for p in sorted_products:
-        cat  = normalize_category(p.category)
-        w_mm = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
-
-        best_score       = -999.0
-        best_cand        = None
-        candidate_count  = 0
-        overlap_reject   = 0
-        low_score_reject = 0
-
-        for region in available_regions:
-            for anchor_x, anchor_y in _sample_points_in_region(region, n=7):
-                rx = max(0.0, min(1.0, (anchor_x - tv_dx1) / tv_dw))
-                ry = max(0.0, min(1.0, (anchor_y - tv_dy1) / tv_dh))
-                fv_bbox = _front_bbox_for_anchor(
-                    cat, rx, ry, w_mm,
-                    fv_dx1, fv_dy1, fv_dx2, fv_dy2, fv_dw, fv_dh, fv_w, fv_h,
-                    desk_width_mm, relation_state,
-                )
-                if fv_bbox is None:
-                    continue
-                # 카테고리 쌍별 허용 IoU 상한으로 overlap 체크
-                _rej = any(
-                    bbox_iou(fv_bbox, prev["region"]) >= _overlap_threshold(cat, prev["cat"])
-                    for prev in placed_front_items
-                )
-                if _rej:
-                    overlap_reject += 1
-                    continue
-                candidate_count += 1
-                _rw = (fv_bbox[2] - fv_bbox[0]) / max(fv_dw, 1)
-                _rh = (fv_bbox[3] - fv_bbox[1]) / max(fv_dh, 1)
-                s = score_region_for_product(cat, rx, ry, placed_norm, relation_state, rw=_rw, rh=_rh)
-                if s < -0.5:
-                    low_score_reject += 1
-                    continue
-                if s > best_score:
-                    best_score = s
-                    best_cand  = {"region": fv_bbox, "rx": rx, "ry": ry,
-                                  "region_id": region["region_id"]}
-
-        # KEYBOARD 강제 후보: scoring 실패 시 monitor 하단 위치에 강제 생성
-        if cat == "KEYBOARD" and best_cand is None:
-            _forced_rx = relation_state.get("monitor_rx", 0.50)
-            for _fry in [0.65, 0.70, 0.60, 0.75, 0.55]:
-                _fb = _front_bbox_for_anchor(
-                    cat, _forced_rx, _fry, w_mm,
-                    fv_dx1, fv_dy1, fv_dx2, fv_dy2, fv_dw, fv_dh, fv_w, fv_h,
-                    desk_width_mm, relation_state,
-                )
-                if _fb is None:
-                    continue
-                # MONITOR, DESK_SHELF와의 overlap 허용 — 키보드는 받침대 앞에 배치 가능
-                _non_critical = [i for i in placed_front_items
-                                 if i["cat"] not in {"MONITOR", "DESK_SHELF"}]
-                if any(bbox_iou(_fb, i["region"]) >= _DEFAULT_OVERLAP_THR for i in _non_critical):
-                    continue
-                _rw_fb = (_fb[2] - _fb[0]) / max(fv_dw, 1)
-                _rh_fb = (_fb[3] - _fb[1]) / max(fv_dh, 1)
-                _fs = score_region_for_product(cat, _forced_rx, _fry, placed_norm, relation_state, rw=_rw_fb, rh=_rh_fb)
-                best_score = max(_fs, -0.49)  # 강제 후보는 score 하한 보장
-                best_cand  = {"region": _fb, "rx": _forced_rx, "ry": _fry, "region_id": -1}
-                print(f"  [KEYBOARD forced] rx={_forced_rx:.2f} ry={_fry:.2f} → {_fb}")
-                break
-
-        if best_cand:
-            x1, y1, x2, y2 = best_cand["region"]
-            _src = ("forced_keyboard" if best_cand["region_id"] == -1
-                    else "available_space_scoring")
-            _sel_reason = (
-                "forced_keyboard_below_monitor" if _src == "forced_keyboard"
-                else "high_score"               if best_score > 0.5
-                else "positive_score"           if best_score > 0
-                else "zero_score_best_available" if best_score >= -0.01
-                else "low_score_best_available"
-            )
-            print(f"  [Score] {cat} rx={best_cand['rx']:.2f} ry={best_cand['ry']:.2f} "
-                  f"score={best_score:.2f} region_id={best_cand['region_id']} "
-                  f"cand={candidate_count} ov_rej={overlap_reject} ls_rej={low_score_reject} "
-                  f"→ fv({x1},{y1},{x2},{y2})")
-            placements.append({
-                "product":              p,
-                "region":               (x1, y1, x2, y2),
-                "score":                round(best_score, 3),
-                "available_region_id":  best_cand["region_id"],
-                "placement_source":     _src,
-                "selected_reason":      _sel_reason,
-                "candidate_count":      candidate_count,
-                "overlap_reject_count": overlap_reject,
-                "low_score_reject_count": low_score_reject,
-                "fallback_reason":      None,
-                "anchor_rx":            round(best_cand["rx"], 3),
-                "anchor_ry":            round(best_cand["ry"], 3),
-            })
-            placed_front_items.append({"region": (x1, y1, x2, y2), "cat": cat})
-            relation_state[f"{cat.lower()}_rx"] = best_cand["rx"]
-            relation_state[f"{cat.lower()}_ry"] = best_cand["ry"]
-            if cat == "KEYBOARD":
-                relation_state["keyboard_front_x2"] = x2
-                relation_state["keyboard_front_y1"] = y1
-            placed_norm.append({
-                "rx":  best_cand["rx"], "ry": best_cand["ry"],
-                "rw":  (x2 - x1) / max(fv_dw, 1), "rh": (y2 - y1) / max(fv_dh, 1),
-                "cat": cat,
-            })
-        else:
-            reason = ("no_non_overlapping_candidate" if candidate_count == 0
-                      else "all_candidates_low_score")
-            print(f"  [Score FAIL] {cat} cand={candidate_count} "
-                  f"ov_rej={overlap_reject} ls_rej={low_score_reject} → {reason}")
-            placements.append({
-                "product":              p,
-                "region":               None,
-                "score":                None,
-                "available_region_id":  None,
-                "placement_source":     "fallback",
-                "selected_reason":      None,
-                "candidate_count":      candidate_count,
-                "overlap_reject_count": overlap_reject,
-                "low_score_reject_count": low_score_reject,
-                "fallback_reason":      reason,
-                "anchor_rx":            None,
-                "anchor_ry":            None,
-            })
-
-    if debug_dir is not None:
-        try:
-            _save_topview_overlays(
-                top_view_image=top_view_image,
-                available_regions=available_regions,
-                placements=[i for i in placements if i.get("region") is not None],
-                placed_norm=placed_norm,
-                tv_dx1=tv_dx1, tv_dy1=tv_dy1, tv_dw=tv_dw, tv_dh=tv_dh,
-                debug_dir=debug_dir,
-            )
-        except Exception as _e:
-            print(f"[AvailSpace] top-view overlay 저장 실패: {_e}")
-
-    return placements
-
-
-_RANKER_CAT_ID = {
-    "MONITOR": 0, "KEYBOARD": 1, "MOUSE": 2, "MOUSEPAD": 3,
-    "SPEAKER": 4, "DESK_LAMP": 5, "DESK_SHELF": 6,
-    "LAPTOP_STAND": 7, "DECO": 8, "CLOCK": 9,
-}
-# 학습 샘플 부족 카테고리 — rule-based 유지
-_RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD"}
-
-_layout_ranker: dict | None = None
-
-
-def _get_layout_ranker() -> dict | None:
-    global _layout_ranker
-    if _layout_ranker is not None:
-        return _layout_ranker
-    model_path = Path(__file__).parent.parent / "outputs" / "models" / "layout_ranker.pkl"
-    if not model_path.exists():
-        return None
-    try:
-        import pickle
-        with model_path.open("rb") as f:
-            _layout_ranker = pickle.load(f)
-        print(f"[LayoutRanker] 로드 완료 type={_layout_ranker['model_type']} AUC={_layout_ranker.get('val_auc')}")
-    except Exception as e:
-        print(f"[LayoutRanker] 로드 실패: {e}")
-    return _layout_ranker
-
-
-def _make_ranker_feature(
-    cat: str, rx: float, ry: float, rw: float, rh: float,
-    relation_state: dict, placed_norm: list,
-) -> list:
-    pref        = _PREFERRED_POS.get(cat, {"rx": 0.5, "ry": 0.5})
-    dist_pref   = ((rx - pref["rx"])**2 + (ry - pref["ry"])**2) ** 0.5
-    edge_x      = min(rx, 1.0 - rx)
-    edge_y      = min(ry, 1.0 - ry)
-    monitor_rx  = float(relation_state.get("monitor_rx",  -1.0))
-    monitor_ry  = float(relation_state.get("monitor_ry",  -1.0))
-    if monitor_rx >= 0:
-        dx_mon   = rx - monitor_rx
-        dy_mon   = ry - monitor_ry
-        dist_mon = (dx_mon**2 + dy_mon**2) ** 0.5
-    else:
-        dx_mon = dy_mon = dist_mon = -1.0
-    keyboard_rx = float(relation_state.get("keyboard_rx", -1.0))
-    keyboard_ry = float(relation_state.get("keyboard_ry", -1.0))
-    center_dist = ((rx - 0.5)**2 + (ry - 0.5)**2) ** 0.5
-    is_left  = 1 if rx < 0.35 else 0
-    is_right = 1 if rx > 0.65 else 0
-    is_back  = 1 if ry < 0.35 else 0
-    is_front = 1 if ry > 0.65 else 0
-    cand_box = [rx - rw/2, ry - rh/2, rx + rw/2, ry + rh/2]
-    overlap  = 0.0
-    for prev in placed_norm:
-        if prev.get("cat") == cat:
-            continue
-        prw = prev.get("rw", 0.10)
-        prh = prev.get("rh", 0.10)
-        pb  = [prev["rx"] - prw/2, prev["ry"] - prh/2, prev["rx"] + prw/2, prev["ry"] + prh/2]
-        ix1 = max(cand_box[0], pb[0]); iy1 = max(cand_box[1], pb[1])
-        ix2 = min(cand_box[2], pb[2]); iy2 = min(cand_box[3], pb[3])
-        iw  = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
-        inter   = iw * ih
-        a_area  = max(1e-8, (cand_box[2]-cand_box[0]) * (cand_box[3]-cand_box[1]))
-        b_area  = max(1e-8, (pb[2]-pb[0]) * (pb[3]-pb[1]))
-        iou     = inter / (a_area + b_area - inter + 1e-8)
-        overlap = max(overlap, iou)
-    n_others = len([p for p in placed_norm if p.get("cat") != cat])
-    return [
-        _RANKER_CAT_ID.get(cat, -1),
-        round(rx, 4), round(ry, 4), round(rw, 4), round(rh, 4),
-        round(dist_pref, 4),
-        round(edge_x, 4), round(edge_y, 4),
-        round(monitor_rx, 4), round(monitor_ry, 4),
-        round(dist_mon, 4), round(dx_mon, 4), round(dy_mon, 4),
-        round(keyboard_rx, 4), round(keyboard_ry, 4),
-        round(center_dist, 4),
-        is_left, is_right, is_back, is_front,
-        round(overlap, 4),
-        n_others,
-    ]
-
-
-def bbox_iou(a, b) -> float:
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
-    iw  = max(0, ix2 - ix1); ih = max(0, iy2 - iy1)
-    inter  = iw * ih
-    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
-    area_b = max(1, (bx2 - bx1) * (by2 - by1))
-    return inter / (area_a + area_b - inter + 1e-6)
-
-
-def score_region_for_product(
-    cat: str,
-    rx: float,
-    ry: float,
-    placed_norm: list,
-    relation_state: dict,
-    rw: float | None = None,
-    rh: float | None = None,
-) -> float:
-    # 관계 기반 선호 위치 조정
-    if cat == "KEYBOARD" and "monitor_rx" in relation_state:
-        pref_rx = relation_state["monitor_rx"]
-        pref_ry = 0.62
-    elif cat == "MOUSE":
-        pref_rx = min(1.0, relation_state.get("keyboard_rx", 0.50) + 0.20)
-        pref_ry = relation_state.get("keyboard_ry", 0.62)
-    elif cat == "SPEAKER":
-        pref_rx = 0.20 if rx <= 0.50 else 0.80
-        pref_ry = relation_state.get("monitor_ry", 0.25)
-    else:
-        pos = _PREFERRED_POS.get(cat, {"rx": 0.50, "ry": 0.50})
-        pref_rx, pref_ry = pos["rx"], pos["ry"]
-
-    dist = ((rx - pref_rx) ** 2 + (ry - pref_ry) ** 2) ** 0.5
-    score = max(0.0, 1.0 - dist * 2.0)
-
-    # 하드 제약 penalty
-    if cat == "MONITOR" and ry > 0.40:
-        score -= 2.0
-    if cat == "KEYBOARD" and ry < 0.45:
-        score -= 1.5
-    if cat == "DESK_LAMP" and 0.20 <= rx <= 0.80:
-        score -= 1.5
-    if cat in ("DECO", "CLOCK") and 0.30 <= rx <= 0.70 and ry > 0.40:
-        score -= 1.0
-    # DECO는 MOUSE/KEYBOARD 작업 영역 x축 근처 강한 penalty
-    if cat == "DECO":
-        for _rkey in ("mouse_rx", "keyboard_rx"):
-            if _rkey in relation_state:
-                _dx = abs(rx - relation_state[_rkey])
-                if _dx < 0.15:
-                    score -= 2.0
-                elif _dx < 0.28:
-                    score -= 0.8
-
-    # 이미 배치된 제품과의 거리 penalty
-    for prev in placed_norm:
-        d = ((rx - prev["rx"]) ** 2 + (ry - prev["ry"]) ** 2) ** 0.5
-        if d < 0.15:
-            score -= 2.0
-        elif d < 0.25:
-            score -= 0.5
-
-    # 책상 가장자리 너무 가까우면 소폭 penalty
-    if min(rx, 1 - rx, ry, 1 - ry) < 0.05:
-        score -= 0.3
-
-    # learned layout ranker 블렌드 (샘플 충분한 카테고리, rw/rh 있을 때만)
-    if rw is not None and rh is not None and cat not in _RANKER_SKIP_CATS:
-        _ranker = _get_layout_ranker()
-        if _ranker is not None:
-            try:
-                _feat  = _make_ranker_feature(cat, rx, ry, rw, rh, relation_state, placed_norm)
-                _prob  = _ranker["model"].predict_proba([_feat])[0][1]
-                _learned = (_prob - 0.5) * 3.0  # [-1.5, 1.5]
-                score  = score * 0.3 + _learned * 0.7
-            except Exception:
-                pass
-
-    return score
-
-
-def _save_topview_overlays(
-    top_view_image: Image.Image,
-    available_regions: list,
-    placements: list,
-    placed_norm: list,
-    tv_dx1: int, tv_dy1: int, tv_dw: int, tv_dh: int,
-    debug_dir: Path,
-) -> None:
-    from PIL import ImageDraw as _IDraw
-    tv_w, tv_h = top_view_image.size
-
-    # available space overlay
-    av_base = top_view_image.copy().convert("RGBA")
-    overlay = Image.new("RGBA", (tv_w, tv_h), (0, 0, 0, 0))
-    d = _IDraw.Draw(overlay)
-    for r in available_regions:
-        bx = r["bbox_px"]
-        rx1, ry1 = int(bx["x"]), int(bx["y"])
-        rx2, ry2 = rx1 + int(bx["width"]), ry1 + int(bx["height"])
-        d.rectangle([rx1, ry1, rx2, ry2], fill=(0, 255, 0, 60), outline=(0, 200, 0, 200))
-        d.text((rx1 + 2, ry1 + 2), str(r["region_id"]), fill=(0, 180, 0, 255))
-    av_base.alpha_composite(overlay)
-    av_base.convert("RGB").save(debug_dir / "top_available_space_overlay.png")
-
-    # product placement debug on top-view
-    pl_img = top_view_image.copy()
-    d2 = _IDraw.Draw(pl_img)
-    for pn in placed_norm:
-        px = int(tv_dx1 + pn["rx"] * tv_dw)
-        py = int(tv_dy1 + pn["ry"] * tv_dh)
-        d2.ellipse([px - 8, py - 8, px + 8, py + 8], fill=(255, 80, 0))
-        d2.text((px + 10, py - 8), pn["cat"], fill=(255, 80, 0))
-    pl_img.save(debug_dir / "top_product_placement_debug.png")
-
-
-def has_meaningful_alpha(img: Image.Image) -> bool:
-    if img.mode != "RGBA":
-        return False
-    alpha = np.array(img.getchannel("A"))
-    return alpha.min() < 250
-
-
-def make_white_bg_transparent(
-    img: Image.Image,
-    threshold: int = 245,
-    feather: int = 4,
-) -> Image.Image:
-    rgba = img.convert("RGBA")
-    arr = np.array(rgba)
-
-    rgb = arr[:, :, :3]
-    white = (
-        (rgb[:, :, 0] >= threshold) &
-        (rgb[:, :, 1] >= threshold) &
-        (rgb[:, :, 2] >= threshold)
-    )
-
-    mask = white.astype(np.uint8) * 255
-    h, w = mask.shape
-    flood = mask.copy()
-    ff_mask = np.zeros((h + 2, w + 2), np.uint8)
-
-    for sx, sy in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-        if flood[sy, sx] > 0:
-            cv2.floodFill(flood, ff_mask, (sx, sy), 128)
-
-    bg = flood == 128
-    alpha = arr[:, :, 3]
-    alpha[bg] = 0
-
-    if feather > 0:
-        alpha = cv2.GaussianBlur(alpha, (feather * 2 + 1, feather * 2 + 1), 0)
-
-    arr[:, :, 3] = alpha
-    return Image.fromarray(arr)
-
-
-def _tight_crop_rgba(img: Image.Image, padding: int = 4) -> Image.Image:
-    alpha = np.array(img.getchannel("A"))
-    rows  = np.any(alpha > 10, axis=1)
-    cols  = np.any(alpha > 10, axis=0)
-    if not rows.any():
-        return img
-    rmin, rmax = np.where(rows)[0][[0, -1]]
-    cmin, cmax = np.where(cols)[0][[0, -1]]
-    h, w = alpha.shape
-    rmin = max(0, rmin - padding)
-    rmax = min(h - 1, rmax + padding)
-    cmin = max(0, cmin - padding)
-    cmax = min(w - 1, cmax + padding)
-    return img.crop((cmin, rmin, cmax + 1, rmax + 1))
-
-
-def prepare_product_image_for_composite(img: Image.Image) -> Image.Image:
-    rgba = img.convert("RGBA")
-    result = rgba if has_meaningful_alpha(rgba) else make_white_bg_transparent(rgba)
-    return _tight_crop_rgba(result)
-
-
-def composite_product_simple(
-    base: Image.Image,
-    product_img: Image.Image,
-    region: tuple,
-    edge_feather: int = 4,
-    category: str = "",
-) -> Image.Image:
-    x1, y1, x2, y2 = region
-    target_w = max(1, x2 - x1)
-    target_h = max(1, y2 - y1)
-
-    prod = prepare_product_image_for_composite(product_img)
-
-    # 비율 유지 리사이즈, 최소 시각 크기 30px 보장 — category_max_scale까지 확대 허용
-    _max_sc = _CV_CAT_MAX_SCALE.get(category, 1.0)
-    scale = min(target_w / max(prod.width, 1), target_h / max(prod.height, 1), _max_sc)
-    new_w = max(30, int(prod.width * scale))
-    new_h = max(30, int(prod.height * scale))
-    if (new_w, new_h) != (prod.width, prod.height):
-        prod = prod.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-    # alpha 경계 feather — 스티커 경계 완화
-    if edge_feather > 0:
-        alpha_arr = np.array(prod.getchannel("A"))
-        ksize     = edge_feather * 2 + 1
-        alpha_blur = cv2.GaussianBlur(alpha_arr, (ksize, ksize), 0)
-        prod_arr   = np.array(prod)
-        prod_arr[:, :, 3] = alpha_blur
-        prod = Image.fromarray(prod_arr)
-
-    px = x1 + (target_w - prod.width) // 2
-    py = y2 - prod.height  # 하단 기준 정렬
-
-    out = base.convert("RGBA")
-    out.alpha_composite(prod, (max(0, px), max(0, py)))
-    return out.convert("RGB")
-
-
-def _add_shadows(
-    base: Image.Image,
-    region: tuple,
-    category: str,
-    prod_alpha: Image.Image | None = None,
-    debug_dir: Path | None = None,
-) -> Image.Image:
-    x1, y1, x2, y2 = region
-    w, h = base.size
-    cat = category.upper()
-    pw = max(1, x2 - x1)
-    ph = max(1, y2 - y1)
-
-    # alpha contact 계산: 실제 오브젝트 하단 픽셀 위치
-    _contact_y  = min(y2, h - 1)
-    _contact_x1 = x1
-    _contact_x2 = x2
-
-    if prod_alpha is not None and prod_alpha.mode == "RGBA":
-        _sc  = min(pw / max(prod_alpha.width, 1), ph / max(prod_alpha.height, 1))
-        _sw  = max(1, int(prod_alpha.width  * _sc))
-        _sh  = max(1, int(prod_alpha.height * _sc))
-        _psc = prod_alpha.resize((_sw, _sh), Image.Resampling.LANCZOS)
-        _a   = np.array(_psc.getchannel("A"))
-        _px  = x1 + (pw - _sw) // 2
-
-        _rows = np.where((_a > 127).any(axis=1))[0]
-        if len(_rows) > 0:
-            _obj_bot_local = _rows[-1]
-            _contact_y = min(h - 1, (y2 - _sh) + _obj_bot_local)
-            _cols = np.where(_a[_obj_bot_local] > 127)[0]
-            if len(_cols) > 0:
-                _contact_x1 = max(0,  _px + _cols[0])
-                _contact_x2 = min(w,  _px + _cols[-1])
-
-    _cx  = (_contact_x1 + _contact_x2) // 2
-    _cw  = max(1, _contact_x2 - _contact_x1)
-
-    # cast shadow offset: light source 기준 우측+하단
-    _cast_ox = max(1, int(pw * 0.12))
-    _cast_oy = max(1, int(ph * 0.06))
-    _cast_cx = min(w - 1, _cx + _cast_ox)
-    _cast_cy = min(h - 1, _contact_y + _cast_oy)
-
-    contact_shadow = np.zeros((h, w), dtype=np.float32)
-    cast_shadow    = np.zeros((h, w), dtype=np.float32)
-
-    if cat == "MONITOR":
-        _shadow_half_w = max(_cw // 4, pw // 5, 40)
-        cv2.ellipse(contact_shadow, (_cx, _contact_y), (_shadow_half_w, 10), 0, 0, 360, 1.0, -1)
-        contact_blur_k, contact_str = 13, 0.52
-        _cast_hw = max(_shadow_half_w * 2, pw // 3, 60)
-        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (_cast_hw, 15), 0, 0, 360, 1.0, -1)
-        cast_blur_k, cast_str = 31, 0.15
-    elif cat == "KEYBOARD":
-        contact_shadow[max(0, _contact_y - 4):min(h, _contact_y + 6),
-                       max(0, _contact_x1):min(w, _contact_x2)] = 1.0
-        contact_blur_k, contact_str = 11, 0.50
-        cast_shadow[max(0, _cast_cy - 5):min(h, _cast_cy + 8),
-                    max(0, _contact_x1 + _cast_ox):min(w, _contact_x2 + _cast_ox)] = 1.0
-        cast_blur_k, cast_str = 25, 0.14
-    elif cat == "MOUSE":
-        cv2.ellipse(contact_shadow, (_cx, _contact_y), (max(_cw // 2, 20), 9), 0, 0, 360, 1.0, -1)
-        contact_blur_k, contact_str = 9, 0.55
-        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (max(_cw, 30), 14), 0, 0, 360, 1.0, -1)
-        cast_blur_k, cast_str = 21, 0.15
-    elif cat == "DESK_LAMP":
-        cv2.ellipse(contact_shadow, (_cx, _contact_y), (max(_cw // 2, 22), 12), 0, 0, 360, 1.0, -1)
-        contact_blur_k, contact_str = 13, 0.45
-        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (max(_cw, 30), 18), 0, 0, 360, 1.0, -1)
-        cast_blur_k, cast_str = 27, 0.13
-    else:
-        cv2.ellipse(contact_shadow, (_cx, _contact_y), (max(_cw // 3, 18), 9), 0, 0, 360, 1.0, -1)
-        contact_blur_k, contact_str = 11, 0.45
-        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (max(_cw // 2, 20), 12), 0, 0, 360, 1.0, -1)
-        cast_blur_k, cast_str = 19, 0.13
-
-    contact_shadow = cv2.GaussianBlur(contact_shadow, (contact_blur_k, contact_blur_k), 0)
-    contact_shadow = np.clip(contact_shadow * contact_str, 0.0, 0.50)
-    cast_shadow    = cv2.GaussianBlur(cast_shadow,    (cast_blur_k,    cast_blur_k),    0)
-    cast_shadow    = np.clip(cast_shadow    * cast_str,    0.0, 0.30)
-    combined       = np.clip(contact_shadow + cast_shadow, 0.0, 0.55)
-
-    if debug_dir is not None:
-        try:
-            import json as _j
-            _dd = Path(debug_dir)
-            _dd.mkdir(parents=True, exist_ok=True)
-            Image.fromarray((contact_shadow * 255).astype(np.uint8)).save(_dd / f"{cat}_contact_shadow_mask.png")
-            Image.fromarray((cast_shadow    * 255).astype(np.uint8)).save(_dd / f"{cat}_cast_shadow_mask.png")
-            Image.fromarray((combined       * 255).astype(np.uint8)).save(_dd / f"{cat}_combined_shadow_mask.png")
-            _shadow_info = {
-                "contact_y":              int(_contact_y),
-                "contact_x1":             int(_contact_x1),
-                "contact_x2":             int(_contact_x2),
-                "contact_shadow_opacity": float(contact_str),
-                "contact_shadow_blur":    int(contact_blur_k),
-                "cast_shadow_opacity":    float(cast_str),
-                "cast_shadow_blur":       int(cast_blur_k),
-                "cast_shadow_offset":     [int(_cast_ox), int(_cast_oy)],
-            }
-            _ci_path = _dd / f"{cat}_contact_info.json"
-            _existing = _j.loads(_ci_path.read_text(encoding="utf-8")) if _ci_path.exists() else {}
-            _existing.update(_shadow_info)
-            _ci_path.write_text(_j.dumps(_existing, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            pass
-
-    arr = np.array(base.convert("RGB")).astype(np.float32)
-    arr = arr * (1.0 - combined[:, :, np.newaxis])
-    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-
-
-def _detect_desk_bbox(image: Image.Image) -> tuple | None:
-    # DINO로 책상 영역 감지. 실패 시 None → _calc_regions fallback 사용
-    import numpy as np
-    from .dino_processor import run_grounding_dino
-
-    img_w, img_h = image.size
-    scale = min(512 / img_w, 512 / img_h)
-    small = image.resize((int(img_w * scale), int(img_h * scale)))
-    small_bgr = np.array(small.convert("RGB"))[:, :, ::-1].copy()
-
-    dets = run_grounding_dino(
-        small_bgr, "desk. table.",
-        box_threshold=0.20,
-        max_area_ratio=0.98,  # 책상은 이미지 대부분을 차지할 수 있음
-    )
-    if not dets:
-        return None
-
-    best = max(dets, key=lambda d: (d.box_xyxy[2] - d.box_xyxy[0]) * (d.box_xyxy[3] - d.box_xyxy[1]))
-    x1, y1, x2, y2 = best.box_xyxy
-    return (int(x1 / scale), int(y1 / scale), int(x2 / scale), int(y2 / scale))
-
-
-def _calc_regions(
-    img_w: int, img_h: int, products,
-    desk_bbox: tuple | None = None,
-    desk_width_mm: int | None = None,
-) -> list:
-    if desk_bbox:
-        dx1, dy1, dx2, dy2 = desk_bbox
-    else:
-        dx1, dy1 = 0, int(img_h * 0.35)
-        dx2, dy2 = img_w, int(img_h * 0.68)
-    # 상단 cap: 책상이 이미지 상단 20% 이내에서 시작한다고 감지되면 무시
-    # → 후면 제품(모니터 등)이 벽 영역에 배치되는 것을 방지
-    dy1 = max(dy1, int(img_h * 0.20))
-    # 하단 cap: 의자 영역 침범 방지
-    dy2 = min(dy2, int(img_h * 0.68))
-
-    DW = dx2 - dx1
-    DH = dy2 - dy1
-    cx = (dx1 + dx2) // 2
-
-    # 전면(카메라 가까운 쪽): 책상 표면 55% 지점 — 0.78은 의자 영역까지 내려감
-    front_y = dy1 + int(DH * 0.55)
-    # 후면(벽 쪽): 책상 상단 경계 — 후면 제품은 위쪽(벽)으로 솟아오름
-    back_top = dy1
-
-    def clip(x1, y1, x2, y2):
-        return max(0, x1), max(0, y1), min(img_w - 1, x2), min(img_h - 1, y2)
-
-    def perspective_scale(center_y: int) -> float:
-        ratio = (center_y - dy1) / max(DH, 1)
-        return 0.60 + 0.40 * ratio
-
-    def product_pixel_size(p) -> tuple[int, int]:
-        cat     = normalize_category(p.category)
-        w_mm    = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM.get(cat, (100, 100))[0]
-        h_ratio = _FRONT_HEIGHT_RATIO.get(cat, 0.80)
-
-        if desk_width_mm and desk_width_mm > 0:
-            raw = int(w_mm * DW / desk_width_mm)
-        else:
-            # 책상 너비 대비 카테고리별 비율로 fallback
-            raw = int(DW * _DESK_W_RATIO.get(cat, 0.15))
-        pw = min(raw, int(DW * 0.65))  # 책상 너비 65% cap
-
-        ph = int(pw * h_ratio)
-        return pw, ph
-
-    regions = []
-    for p in products:
-        cat = normalize_category(p.category)
-        if cat not in _CATEGORY_DIMS_MM:
-            continue
-
-        base_pw, _ = product_pixel_size(p)
-
-        if cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
-            # 전면 제품: 책상 앞쪽, 원근 적용
-            ps = perspective_scale(front_y)
-            pw = int(base_pw * ps)
-            ph = int(pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80))  # pw 기준 비율
-
-            if cat == "KEYBOARD":
-                x1 = cx - pw // 2;              x2 = x1 + pw
-                y2 = front_y;                    y1 = y2 - ph
-            elif cat == "MOUSEPAD":
-                x1 = cx - pw // 2;              x2 = x1 + pw
-                y2 = front_y + int(DH * 0.05);  y1 = y2 - ph
-            else:  # MOUSE
-                x1 = cx + int(DW * 0.22);       x2 = x1 + pw
-                y2 = front_y + int(DH * 0.03);  y1 = y2 - ph
-        else:
-            # 후면 제품: 책상 뒤쪽, 위로 솟아오름 (y1은 책상 위 벽 방향)
-            ps = perspective_scale(back_top + int(DH * 0.15))
-            pw = int(base_pw * ps)
-            ph = int(pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80))  # pw 기준 비율
-
-            if cat == "MONITOR":
-                # 스탠드는 책상 위에, 화면은 위로 솟아오름
-                x1 = cx - pw // 2;               x2 = x1 + pw
-                y2 = back_top + int(DH * 0.12);  y1 = max(0, y2 - ph)
-            elif cat == "SPEAKER":
-                x2 = cx - int(DW * 0.20);        x1 = x2 - pw
-                y2 = back_top + int(DH * 0.28);  y1 = max(0, y2 - ph)
-            elif cat == "DESK_LAMP":
-                x1 = cx + int(DW * 0.32);        x2 = x1 + pw
-                y2 = back_top + int(DH * 0.22);  y1 = max(0, y2 - ph)
-            elif cat == "DESK_SHELF":
-                x1 = cx - pw // 2;               x2 = x1 + pw
-                y2 = back_top + int(DH * 0.32);  y1 = max(0, y2 - ph)
-            elif cat == "LAPTOP_STAND":
-                x2 = cx - int(DW * 0.10);        x1 = x2 - pw
-                y2 = front_y - int(DH * 0.10);   y1 = y2 - ph
-            else:  # DECO, CLOCK
-                x1 = cx + int(DW * 0.36);        x2 = x1 + pw
-                y2 = back_top + int(DH * 0.30);  y1 = max(0, y2 - ph)
-
-        x1, y1, x2, y2 = clip(x1, y1, x2, y2)
-        if x2 > x1 and y2 > y1:
-            regions.append({"product": p, "region": (x1, y1, x2, y2)})
-
-    return regions
-
-
 # ── Step 1: Object Removal ──────────────────────────────
 @app.post("/remove", response_model=ObjectRemovalResult)
 async def run_object_removal(req: ObjectRemovalRequest):
@@ -1357,21 +145,21 @@ def _run_object_removal(job_id: str, req: ObjectRemovalRequest):
         if req.prompt:
             detection = remover.detect_with_prompt(image=image, prompt=req.prompt, max_area_ratio=req.max_area_ratio)
         elif req.top_view_image_base64:
-            top_view = b64_to_image(req.top_view_image_base64)
+            top_view  = b64_to_image(req.top_view_image_base64)
             detection = remover.detect_from_top_view(front_view=image, top_view=top_view)
         else:
             detection = remover.detect_and_mask(image=image, max_area_ratio=req.max_area_ratio)
 
-        job_store[job_id].mask_image = detection["mask"]
+        job_store[job_id].mask_image        = detection["mask"]
         job_store[job_id].detection_overlay = detection["overlay"]
-        job_store[job_id].num_objects = detection["num_objects"]
+        job_store[job_id].num_objects       = detection["num_objects"]
 
         if detection["num_objects"] == 0:
             job_store[job_id].cleaned_image = image_to_b64(image)
             job_store[job_id].status = JobStatus.done
             return
 
-        lama = get_lama_processor()
+        lama    = get_lama_processor()
         current = image
         for mask_pil in detection["individual_masks"]:
             current = lama.inpaint(image=current, mask=mask_pil)
@@ -1381,7 +169,7 @@ def _run_object_removal(job_id: str, req: ObjectRemovalRequest):
         job_store[job_id].status = JobStatus.done
     except Exception as e:
         job_store[job_id].status = JobStatus.failed
-        job_store[job_id].error = str(e)
+        job_store[job_id].error  = str(e)
         log.error("job_id=%s\n%s", job_id, traceback.format_exc())
 
 
@@ -1397,28 +185,21 @@ async def run_product_place(req: ProductPlaceRequest):
 def _run_product_place(job_id: str, req: ProductPlaceRequest):
     job_store[job_id].status = JobStatus.running
     try:
-        import numpy as np
-
         processor = get_product_inpaint_processor()
-        image = b64_to_image(req.image_base64)
-        img_w, img_h = image.size
-
-        # 마스크에서 배치 영역(bbox) 계산
-        mask_np = np.array(b64_to_image(req.mask_base64).convert("L"))
-        ys, xs = np.where(mask_np > 128)
+        image     = b64_to_image(req.image_base64)
+        mask_np   = np.array(b64_to_image(req.mask_base64).convert("L"))
+        ys, xs    = np.where(mask_np > 128)
         if len(xs) == 0:
-            job_store[job_id].status = JobStatus.done
+            job_store[job_id].status       = JobStatus.done
             job_store[job_id].result_image = image_to_b64(image)
             return
         x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
 
-        # 제품 이미지 있으면 CV 합성
         if req.product_image_base64:
             import tempfile, base64, os
             raw = base64.b64decode(req.product_image_base64)
             tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            tmp.write(raw)
-            tmp.close()
+            tmp.write(raw); tmp.close()
             try:
                 composited = processor.composite_products(
                     image=image,
@@ -1429,7 +210,6 @@ def _run_product_place(job_id: str, req: ProductPlaceRequest):
         else:
             composited = image
 
-        # LoRA img2img 자연화
         processor.pipe.to("cuda")
         result = processor.refine_with_style(
             image=composited,
@@ -1441,43 +221,21 @@ def _run_product_place(job_id: str, req: ProductPlaceRequest):
         processor.pipe.to("cpu")
         torch.cuda.empty_cache()
 
-        job_store[job_id].status = JobStatus.done
+        job_store[job_id].status       = JobStatus.done
         job_store[job_id].result_image = image_to_b64(result)
     except Exception as e:
         job_store[job_id].status = JobStatus.failed
-        job_store[job_id].error = str(e)
+        job_store[job_id].error  = str(e)
         log.error("job_id=%s\n%s", job_id, traceback.format_exc())
 
 
-# ── Generate (전체 파이프라인 단일 호출) ⚠️ 임시 스펙 ──────────
+# ── Generate (전체 파이프라인 단일 호출) ─────────────────────────────
 @app.post("/generate", response_model=GenerateResult)
 async def run_generate(req: GenerateRequest):
     job_id = str(uuid.uuid4())
     job_store[job_id] = GenerateResult(job_id=job_id, status=JobStatus.pending)
     asyncio.get_event_loop().run_in_executor(executor, _run_generate, job_id, req)
     return job_store[job_id]
-
-
-_REMOVAL_PROMPT = (
-    "laptop. laptop computer. notebook computer. monitor. keyboard. mouse. "
-    "mouse pad. mousepad. headset. cup. mug. book. books. book stack. "
-    "notebook. notepad. paper. document. folder. file. binder. "
-    "speaker. desk lamp. lamp. stand lamp. table lamp. desk light. "
-    "cable. pen. pencil. pen holder. pencil cup. stationery. desk organizer. "
-    "phone. tablet. controller. box. bottle. plant. potted plant. "
-    "clock. digital clock. diffuser. perfume bottle. vase."
-)
-
-_FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
-_BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK"}
-
-
-def _build_occupied_mask_from_detection(detection: dict, img_w: int, img_h: int) -> np.ndarray:
-    occupied = np.zeros((img_h, img_w), dtype=np.uint8)
-    for mask_pil in detection.get("individual_masks", []):
-        arr = np.array(mask_pil.convert("L"))
-        occupied = cv2.bitwise_or(occupied, (arr > 127).astype(np.uint8) * 255)
-    return occupied
 
 
 def _run_generate(job_id: str, req: GenerateRequest):
@@ -1488,31 +246,25 @@ def _run_generate(job_id: str, req: GenerateRequest):
         _debug_dir.mkdir(parents=True, exist_ok=True)
         print(f"[Generate] mode={req.mode}")
 
-        image = b64_to_image(req.image_base64)
+        image       = b64_to_image(req.image_base64)
         img_w, img_h = image.size
-        mode = req.mode  # RemoveMode enum
+        mode        = req.mode
 
-        remover = get_object_removal_processor()
-
-        # ── Step 1: front-view 물체 감지 ───────────────────────────
+        remover  = get_object_removal_processor()
         detection = remover.detect_with_prompt(
-            image=image,
-            prompt=_REMOVAL_PROMPT,
-            max_area_ratio=0.40,
+            image=image, prompt=_REMOVAL_PROMPT, max_area_ratio=0.40,
         )
-        front_instances   = detection.get("individual_masks", [])
-        front_detections  = detection.get("detections", [])
+        front_instances  = detection.get("individual_masks", [])
+        front_detections = detection.get("detections", [])
         job_store[job_id].num_removed = detection["num_objects"]
 
-        # detection 로그
         print(f"[Removal] num_objects={detection.get('num_objects')}")
         for _det in front_detections:
             print(f"[Removal] label={_det.label}, score={_det.score:.3f}, bbox={_det.box_xyxy}")
         print(f"[Removal] front_instances={len(front_instances)}")
 
-        # front detection overlay 저장
         from PIL import ImageDraw as _IDraw
-        _ov = image.copy()
+        _ov      = image.copy()
         _ov_draw = _IDraw.Draw(_ov)
         for _det in front_detections:
             _bx1, _by1, _bx2, _by2 = _det.box_xyxy
@@ -1520,14 +272,12 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _ov_draw.text((_bx1 + 4, _by1 + 4), f"{_det.label}:{_det.score:.2f}", fill=(255, 0, 0))
         _ov.save(_debug_dir / "front_detection_overlay.png")
 
-        # combined remove mask 저장
         _combined_np = np.zeros((img_h, img_w), dtype=np.uint8)
         for _mp in front_instances:
             _arr = np.array(_mp.convert("L"))
             _combined_np = cv2.bitwise_or(_combined_np, (_arr > 127).astype(np.uint8) * 255)
         Image.fromarray(_combined_np).save(_debug_dir / "front_remove_mask.png")
 
-        # ── 제거 전략 결정 ──────────────────────────────────────────
         removal_strategy = getattr(req, "removal_strategy", "combined")
         if mode == RemoveMode.add:
             removal_strategy = "none"
@@ -1540,16 +290,14 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         if removal_strategy == "none":
             current = image
-
         elif removal_strategy == "sequential":
-            lama   = get_lama_processor()
+            lama    = get_lama_processor()
             current = image
             for _mask_pil in front_instances:
                 current = lama.inpaint(image=current, mask=_mask_pil)
             current.save(_debug_dir / "cleaned_front_sequential.png")
             torch.cuda.empty_cache()
-
-        else:  # combined (default)
+        else:
             lama              = get_lama_processor()
             _cleaned_combined = lama.inpaint(image=image, mask=_combined_mask_pil)
             _cleaned_combined.save(_debug_dir / "cleaned_front_combined.png")
@@ -1559,23 +307,29 @@ def _run_generate(job_id: str, req: GenerateRequest):
         current.save(_debug_dir / "cleaned_front.png")
         job_store[job_id].cleaned_image = image_to_b64(current)
 
-        # ── Step 2→3: ControlNet 제품 생성 ────────────────────────
-        # top-view 공간 분석은 calc_placements_from_available_space() 내부에서 수행
-        cn_proc = get_controlnet_inpaint_processor()
+        import os as _os
+        _use_sd35 = _os.environ.get("USE_SD35", "1") == "1"
+        if _use_sd35:
+            cn_proc = get_sd35_inpaint_processor()
+            _backbone = "sd3.5-medium"
+            print("[Generate] backbone=SD3.5-medium")
+        else:
+            cn_proc = get_controlnet_inpaint_processor()
+            _backbone = "sd1.5-controlnet"
+            print("[Generate] backbone=SD1.5+ControlNet")
 
         import json as _jmeta
         _lora_ext_dir = Path(__file__).parent.parent / "outputs" / "models" / "lora_external"
         (_debug_dir / "generation_meta.json").write_text(
             _jmeta.dumps({
-                "has_lora":            cn_proc._has_lora,
-                "lora_path_exists":    _lora_ext_dir.exists(),
-                "generation_mode":     getattr(req, "generation_mode", "controlnet"),
+                "backbone":         _backbone,
+                "has_lora":         cn_proc._has_lora,
+                "lora_path_exists": _lora_ext_dir.exists(),
+                "generation_mode":  getattr(req, "generation_mode", "controlnet"),
             }, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        # products.csv로 width_mm/depth_mm 보완 + category 정규화
         products = enrich_products_from_csv(req.products)
-
         print(f"[Generate] products={len(products)}")
         for _p in products:
             print(f"  product: category={_p.category}, image_id={_p.image_id}, "
@@ -1584,11 +338,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
         num_placed   = 0
         run_errors:  list[str]  = []
         gen_mode     = getattr(req, "generation_mode", "controlnet")
-        _gen_results: dict[str, dict] = {}   # cat → per-product generation 결과
+        _gen_results: dict[str, dict] = {}
 
         def _run_cn(p, x1, y1, x2, y2):
             nonlocal current, num_placed, run_errors
-            cat      = normalize_category(p.category)
+            cat       = normalize_category(p.category)
             _ar_range = _CAT_ASPECT_VALID.get(cat)
 
             def _record(route, status, error=None, ar=None, ar_valid=None, debug_json=False):
@@ -1618,8 +372,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 return
             print(f"  [_run_cn] prod_path={prod_path}")
             try:
-                prod_img = Image.open(prod_path)
-                _raw_w, _raw_h = prod_img.size
+                prod_img        = Image.open(prod_path)
+                _raw_w, _raw_h  = prod_img.size
                 _prod_debug_dir = _debug_dir / "products"
                 _prod_debug_dir.mkdir(exist_ok=True)
                 prod_img.save(_prod_debug_dir / f"{cat}_{p.image_id}_raw.png")
@@ -1630,9 +384,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"  [WARNING] {cat} id={p.image_id}: alpha_coverage={_alpha_cov:.2f}"
                           f" — multi-object/lifestyle 이미지 의심, 단품 이미지로 교체 필요")
 
-                # aspect ratio 계산
                 _ar       = prod_alpha.width / max(prod_alpha.height, 1)
-                _ar_valid = True
+                _ar_valid   = True
                 _ar_invalid = False
                 if _ar_range is not None:
                     _ar_min, _ar_max = _ar_range
@@ -1644,13 +397,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         run_errors.append(msg)
                         print(f"  [WARNING] {msg} — CV fallback")
 
-                # _CV_ONLY_CATS: 항상 CV 합성 (SD inpainting 누적 아티팩트 방지)
                 if cat in _CV_ONLY_CATS:
                     _record("cv_composite", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
                     current = _add_shadows(current, (x1, y1, x2, y2), cat,
-                                                  prod_alpha=prod_alpha,
-                                                  debug_dir=_debug_dir / "products")
+                                           prod_alpha=prod_alpha, debug_dir=_debug_dir / "products")
                     num_placed += 1
                     print(f"  [_run_cn CV] {cat} 합성 완료 (num_placed={num_placed})")
                     return
@@ -1659,13 +410,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     _record("cv_fallback_aspect_invalid", "done", ar=_ar, ar_valid=_ar_valid)
                     current = composite_product_simple(current, prod_alpha, (x1, y1, x2, y2), category=cat)
                     current = _add_shadows(current, (x1, y1, x2, y2), cat,
-                                                  prod_alpha=prod_alpha,
-                                                  debug_dir=_debug_dir / "products")
+                                           prod_alpha=prod_alpha, debug_dir=_debug_dir / "products")
                     num_placed += 1
                     print(f"  [_run_cn CV fallback] {cat} (num_placed={num_placed})")
                     return
 
-                # ── generate_product() (controlnet) ──────────────────────
                 _prod_rgb  = prod_img.convert("RGB")
                 brightness = float(np.array(_prod_rgb).mean())
                 print(f"  [_run_cn] {cat} brightness={brightness:.1f}")
@@ -1688,7 +437,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
-                _route = "controlnet_forced_invalid_ar" if _ar_invalid else "controlnet"
+                _route         = "controlnet_forced_invalid_ar" if _ar_invalid else "controlnet"
                 print(f"  [_run_cn] {cat} ({x1},{y1},{x2},{y2}) ip_scale={ip_scale} route={_route}")
                 _debug_meta = {
                     "image_id":           p.image_id,
@@ -1728,8 +477,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     except Exception:
                         pass
                 current = _add_shadows(current, (x1, y1, x2, y2), cat,
-                                       prod_alpha=prod_alpha,
-                                       debug_dir=_debug_dir / "products")
+                                       prod_alpha=prod_alpha, debug_dir=_debug_dir / "products")
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
             except Exception as _e:
@@ -1750,7 +498,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
         if req.top_view_image_base64:
             print(f"[Generate] desk_width_mm={req.desk_width_mm} desk_depth_mm={req.desk_depth_mm}")
             top_image_for_place = b64_to_image(req.top_view_image_base64)
-            _all_space_results = calc_placements_from_available_space(
+            _all_space_results  = calc_placements_from_available_space(
                 front_image=current,
                 top_view_image=top_image_for_place,
                 products=products,
@@ -1761,12 +509,10 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 debug_dir=_debug_dir,
             )
 
-            # scored (region not None) vs failed 분리
             _scored_items = [i for i in _all_space_results if i.get("region") is not None]
             _failed_items = [i for i in _all_space_results if i.get("region") is None]
             _failed_meta  = {id(i["product"]): i for i in _failed_items}
 
-            # scored 내부 overlap 안전 제거 (grid 단계에서 이미 체크했으나 보험)
             _deduped: list[dict] = []
             for _item in _scored_items:
                 if all(bbox_iou(_item["region"], _prev["region"]) < 0.25 for _prev in _deduped):
@@ -1775,11 +521,10 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     print(f"[Placement SKIP] internal overlap: {normalize_category(_item['product'].category)} {_item['region']}")
             placement_items = _deduped
 
-            # scoring 실패 제품 → _calc_regions fallback
             _failed_products = [i["product"] for i in _failed_items]
             if _failed_products:
-                _desk_bbox_fb = _detect_desk_bbox(current)
-                _raw_fallback = _calc_regions(img_w, img_h, _failed_products, _desk_bbox_fb, req.desk_width_mm)
+                _desk_bbox_fb  = _detect_desk_bbox(current)
+                _raw_fallback  = _calc_regions(img_w, img_h, _failed_products, _desk_bbox_fb, req.desk_width_mm)
                 _added = 0
                 for _fi in _raw_fallback:
                     _fi_cat  = normalize_category(_fi["product"].category)
@@ -1800,14 +545,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         print(f"[Placement SKIP] overlap: {_fi_cat} {_fi['region']}")
                 print(f"[Generate] space-fail {len(_failed_products)}개 → fallback {_added}개 추가")
 
-            # scoring+fallback 모두 실패한 제품 → JSON에만 기록
-            _placed_ids = {id(i["product"]) for i in placement_items}
+            _placed_ids        = {id(i["product"]) for i in placement_items}
             _unplaced_for_json = [i for i in _failed_items if id(i["product"]) not in _placed_ids]
-
             print(f"[Generate] available_space 배치: {len(placement_items)}개")
 
         if not placement_items:
-            # fallback: 기존 _calc_regions + DINO 매칭
             desk_bbox = _detect_desk_bbox(current)
             if desk_bbox:
                 print(f"[Generate] fallback desk_bbox: {desk_bbox}")
@@ -1836,12 +578,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
             for item in _calc_regions(img_w, img_h, all_front_prods, desk_bbox, req.desk_width_mm):
                 placement_items.append(item)
 
-        # ── 배치 가능 제품 없으면 즉시 failed ──────────────────────
         print(f"[Generate] placement_items={len(placement_items)}")
 
         if not placement_items:
             job_store[job_id].status = JobStatus.failed
-            job_store[job_id].error = (
+            job_store[job_id].error  = (
                 "배치 가능한 제품 영역이 없습니다. "
                 "products.category, image_id, top_view_image_base64, "
                 "desk_mask/available_space 분석 결과를 확인하세요."
@@ -1849,22 +590,20 @@ def _run_generate(job_id: str, req: GenerateRequest):
             )
             return
 
-        # ── 생성 순서 정렬: 큰/뒤쪽 제품 먼저 ─────────────────────────
         placement_items.sort(
             key=lambda item: _PLACEMENT_ORDER.get(normalize_category(item["product"].category), 999)
         )
 
-        # ── 배치 위치 시각화 저장 ────────────────────────────────────
         from PIL import ImageDraw as _ID
-        _dbg = current.copy()
+        _dbg  = current.copy()
         _draw = _ID.Draw(_dbg)
         for _item in placement_items:
             _x1, _y1, _x2, _y2 = _item["region"]
-            _cat    = normalize_category(_item["product"].category)
-            _score  = _item.get("score")
-            _rid    = _item.get("available_region_id")
-            _src    = "av" if _item.get("placement_source") == "available_space_scoring" else "fb"
-            _label  = _cat
+            _cat   = normalize_category(_item["product"].category)
+            _score = _item.get("score")
+            _rid   = _item.get("available_region_id")
+            _src   = "av" if _item.get("placement_source") == "available_space_scoring" else "fb"
+            _label = _cat
             if _score is not None:
                 _label += f" s={_score:.2f}"
             if _rid is not None:
@@ -1875,10 +614,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
         _dbg.save(_debug_dir / "placement_debug.png")
         print(f"[Generate] 배치 시각화 저장: {_debug_dir}/placement_debug.png")
 
-        # ── 항상 저장: placement_only 결과 ──────────────────────────
         _dbg.save(_debug_dir / "placement_only_result.png")
 
-        # ── 항상 저장: cv_composite 결과 (GPU 불필요, 빠름) ──────────
         _cv_base = current.copy()
         for _cv_item in placement_items:
             _cv_p   = _cv_item["product"]
@@ -1896,7 +633,6 @@ def _run_generate(job_id: str, req: GenerateRequest):
         _cv_base.save(_debug_dir / "cv_composite_result.png")
         print(f"[Generate] cv_composite 디버그 저장: {_debug_dir}/cv_composite_result.png")
 
-        # ── 제품 목록 JSON 저장 ──────────────────────────────────────
         import json as _json
         _products_info = [
             {
@@ -1912,6 +648,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 "overlap_reject_count":   _it.get("overlap_reject_count"),
                 "low_score_reject_count": _it.get("low_score_reject_count"),
                 "score":                  _it.get("score"),
+                "rule_score":             (_it.get("score_meta") or {}).get("rule_score"),
+                "learned_layout_score":   (_it.get("score_meta") or {}).get("learned_layout_score"),
+                "final_score":            (_it.get("score_meta") or {}).get("final_score"),
+                "ranker_used":            (_it.get("score_meta") or {}).get("ranker_used"),
+                "ranker_skipped_reason":  (_it.get("score_meta") or {}).get("ranker_skipped_reason"),
                 "available_region_id":    _it.get("available_region_id"),
                 "anchor_rx":              _it.get("anchor_rx"),
                 "anchor_ry":              _it.get("anchor_ry"),
@@ -1940,27 +681,25 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 "score":                  None,
                 "available_region_id":    None,
                 "anchor_rx":              None,
-                "anchor_ry":              None,
+                "anchor_ry":             None,
             }
             for _it in _unplaced_for_json
         ]
         _products_list_meta = {
-            "generation_mode":     req.generation_mode,
-            "products":            _products_info,
+            "generation_mode": req.generation_mode,
+            "products":        _products_info,
         }
         (_debug_dir / "products_list.json").write_text(
             _json.dumps(_products_list_meta, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        # ── placement_only 모드: bbox만 그려서 반환 ──────────────────
         if gen_mode == "placement_only":
-            job_store[job_id].num_placed  = 0
+            job_store[job_id].num_placed   = 0
             job_store[job_id].result_image = image_to_b64(_dbg)
             job_store[job_id].status       = JobStatus.done
             print("[Generate] placement_only 완료")
             return
 
-        # ── cv_composite 모드: 제품 이미지 단순 합성 ────────────────
         if gen_mode == "cv_composite":
             for item in placement_items:
                 p   = item["product"]
@@ -1988,11 +727,30 @@ def _run_generate(job_id: str, req: GenerateRequest):
             print("[Generate] cv_composite 완료")
             return
 
+        # ── SPEAKER 전처리: 스테레오=동일 이미지 양쪽, 바형=1개만 ────
+        _sp_items = [(i, it) for i, it in enumerate(placement_items)
+                     if normalize_category(it["product"].category) == "SPEAKER"]
+        if len(_sp_items) >= 2:
+            _sp0_prod = _sp_items[0][1]["product"]
+            _sp0_path = find_product_image(_sp0_prod.image_id) if _sp0_prod.image_id else None
+            if _sp0_path:
+                _sp0_alpha = prepare_product_image_for_composite(Image.open(_sp0_path))
+                _sp0_ar    = _sp0_alpha.width / max(_sp0_alpha.height, 1)
+                if _sp0_ar > 2.5:
+                    _keep_idxs = {_sp_items[0][0]}
+                    placement_items = [it for i, it in enumerate(placement_items)
+                                       if normalize_category(it["product"].category) != "SPEAKER"
+                                       or i in _keep_idxs]
+                    print(f"[Speaker] 바형(AR={_sp0_ar:.2f}) → 1개 배치")
+                else:
+                    for _si, _ in _sp_items[1:]:
+                        placement_items[_si]["product"] = _sp0_prod
+                    print(f"[Speaker] 스테레오형(AR={_sp0_ar:.2f}) → 동일 이미지 {len(_sp_items)}개 배치")
+
         # ── controlnet 모드 ──────────────────────────────────────────
         for item in placement_items:
             p   = item["product"]
             cat = normalize_category(p.category)
-            # E: DECO score <= 0 → 배치 기록은 유지하되 생성 skip
             if cat == "DECO" and (item.get("score") is None or item.get("score", 0) <= 0):
                 print(f"  [Generate SKIP] DECO score={item.get('score')} ≤ 0 → 생성 제외")
                 continue
@@ -2001,7 +759,6 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         print(f"[Generate] num_placed={num_placed}")
 
-        # ── products_list.json에 generation_route 병합 후 덮어쓰기 ────
         for _entry in _products_info:
             _gr = _gen_results.get(_entry.get("category"), {})
             _entry["generation_route"]   = _gr.get("generation_route")
@@ -2022,10 +779,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
         )
         print(f"[Generate] products_list.json 업데이트 (generation_route 포함)")
 
-        # ── 실제 생성 0개면 failed ──────────────────────────────────
         if num_placed == 0:
             job_store[job_id].status = JobStatus.failed
-            job_store[job_id].error = (
+            job_store[job_id].error  = (
                 "제품 생성이 0개 수행되었습니다: "
                 + (" | ".join(run_errors[:5]) if run_errors else "알 수 없는 오류")
             )
@@ -2054,15 +810,15 @@ def _run_segment(job_id: str, req: SegmentRequest):
     job_store[job_id].status = JobStatus.running
     try:
         processor = get_sam2_processor()
-        image = b64_to_image(req.image_base64)
-        w, h = image.size
+        image     = b64_to_image(req.image_base64)
+        w, h      = image.size
         px = int(req.point_x * w)
         py = int(req.point_y * h)
         result = processor.segment(image, points=[[px, py]], point_labels=[req.label])
-        job_store[job_id].mask_base64 = result["mask"]
+        job_store[job_id].mask_base64    = result["mask"]
         job_store[job_id].overlay_base64 = result["overlay"]
-        job_store[job_id].status = JobStatus.done
+        job_store[job_id].status         = JobStatus.done
     except Exception as e:
         job_store[job_id].status = JobStatus.failed
-        job_store[job_id].error = str(e)
+        job_store[job_id].error  = str(e)
         log.error("job_id=%s\n%s", job_id, traceback.format_exc())
