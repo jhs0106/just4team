@@ -52,7 +52,9 @@ PRODUCT_BLACKLIST_IDS: set[int] = {
 # random.choice보다 우선. 워터마크/추가 제품/lifestyle 컷이 섞이지 않도록 명시 지정.
 # 추가 검증 후 확장.
 PREFERRED_IDS: dict[tuple[str, str], int] = {
-    ("white", "KEYBOARD"): 383,   # 애플 매직 키보드 화이트 (정면 단품, 워터마크 X)
+    ("white",  "KEYBOARD"): 383,   # 애플 매직 키보드 화이트 (정면 단품)
+    ("black",  "MONITOR"):  266,   # QNIX QX24D (단일 정면, 베젤 정상)
+    ("gaming", "MOUSE"):    533,   # Logitech G502 HERO (클래식 게이밍 단품)
 }
 
 
