@@ -188,12 +188,12 @@ def _front_bbox_for_anchor(
         if y1 < _mon_y2 + 20:
             y1 = _mon_y2 + 20
             y2 = y1 + fv_ph
-        # 책상 앞 가장자리 넘지 않게
-        y2 = min(y2, int(fv_dy2 - 15))
-        y1 = y2 - fv_ph
-        # CONTACT_Y_OFFSET 적용 (시각적 접지 보정)
+        # CONTACT_Y_OFFSET 먼저 적용 (시각적 접지 보정) → 그 다음 cap.
+        # 순서 중요: cap 먼저 적용하면 offset이 cap에 막혀 효과 사라짐.
         _offset = _CONTACT_Y_OFFSET.get("KEYBOARD", 0)
-        y2 = min(y2 + _offset, int(fv_dy2 - 15))
+        y2 = y2 + _offset
+        # 책상 앞 가장자리 cap (마지막)
+        y2 = min(y2, int(fv_dy2 - 15))
         y1 = y2 - fv_ph
         relation_state["keyboard_y2"] = y2
         relation_state["keyboard_front_y1"] = y1
@@ -201,13 +201,18 @@ def _front_bbox_for_anchor(
         # 키보드와 같은 깊이 (책상 면이 같으므로)
         _kb_y2 = relation_state.get("keyboard_y2")
         if _kb_y2 is not None:
-            _offset = _CONTACT_Y_OFFSET.get("MOUSE", 0)
-            y2 = min(_kb_y2 + _offset, int(fv_dy2 - 15))
+            # 키보드 y2 그대로 사용 (이미 offset/cap 적용됨)
+            y2 = _kb_y2
             y1 = y2 - fv_ph
             _kb_y1 = relation_state.get("keyboard_front_y1", 0)
             if y1 < _kb_y1:
                 y1 = _kb_y1
                 y2 = y1 + fv_ph
+        else:
+            # 키보드 없을 때만 MOUSE 단독 offset 적용
+            _offset = _CONTACT_Y_OFFSET.get("MOUSE", 0)
+            y2 = min(y2 + _offset, int(fv_dy2 - 15))
+            y1 = y2 - fv_ph
     elif cat == "LIGHTING":
         # 모니터 상단에 부착 — monitor_contact_y에서 모니터 높이만큼 위로 가서 위쪽 5~10px
         _mon_y2 = relation_state.get("monitor_contact_y")
@@ -550,8 +555,11 @@ def calc_placements_from_available_space(
         fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox_desk
     else:
         fv_dx1, fv_dy1 = 0, int(fv_h * 0.15)
-        fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.68)
-    fv_dy2 = min(fv_dy2, int(fv_h * 0.68))
+        fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.78)
+    # 책상 detection bbox의 하단을 책상 표면 끝(=대략 의자 시작점 위쪽)까지 확장 허용.
+    # 0.68 → 0.78로 완화: 이전(0.68)은 너무 보수적이라 KEYBOARD가 책상 중간에 머무름.
+    # 0.78은 desk_image2 기준 책상 앞 가장자리 근접 (의자는 0.80~ 영역).
+    fv_dy2 = min(fv_dy2, int(fv_h * 0.78))
     fv_dw  = max(1, fv_dx2 - fv_dx1)
     fv_dh  = max(1, fv_dy2 - fv_dy1)
 

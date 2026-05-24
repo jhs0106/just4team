@@ -67,9 +67,11 @@ _CV_CAT_MAX_SCALE: dict[str, float] = {
 _PREFERRED_POS = {
     "MONITOR":      {"rx": 0.50, "ry": 0.20},
     "DESK_SHELF":   {"rx": 0.50, "ry": 0.20},
-    "KEYBOARD":     {"rx": 0.50, "ry": 0.62},
-    "MOUSEPAD":     {"rx": 0.50, "ry": 0.65},
-    "MOUSE":        {"rx": 0.70, "ry": 0.62},
+    # KEYBOARD/MOUSE/MOUSEPAD: ry 0.62 → 0.72로 상향. 옛 코드의 CONTACT_Y_OFFSET 32px
+    # (책상 앞 가장자리 접지 효과)을 ry 자체에 반영. 안 그러면 키보드가 책상 중간에 떠 있음.
+    "KEYBOARD":     {"rx": 0.50, "ry": 0.72},
+    "MOUSEPAD":     {"rx": 0.50, "ry": 0.72},
+    "MOUSE":        {"rx": 0.70, "ry": 0.72},
     "SPEAKER":      {"rx": 0.25, "ry": 0.25},
     "DESK_LAMP":    {"rx": 0.12, "ry": 0.30},
     "DECO":         {"rx": 0.75, "ry": 0.35},
@@ -111,9 +113,11 @@ _CAT_RY_RANGE: dict[str, tuple[float, float]] = {
     "LAPTOP_STAND": (0.30, 0.55),   # 책상 중간
     "DECO":         (0.20, 0.55),   # 자유로움
     "CLOCK":        (0.18, 0.45),   # 자유로움
-    "KEYBOARD":     (0.55, 0.78),   # 책상 앞 (사용자 가까이)
-    "MOUSE":        (0.55, 0.78),   # 키보드와 같은 깊이
-    "MOUSEPAD":     (0.55, 0.78),   # 키보드/마우스 영역
+    # KEYBOARD/MOUSE/MOUSEPAD: 0.55~0.78 → 0.62~0.85로 상향. 사용자 책상 사진에서
+    # 키보드는 보통 책상 앞 가장자리에 매우 가까이 놓임. 옛 (5/23) 결과와 정합.
+    "KEYBOARD":     (0.62, 0.85),
+    "MOUSE":        (0.62, 0.85),
+    "MOUSEPAD":     (0.62, 0.85),
 }
 
 _CONTACT_Y_OFFSET = {
