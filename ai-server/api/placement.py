@@ -555,11 +555,10 @@ def calc_placements_from_available_space(
         fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox_desk
     else:
         fv_dx1, fv_dy1 = 0, int(fv_h * 0.15)
-        fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.78)
-    # 책상 detection bbox의 하단을 책상 표면 끝(=대략 의자 시작점 위쪽)까지 확장 허용.
-    # 0.68 → 0.78로 완화: 이전(0.68)은 너무 보수적이라 KEYBOARD가 책상 중간에 머무름.
-    # 0.78은 desk_image2 기준 책상 앞 가장자리 근접 (의자는 0.80~ 영역).
-    fv_dy2 = min(fv_dy2, int(fv_h * 0.78))
+        fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.72)
+    # 책상 표면 끝 근사. 이전(0.68)은 너무 보수적, 그 다음(0.78)은 의자 영역 침범.
+    # 0.72는 desk_image2 기준 의자 시작점(0.75~) 직전까지만 허용 → 키보드가 의자 위 안 옴.
+    fv_dy2 = min(fv_dy2, int(fv_h * 0.72))
     fv_dw  = max(1, fv_dx2 - fv_dx1)
     fv_dh  = max(1, fv_dy2 - fv_dy1)
 

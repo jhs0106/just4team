@@ -452,12 +452,26 @@ class ControlNetInpaintProcessor:
         self.pipe.to("cpu")
         torch.cuda.empty_cache()
 
-        # 6. 원본 크기 복원: silhouette mask 기준 paste
-        result_crop    = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
-        output         = image.copy()
-        final_paste_mask = mask_sd.resize((cw, ch), Image.Resampling.LANCZOS).filter(
-            __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=3)
-        )
+        # 6. 원본 크기 복원: paste mask는 SD inpaint mask(부드러운)와 분리.
+        # 원본 제품 alpha를 직접 사용 → sharp edge로 "floating/ghost" 효과 제거.
+        # 작은 anti-aliasing(3x3 blur)만 적용.
+        # 기존엔 dilated+blurred silhouette를 또 blur해서 4겹 페이드 발생 → 제품이 떠 있어 보임.
+        result_crop = result_sd.resize((cw, ch), Image.Resampling.LANCZOS)
+        output      = image.copy()
+
+        if _has_alpha and _pc2x > _pc1x and _pc2y > _pc1y:
+            _sharp_paste_sd = np.zeros((sd_h, sd_w), dtype=np.uint8)
+            _sharp_paste_sd[_pc1y:_pc2y, _pc1x:_pc2x] = np.array(
+                _prod_fit.getchannel("A")
+            )[_src1y:_src2y, _src1x:_src2x]
+            _sharp_paste_sd = cv2.GaussianBlur(_sharp_paste_sd, (3, 3), 0)
+            final_paste_mask = Image.fromarray(_sharp_paste_sd).resize(
+                (cw, ch), Image.Resampling.LANCZOS,
+            )
+        else:
+            final_paste_mask = mask_sd.resize((cw, ch), Image.Resampling.LANCZOS).filter(
+                __import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(radius=1)
+            )
         output.paste(result_crop, (cx1, cy1), mask=final_paste_mask)
 
         # debug 파일 저장

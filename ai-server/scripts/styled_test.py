@@ -258,11 +258,11 @@ def main():
     print(f"  완료: num_removed={result.get('num_removed')}, "
           f"num_placed={result.get('num_placed')}, elapsed={elapsed:.1f}s")
 
-    # 기존 컨벤션과 동일: outputs/test_results/<timestamp>/
+    # 기존 컨벤션과 동일: outputs/test_results/<timestamp>_<style>/
     # 같은 폴더에 step1_cleaned.png(빈 책상), step3_final.png(최종),
     # meta.json(테스트 입력값) 저장.
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = REPO_ROOT / "ai-server" / "outputs" / "test_results" / f"{ts}_{args.style}_budget{args.budget}"
+    out_dir = REPO_ROOT / "ai-server" / "outputs" / "test_results" / f"{ts}_{args.style}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if result.get("cleaned_image"):
