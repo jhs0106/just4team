@@ -53,6 +53,7 @@ PRODUCT_BLACKLIST_IDS: set[int] = {
 # 추가 검증 후 확장.
 PREFERRED_IDS: dict[tuple[str, str], int] = {
     ("white",  "KEYBOARD"): 383,   # 애플 매직 키보드 화이트 (정면 단품)
+    ("white",  "MONITOR"):  222,   # white MONITOR — 사용자 지정
     ("black",  "MONITOR"):  266,   # QNIX QX24D (단일 정면, 베젤 정상)
     ("gaming", "MOUSE"):    533,   # Logitech G502 HERO (클래식 게이밍 단품)
 }
@@ -104,7 +105,10 @@ def to_b64(path: Path) -> str:
 
 def load_products_by_style(style: str) -> dict[str, list[dict]]:
     # style 키워드와 title이 매칭되는 제품을 카테고리별로 모음. 블랙리스트 ID 제외.
+    # PREFERRED_IDS에 (style, cat)으로 명시된 ID는 키워드 미매칭이어도 강제 포함
+    #   (사용자가 특정 제품을 지정한 경우 키워드 필터 우회 — 게이밍 모니터를 white 셋업에 쓰는 등).
     keywords = STYLE_KEYWORDS.get(style, [])
+    preferred_ids_for_style = {pid for (s, _c), pid in PREFERRED_IDS.items() if s == style}
     by_cat: dict[str, list[dict]] = {}
     with open(PRODUCTS_CSV, encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
@@ -118,7 +122,9 @@ def load_products_by_style(style: str) -> dict[str, list[dict]]:
             if pid in PRODUCT_BLACKLIST_IDS:
                 continue
             title = row.get("title", "")
-            if any(kw in title for kw in keywords):
+            _kw_match  = any(kw in title for kw in keywords)
+            _preferred = pid in preferred_ids_for_style
+            if _kw_match or _preferred:
                 by_cat.setdefault(cat, []).append({"id": pid, "title": title, "category": cat})
     return by_cat
 

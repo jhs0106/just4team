@@ -202,7 +202,7 @@ _BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", 
 _PRODUCT_FORM_TIER = {
     "KEYBOARD":     "flat",
     "MOUSEPAD":     "flat",
-    "MOUSE":        "semi_flat",
+    "MOUSE":        "flat",        # semi_flat → flat (2026-05-25): warp으로 perspective 매칭
     "LAPTOP_STAND": "semi_flat",
     "MONITOR":      "upright",
     "SPEAKER":      "upright",
@@ -221,6 +221,36 @@ _PRODUCT_IS_FLAT_ON_DESK = {
 # 기본 책상 카메라 pitch angle (도). 사용자 책상 사진의 일반적 각도 가정.
 # 향후 depth map plane fitting으로 자동 추정 가능 (TODO).
 _DEFAULT_DESK_TILT_DEG = 30.0
+
+# 카테고리별 warp depression angle override.
+# 낮을수록 더 압축 (수평에 가까운 평면). 높을수록 덜 압축 (입체감 보존).
+#   MOUSEPAD: 가장 납작 → 20° (h를 sin(20°)=0.34로 압축)
+#   KEYBOARD: 기본 30° (h를 0.50로 압축)
+#   MOUSE:    곡면 있음 → 45° (h를 0.71로 압축, 마우스 형태 보존)
+#   LAPTOP_STAND: semi-flat (warp 없음, 이 값 무시됨)
+_CAT_TILT_DEG = {
+    "MOUSEPAD":     20.0,
+    "KEYBOARD":     30.0,
+    "MOUSE":        45.0,
+    "LAPTOP_STAND": 50.0,
+}
+
+# 카테고리별 depth shading 강도 (post-blend AO 효과).
+# 제품 silhouette 하단을 norm_y에 비례해 darken — 입체감 illusion.
+# 값 = 바닥에서의 최대 darken 비율 (0.15 = 15% 어둡게).
+_CAT_DEPTH_SHADING = {
+    "MONITOR":      0.18,   # 큰 수직물, 강한 음영
+    "SPEAKER":      0.18,
+    "DESK_LAMP":    0.15,
+    "DESK_SHELF":   0.15,
+    "MOUSE":        0.12,   # 곡면 마우스, 중간 음영
+    "KEYBOARD":     0.10,   # 평면, 약한 음영
+    "MOUSEPAD":     0.05,   # 거의 평면
+    "LAPTOP_STAND": 0.15,
+    "CLOCK":        0.12,
+    "DECO":         0.12,
+    "LIGHTING":     0.05,
+}
 
 # upright 제품 prompt에 추가할 문구 — 책상에 세워 서 있음을 명시.
 _UPRIGHT_PROMPT_TOKEN = (

@@ -323,22 +323,19 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         import json as _jmeta
         _lora_ext_dir = Path(__file__).parent.parent / "outputs" / "models" / "lora_external"
-        _lora_reason  = (
-            "SD1.5 LoRA incompatible with SDXL (UNet attention dim mismatch)"
-            if not cn_proc._has_lora else None
-        )
         (_debug_dir / "generation_meta.json").write_text(
             _jmeta.dumps({
-                "backbone":         "sdxl-inpaint+depth-controlnet+ip-adapter-plus",
-                "base_model":       "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
-                "controlnets":      ["controlnet-depth-sdxl-1.0"],
-                "ip_adapter":       "ip-adapter-plus_sdxl_vit-h",
-                "image_encoder":    "CLIP-ViT-H/14 (h94/IP-Adapter models/image_encoder)",
+                "backbone":         "sd1.5-inpaint+depth-controlnet+ip-adapter-plus+lora",
+                "base_model":       "runwayml/stable-diffusion-inpainting",
+                "controlnets":      ["sd-controlnet-depth"],
+                "ip_adapter":       "ip-adapter-plus_sd15",
+                "image_encoder":    "default (CLIP-ViT-L from h94/IP-Adapter models)",
+                "lora_adapter":     "outputs/models/lora_external (PEFT)",
                 "pipeline_mode":    _pipeline_mode,
                 "has_lora":         cn_proc._has_lora,
                 "lora_path_exists": _lora_ext_dir.exists(),
-                "lora_reason":      _lora_reason,
-                "lora_status":      "skipped" if not cn_proc._has_lora else "active",
+                "lora_reason":      None if cn_proc._has_lora else "LoRA load failed (check path/format)",
+                "lora_status":      "active" if cn_proc._has_lora else "skipped",
             }, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -427,29 +424,30 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 # brightness<40 | 0.0 | 너무 어두운 이미지(lifestyle 컷)는 IP-Adapter가 망침
                 _prod_rgb  = prod_img.convert("RGB")
                 brightness = float(np.array(_prod_rgb).mean())
+                # upright 제품(MONITOR/SPEAKER)은 IP-Adapter scale 낮춤 — 원본 시점 강제 복사 방지.
+                # CV composite로 제품 강하게 보존 + SDXL은 경계/그림자만 자연화하는 전략.
                 if brightness < 40:
                     ip_scale = 0.0
                 elif cat == "DESK_SHELF":
-                    ip_scale = 0.35
+                    ip_scale = 0.30
                 elif cat == "MONITOR":
-                    ip_scale = 0.60
+                    ip_scale = 0.40
                 elif cat == "SPEAKER":
-                    ip_scale = 0.55
+                    ip_scale = 0.40
                 elif cat == "DESK_LAMP":
                     ip_scale = 0.40
                 elif cat in ("MOUSE", "MOUSEPAD"):
-                    ip_scale = 0.60
-                else:
                     ip_scale = 0.55
+                else:
+                    ip_scale = 0.50
 
-                # upright 카테고리인데 제품 이미지가 top_view면 정체성과 perspective 충돌 →
-                # IP-Adapter scale 절반으로 낮춰 SD가 더 자유롭게 재해석하도록.
-                from .config import _PRODUCT_FORM_TIER
-                _vt = getattr(p, "view_type", None)
-                if _PRODUCT_FORM_TIER.get(cat) == "upright" and _vt == "top_view":
-                    _orig = ip_scale
-                    ip_scale = round(ip_scale * 0.5, 2)
-                    print(f"  [view_type] {cat} upright + top_view image → ip_scale {_orig}→{ip_scale}")
+                # 이전: view_type=='top_view'면 ip_scale 0.5배. 제거됨.
+                # 이유: controlnet_inpaint_processor.analyze_product_image_risk()가
+                #       runtime에서 입력 이미지를 분석해 ip_scale을 adaptive로 결정.
+                #       view_type 메타데이터에 의존하지 않고 형태(aspect ratio, contact base)
+                #       기준으로 위험도 판단 → 더 견고함.
+                # 여기서 전달하는 ip_scale은 main.py의 카테고리별 default일 뿐,
+                # generate_product 내부에서 risk analysis에 의해 override됨.
 
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None
@@ -470,8 +468,15 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     debug_dir=_prod_debug_dir,
                     debug_meta=_debug_meta,
                 )
-                current = _add_shadows(current, (x1, y1, x2, y2), cat,
-                                       prod_alpha=prod_alpha, debug_dir=_prod_debug_dir)
+                # contact shadow는 generate_product 내부에서 composite_sd에 미리 그려넣음.
+                # upright(MONITOR/SPEAKER 등)는 후처리 _add_shadows 비활성 — 그림자 중복 방지.
+                # KEYBOARD/MOUSE 등은 _add_shadows에 cast shadow 의존성 있어 유지.
+                from .config import _PRODUCT_FORM_TIER as _PFT
+                if _PFT.get(cat) != "upright":
+                    current = _add_shadows(current, (x1, y1, x2, y2), cat,
+                                           prod_alpha=prod_alpha, debug_dir=_prod_debug_dir)
+                else:
+                    print(f"  [_add_shadows] {cat} upright — skip (contact shadow는 generate_product 내부 처리)")
                 num_placed += 1
                 print(f"  [_run_cn] {cat} 완료 (num_placed={num_placed})")
             except Exception as _e:

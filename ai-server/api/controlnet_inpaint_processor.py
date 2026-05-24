@@ -9,7 +9,184 @@ from PIL import Image
 from .config import (
     _PRODUCT_IS_FLAT_ON_DESK, _DEFAULT_DESK_TILT_DEG,
     _PRODUCT_FORM_TIER, _UPRIGHT_PROMPT_TOKEN,
+    _CAT_TILT_DEG, _CAT_DEPTH_SHADING,
 )
+
+
+def _detect_contact_base(alpha: np.ndarray, cat: str) -> tuple[int, int, int, int] | None:
+    # 제품 alpha mask에서 책상과 접지되는 base 영역 bbox 추출.
+    # MONITOR: 하단 30%에서 가장 넓은 connected component (스탠드 베이스).
+    # SPEAKER: 하단 20%에서 occupied width (스피커 하단).
+    # 그 외: alpha 전체 bottom edge.
+    h, w = alpha.shape
+    if (alpha > 127).sum() == 0:
+        return None
+    if cat == "MONITOR":
+        bot_y1 = int(h * 0.70)
+        binary = ((alpha[bot_y1:h] > 127).astype(np.uint8)) * 255
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if num_labels <= 1:
+            return None
+        _areas = [stats[i, cv2.CC_STAT_AREA] for i in range(1, num_labels)]
+        largest = 1 + int(np.argmax(_areas))
+        x  = int(stats[largest, cv2.CC_STAT_LEFT])
+        y  = int(stats[largest, cv2.CC_STAT_TOP]) + bot_y1
+        cw = int(stats[largest, cv2.CC_STAT_WIDTH])
+        ch = int(stats[largest, cv2.CC_STAT_HEIGHT])
+        return (x, y, x + cw, y + ch)
+    elif cat == "SPEAKER":
+        bot_y1 = int(h * 0.80)
+        bot_region = alpha[bot_y1:h]
+        rows_with = np.where((bot_region > 127).any(axis=1))[0]
+        if len(rows_with) == 0:
+            return None
+        last_row = int(rows_with[-1])
+        cols = np.where(bot_region[last_row] > 127)[0]
+        if len(cols) == 0:
+            return None
+        return (int(cols[0]), int(bot_y1 + rows_with[0]),
+                int(cols[-1]) + 1, int(bot_y1 + last_row) + 1)
+    else:
+        rows = np.where((alpha > 127).any(axis=1))[0]
+        if len(rows) == 0:
+            return None
+        bot_y = int(rows[-1])
+        cols  = np.where(alpha[bot_y] > 127)[0]
+        if len(cols) == 0:
+            return None
+        return (int(cols[0]), max(0, bot_y - 5), int(cols[-1]) + 1, bot_y + 1)
+
+
+def analyze_product_image_risk(product_rgba: Image.Image, category: str) -> dict:
+    # 입력 product 이미지 품질/시점 위험도 분석 → adaptive generation strategy 산출.
+    # 시점 수동 분류 대신 runtime 위험도 판단으로 다양한 입력 이미지에 견고하게 대응.
+    # risk가 높을수록 composite 보존을 강하게(SDXL 영향력 최소화), IP-Adapter 약화.
+    arr = np.array(product_rgba.convert("RGBA"))
+    h_full, w_full = arr.shape[:2]
+    alpha = arr[:, :, 3]
+    total = h_full * w_full
+    cat = category.upper()
+
+    alpha_pixels = int((alpha > 127).sum())
+    alpha_fill_ratio = alpha_pixels / max(total, 1)
+
+    # tight bbox of alpha (canvas padding 무시한 실제 제품 비율)
+    rows = np.where((alpha > 127).any(axis=1))[0]
+    cols = np.where((alpha > 127).any(axis=0))[0]
+
+    # 빈 alpha → high_risk fallback
+    if len(rows) == 0 or len(cols) == 0:
+        return {
+            "shape_risk":                 "high_risk",
+            "aspect_ratio":               0.0,
+            "alpha_fill_ratio":           round(float(alpha_fill_ratio), 4),
+            "bottom_contact_width_ratio": 0.0,
+            "has_clear_contact_base":     False,
+            "is_flat_like":               False,
+            "adaptive_ip_scale":          0.25,
+            "adaptive_inner_blend":       0.95,
+            "adaptive_edge_blend":        0.25,
+            "adaptive_strategy":          "empty_alpha_max_preserve",
+            "risk_reasons":               ["empty_alpha"],
+        }
+
+    tight_w = int(cols[-1] - cols[0] + 1)
+    tight_h = int(rows[-1] - rows[0] + 1)
+    tight_ar = tight_w / max(tight_h, 1)
+
+    base_bbox = _detect_contact_base(alpha, cat)
+    has_clear_contact_base = base_bbox is not None
+    if base_bbox is not None:
+        bw = base_bbox[2] - base_bbox[0]
+        bottom_contact_width_ratio = bw / max(tight_w, 1)
+    else:
+        bottom_contact_width_ratio = 0.0
+
+    is_flat_like = tight_ar > 3.0
+
+    # 카테고리별 위험도 규칙
+    shape_risk    = "safe"
+    risk_reasons: list[str] = []
+
+    if cat == "MONITOR":
+        if tight_ar < 1.0 or tight_ar > 3.5:
+            shape_risk = "high_risk"
+            risk_reasons.append(f"aspect_ratio={tight_ar:.2f} out_of[1.0,3.5]")
+        elif not has_clear_contact_base:
+            shape_risk = "high_risk"
+            risk_reasons.append("no_contact_base")
+        elif bottom_contact_width_ratio > 0.70:
+            shape_risk = "risky"
+            risk_reasons.append(f"contact_w_ratio={bottom_contact_width_ratio:.2f}>0.70(no_stand?)")
+        elif bottom_contact_width_ratio < 0.05:
+            shape_risk = "risky"
+            risk_reasons.append(f"contact_w_ratio={bottom_contact_width_ratio:.2f}<0.05")
+    elif cat == "SPEAKER":
+        if not has_clear_contact_base:
+            shape_risk = "risky"
+            risk_reasons.append("no_contact_base")
+        elif bottom_contact_width_ratio < 0.30:
+            shape_risk = "risky"
+            risk_reasons.append(f"contact_w_ratio={bottom_contact_width_ratio:.2f}<0.30")
+        elif tight_ar > 2.5:
+            shape_risk = "risky"
+            risk_reasons.append(f"aspect_ratio={tight_ar:.2f}>2.5(wide_for_speaker)")
+    elif cat == "KEYBOARD":
+        if tight_ar < 2.0:
+            shape_risk = "risky"
+            risk_reasons.append(f"aspect_ratio={tight_ar:.2f}<2.0(too_tall)")
+        elif tight_ar > 8.0:
+            shape_risk = "risky"
+            risk_reasons.append(f"aspect_ratio={tight_ar:.2f}>8.0(too_thin)")
+    elif cat == "MOUSEPAD":
+        if tight_ar < 1.2:
+            shape_risk = "risky"
+            risk_reasons.append(f"aspect_ratio={tight_ar:.2f}<1.2(vertical_mousepad)")
+    elif cat == "MOUSE":
+        if tight_ar > 2.5 or tight_ar < 0.4:
+            shape_risk = "risky"
+            risk_reasons.append(f"aspect_ratio={tight_ar:.2f}unusual")
+    elif cat == "DESK_LAMP":
+        if tight_ar > 1.5:
+            shape_risk = "risky"
+            risk_reasons.append(f"aspect_ratio={tight_ar:.2f}>1.5(horizontal_lamp?)")
+
+    # form_tier × shape_risk → adaptive parameters
+    form_tier = _PRODUCT_FORM_TIER.get(cat, "semi_flat")
+    if form_tier == "upright":
+        _table = {
+            "safe":      (0.88, 0.40, 0.42),
+            "risky":     (0.93, 0.30, 0.30),
+            "high_risk": (0.95, 0.25, 0.25),
+        }
+    elif form_tier == "flat":
+        _table = {
+            "safe":      (0.65, 0.25, 0.55),
+            "risky":     (0.80, 0.25, 0.45),
+            "high_risk": (0.90, 0.20, 0.35),
+        }
+    else:  # semi_flat
+        _table = {
+            "safe":      (0.75, 0.30, 0.50),
+            "risky":     (0.85, 0.25, 0.40),
+            "high_risk": (0.92, 0.22, 0.30),
+        }
+    adaptive_inner_blend, adaptive_edge_blend, adaptive_ip_scale = _table[shape_risk]
+
+    strategy = f"{form_tier}+{shape_risk}"
+    return {
+        "shape_risk":                 shape_risk,
+        "aspect_ratio":               round(float(tight_ar), 3),
+        "alpha_fill_ratio":           round(float(alpha_fill_ratio), 4),
+        "bottom_contact_width_ratio": round(float(bottom_contact_width_ratio), 3),
+        "has_clear_contact_base":     bool(has_clear_contact_base),
+        "is_flat_like":               bool(is_flat_like),
+        "adaptive_ip_scale":          float(adaptive_ip_scale),
+        "adaptive_inner_blend":       float(adaptive_inner_blend),
+        "adaptive_edge_blend":        float(adaptive_edge_blend),
+        "adaptive_strategy":          strategy,
+        "risk_reasons":               risk_reasons,
+    }
 
 
 def _warp_product_to_desk_perspective(
@@ -71,6 +248,39 @@ def _letterbox_512(img: Image.Image) -> Image.Image:
     canvas = Image.new("RGB", (512, 512), (210, 210, 210))
     canvas.paste(resized, ((512 - nw) // 2, (512 - nh) // 2))
     return canvas
+
+# === Adaptive Generation-based 2.5D Compositing (2026-05-25) ===
+# 본 파이프라인은 SD를 3D 렌더러로 쓰지 않음. 단일 2D 제품 사진에서 임의 각도의
+# 3D 재생성은 불가능 (3D mesh/NeRF 필요). 대신:
+#   - 제품 원형은 CV composite로 강하게 보존 (입력 사진 그대로 paste)
+#   - SD의 역할: edge, contact shadow, 주변 책상면, color harmonization만 담당
+#   - 결과 표현: "product-preserving generative compositing" (2.5D)
+#
+# Adaptive 정책 (view_type 수동 분류 대신 runtime 위험도 판단):
+#   - analyze_product_image_risk()가 입력 이미지의 aspect ratio, alpha fill,
+#     contact base 폭 등을 분석 → safe/risky/high_risk 3-level 분류
+#   - risk에 따라 IP scale, blend weights를 dynamic 조정:
+#     * safe:      moderate (제품과 SDXL 균형)
+#     * risky:     composite 강하게 보존, IP 약화
+#     * high_risk: composite 최대 보존(0.95+), IP 최소(0.25)
+#   - high_risk라도 skip 안 함 — fallback strategy로 망가지지 않게 처리
+#   - 시점이 섞여 들어와도(top-down 제품 이미지 포함) 견고하게 동작
+#
+# Tunable constants — 비상 reference. 실제 값은 risk analysis가 산출.
+_UPRIGHT_INNER_WEIGHT = 0.90   # 0.85~0.95 권장. 0.95에 가까울수록 paste 효과
+_UPRIGHT_EDGE_WEIGHT  = 0.40   # 경계 자연화 강도
+_SEMI_FLAT_INNER_WEIGHT = 0.75
+_SEMI_FLAT_EDGE_WEIGHT  = 0.30
+_FLAT_INNER_WEIGHT = 0.65
+_FLAT_EDGE_WEIGHT  = 0.25
+
+# SDXL Inpaint strength: composite_sd 보존도. 낮을수록 init image(=composite) 더 유지.
+#   0.5~0.7 권장. 너무 낮으면 자연화 부족, 너무 높으면 SDXL이 새로 그려서 product identity 손실.
+_INPAINT_STRENGTH = 0.65
+
+# IP-Adapter scale — main.py에서 카테고리별 override. 여기는 기본값.
+_DEFAULT_IP_SCALE = 0.40
+
 
 _CAT_PROMPT = {
     "KEYBOARD":     "keyboard on desk, front view, natural lighting, sharp detail",
@@ -146,24 +356,49 @@ _CAT_MAX_SCALE = {
 
 
 class ControlNetInpaintProcessor:
-    # SDXL backbone (2026-05-24 upgrade, 2026-05-25 perspective warp 도입)
-    #   - 기존: SD1.5 + sd-controlnet-{depth,canny} + ip-adapter-plus_sd15
-    #   - 현재: SDXL Inpaint + controlnet-depth-sdxl-1.0 + ip-adapter-plus_sdxl
-    #           해상도 768 (12GB GPU 균형), depth ControlNet 단일.
-    # Canny ControlNet 제거 이유:
-    #   - 평면 product silhouette을 강제해 perspective 재해석 방해.
-    #   - VRAM 2.5GB 절약 (12GB GPU에서 spillover 해소).
-    # 평면 카테고리(KEYBOARD/MOUSE 등)는 _warp_product_to_desk_perspective로
-    # 책상 각도에 맞춰 pre-warp 후 SD/IP-Adapter에 전달.
-    # LoRA(JU_DeskStyle)는 SD1.5용으로 학습됨 → SDXL 호환 안 됨, 일단 skip.
+    # === Adaptive Generation-based 2.5D Compositing (product-preserving) ===
+    # SD1.5를 "3D 렌더러"가 아닌 "compositing naturalizer"로 사용.
+    # 파이프라인:
+    #   1. analyze_product_image_risk()로 입력 이미지 위험도 판단 (safe/risky/high_risk)
+    #   2. risk × form_tier 매트릭스로 adaptive IP scale, blend weights 결정
+    #   3. CV composite + contact shadow 합성 → composite_sd
+    #   4. SD가 composite_sd를 init image로 받아 strength만큼 다시 그림
+    #      (image=composite_sd. ★ image=img_sd 아님)
+    #   5. 3-zone blend로 inner는 composite 강하게(risk 따라 0.65~0.95)
+    #   6. Post-blend depth shading (vertical gradient AO)으로 입체감 illusion
+    #
+    # 입체감은 "2.5D" — 진짜 3D perspective 재해석은 불가능
+    # (단일 2D 사진으로 임의 시점 렌더링은 3D mesh / NeRF / multi-view 필요).
+    # 표현: "product-preserving generative compositing".
+    #
+    # 시점이 섞인 이미지(top-down/front/3-quarter 등)가 들어와도 risk analysis가
+    # 자동으로 strategy 선택 → 망가지지 않고 적응적으로 합성.
+    #
+    # === 모델 구성 (2026-05-25 SD1.5 롤백) ===
+    #   - SD1.5 Inpaint (runwayml/stable-diffusion-inpainting)
+    #   - sd-controlnet-depth 단일 (canny 제거 — perspective 재해석 방해)
+    #   - ip-adapter-plus_sd15 (CLIP-ViT-L 기본 image encoder)
+    #   - LoRA JU_DeskStyle (PEFT, outputs/models/lora_external) — SD1.5 호환
+    #   - 해상도 512 (SD1.5 native), GPU 전체 상주 (12GB 여유)
+    #
+    # 카테고리 form tier × shape risk → adaptive params:
+    #   flat × safe:           inner 0.65 / edge 0.25 / ip 0.55
+    #   flat × risky:          inner 0.80 / edge 0.25 / ip 0.45
+    #   flat × high_risk:      inner 0.90 / edge 0.20 / ip 0.35
+    #   semi_flat × safe:      inner 0.75 / edge 0.30 / ip 0.50
+    #   semi_flat × risky:     inner 0.85 / edge 0.25 / ip 0.40
+    #   semi_flat × high_risk: inner 0.92 / edge 0.22 / ip 0.30
+    #   upright × safe:        inner 0.88 / edge 0.40 / ip 0.42
+    #   upright × risky:       inner 0.93 / edge 0.30 / ip 0.30
+    #   upright × high_risk:   inner 0.95 / edge 0.25 / ip 0.25
 
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype  = torch.float16 if self.device == "cuda" else torch.float32
-        print("[ControlNetInpaint/SDXL] 모델 로드 중...")
+        print("[ControlNetInpaint/SD1.5] 모델 로드 중...")
         self._load_depth_model()
         self._load_pipeline()
-        print("[ControlNetInpaint/SDXL] 로드 완료.")
+        print("[ControlNetInpaint/SD1.5] 로드 완료.")
 
     def _load_depth_model(self):
         from transformers import DPTImageProcessor, DPTForDepthEstimation
@@ -176,37 +411,25 @@ class ControlNetInpaintProcessor:
     def _load_pipeline(self):
         from diffusers import (
             ControlNetModel,
-            StableDiffusionXLControlNetInpaintPipeline,
+            StableDiffusionControlNetInpaintPipeline,
             DPMSolverMultistepScheduler,
         )
-        from transformers import CLIPVisionModelWithProjection
 
         # ControlNet은 depth만 사용 (canny 제거).
-        # - VRAM 2.5GB 절약 (12GB GPU에서 spillover 해소)
-        # - Canny는 평면 product silhouette을 강제해 perspective 재해석 방해.
-        #   pre-warp으로 어차피 perspective-aware한 외형 됨.
+        # 이유: canny는 평면 product silhouette을 강제해 perspective 재해석 방해.
+        # SD1.5에서 VRAM은 여유 있지만 동일 정책 유지 (compositing 안정성).
         cn_depth = ControlNetModel.from_pretrained(
-            "diffusers/controlnet-depth-sdxl-1.0",
+            "lllyasviel/sd-controlnet-depth",
             torch_dtype=self.dtype,
-            low_cpu_mem_usage=False,
         )
 
-        # ip-adapter-plus_sdxl_vit-h.bin은 CLIP ViT-H(1280-dim) image encoder 사용.
-        # 명시 안 하면 diffusers가 SDXL OpenCLIP ViT-bigG(1664-dim)을 로드해 dim mismatch.
-        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-            "h94/IP-Adapter",
-            subfolder="models/image_encoder",
-            torch_dtype=self.dtype,
-            low_cpu_mem_usage=False,
-        )
-
-        pipe = StableDiffusionXLControlNetInpaintPipeline.from_pretrained(
-            "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+        # SD1.5 Inpaint + ControlNet pipeline.
+        # variant="fp16" 미지정 — runwayml/stable-diffusion-inpainting은 fp16 variant 없음.
+        pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
+            "runwayml/stable-diffusion-inpainting",
             controlnet=cn_depth,
-            image_encoder=image_encoder,
             torch_dtype=self.dtype,
-            low_cpu_mem_usage=False,
-            variant="fp16",
+            safety_checker=None,
         )
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(
             pipe.scheduler.config,
@@ -214,43 +437,42 @@ class ControlNetInpaintProcessor:
             use_karras_sigmas=True,
         )
         pipe.vae.enable_slicing()
-        # SDXL은 VAE tiling도 권장 (큰 해상도 OOM 방지)
-        try:
-            pipe.vae.enable_tiling()
-        except Exception:
-            pass
-        # VRAM 부족 시 자동 CPU↔GPU offload (8~16GB GPU 환경 대응).
-        # 순수 GPU 대비 20~40% 느리지만 OOM 방지가 우선.
-        try:
-            pipe.enable_model_cpu_offload()
-        except Exception as _e:
-            print(f"[ControlNetInpaint/SDXL] CPU offload 활성화 실패: {_e}")
+        # SD1.5 + ControlNet + IP-Adapter @ 512는 12GB GPU에 여유 있음 → CPU offload 불필요.
+        # 전체 GPU 상주가 속도 빠름.
+        pipe.to(self.device)
 
-        # IP-Adapter Plus SDXL 변형
+        # IP-Adapter Plus SD1.5 변형 (CLIP-L 기본 image encoder 사용, 별도 명시 불필요)
         pipe.load_ip_adapter(
             "h94/IP-Adapter",
-            subfolder="sdxl_models",
-            weight_name="ip-adapter-plus_sdxl_vit-h.bin",
+            subfolder="models",
+            weight_name="ip-adapter-plus_sd15.bin",
         )
         pipe.set_ip_adapter_scale(0.7)
 
-        # LoRA: SD1.5용으로 학습됨 → SDXL 호환 안 됨. 일단 skip.
-        # 향후 SDXL용 재학습 필요 (별도 TODO)
+        # LoRA: PEFT format adapter (outputs/models/lora_external).
+        # SD1.5 base와 호환 — 학습된 책상 스타일 톤/조명 복원.
         self._has_lora = False
+        _lora_dir = Path(__file__).parent.parent / "outputs" / "models" / "lora_external"
+        if _lora_dir.exists():
+            try:
+                from peft import PeftModel
+                pipe.unet = PeftModel.from_pretrained(pipe.unet, str(_lora_dir))
+                self._has_lora = True
+                print(f"[ControlNetInpaint/SD1.5] LoRA 로드 완료: {_lora_dir.name}")
+            except Exception as _le:
+                print(f"[ControlNetInpaint/SD1.5] LoRA 로드 실패: {_le}")
 
         self.pipe = pipe
 
     def _sd_size(self, w: int, h: int) -> tuple[int, int]:
-        # SDXL 호환 크기: 긴 변=768, 짧은 변≥512, 8의 배수.
-        # SDXL native는 1024지만 GPU 부담 큼(2x ControlNet+IP-Adapter+inpaint).
-        # 768은 SD1.5(512)보다 2.25x 픽셀이면서 속도/품질 균형점.
-        base = 768
+        # SD1.5 native 해상도 512. 긴 변=512, 짧은 변은 비율 보존, 8의 배수.
+        base = 512
         if w >= h:
             sw = base
-            sh = max(512, round(h * base / w / 8) * 8)
+            sh = max(256, round(h * base / w / 8) * 8)
         else:
             sh = base
-            sw = max(512, round(w * base / h / 8) * 8)
+            sw = max(256, round(w * base / h / 8) * 8)
         return sw, sh
 
     def _get_depth(self, image: Image.Image) -> Image.Image:
@@ -327,6 +549,18 @@ class ControlNetInpaintProcessor:
         # 3. product RGBA — main.py에서 이미 tight-crop 처리된 상태
         prod_rgba = product_image if product_image.mode == "RGBA" else product_image.convert("RGBA")
 
+        # === Adaptive risk analysis (warp 전 원본 기준) ===
+        # 시점 수동 분류 대신 입력 이미지 품질/형태 기반 runtime 위험도 판단.
+        # 결과에 따라 IP scale, blend weights를 동적으로 조정 → 다양한 입력 견고 대응.
+        _risk = analyze_product_image_risk(prod_rgba, cat)
+        _orig_ip_scale = ip_adapter_scale
+        ip_adapter_scale = _risk["adaptive_ip_scale"]
+        print(f"  [risk] {cat} {_risk['adaptive_strategy']} "
+              f"ar={_risk['aspect_ratio']} contact_w_ratio={_risk['bottom_contact_width_ratio']} "
+              f"ip:{_orig_ip_scale:.2f}->{ip_adapter_scale:.2f}")
+        if _risk["risk_reasons"]:
+            print(f"  [risk] {cat} reasons: {_risk['risk_reasons']}")
+
         # 3-tier 카테고리 분류에 따른 처리:
         #   flat (KEYBOARD/MOUSEPAD): perspective warp 적용
         #   semi_flat (MOUSE/LAPTOP_STAND): warp 미적용, upright prompt 미적용
@@ -335,10 +569,11 @@ class ControlNetInpaintProcessor:
         _is_flat     = (_form_tier == "flat")
         _is_upright  = (_form_tier == "upright")
         _warp_applied = False
+        _tilt_deg = _CAT_TILT_DEG.get(cat, _DEFAULT_DESK_TILT_DEG)
         if _is_flat:
-            prod_rgba = _warp_product_to_desk_perspective(prod_rgba, _DEFAULT_DESK_TILT_DEG)
+            prod_rgba = _warp_product_to_desk_perspective(prod_rgba, _tilt_deg)
             _warp_applied = True
-            print(f"  [perspective_warp] {cat} depression={_DEFAULT_DESK_TILT_DEG}° → {prod_rgba.size}")
+            print(f"  [perspective_warp] {cat} depression={_tilt_deg}° → {prod_rgba.size}")
         else:
             print(f"  [form_tier] {cat} = {_form_tier} (warp skip)")
 
@@ -394,17 +629,60 @@ class ControlNetInpaintProcessor:
         print(f"  [generate_product] {cat} tight={_prod_orig_w}x{_prod_orig_h} "
               f"scale={_sc:.3f}(max={_cat_max_scale}) fit={_fpw}x{_fph} bbox_sd={bw}x{bh}")
 
-        # B. CV composite 선행: img_sd에 제품 합성 → canny가 제품 엣지를 인식
+        # B. CV composite 선행: img_sd에 제품 합성
         composite_sd = img_sd.copy().convert("RGBA")
         if _pc2x > _pc1x and _pc2y > _pc1y:
             _slice = _prod_fit.crop((_src1x, _src1y, _src2x, _src2y))
             composite_sd.alpha_composite(_slice, (_pc1x, _pc1y))
         composite_sd = composite_sd.convert("RGB")
 
-        # color matching: composite_sd는 canny 생성용 — 적용 안 함 (canny edge 품질 간섭)
+        # === Contact base 검출 + shadow on composite ===
+        # 목적: 그림자를 SDXL 입력 전에 composite에 미리 그려넣어 SDXL이 "그림자 있는 제품"을
+        #   보고 주변 책상면을 자연화. 이전 후처리(_add_shadows)가 별도로 그리면 분리되어 보임.
+        # inpaint mask도 shadow + floor 영역 포함하도록 확장 → SDXL이 그림자 영역도 자연 생성.
+        _fit_alpha = np.array(_prod_fit.getchannel("A"))
+        _contact_base_local = _detect_contact_base(_fit_alpha, cat)
+        _contact_base_sd: tuple[int, int, int, int] | None = None
+        _shadow_layer_arr: np.ndarray | None = None
+
+        if _contact_base_local is not None and _pc2x > _pc1x and _pc2y > _pc1y:
+            # _prod_fit 로컬 좌표 → SD canvas 좌표 변환 (paste 위치 + crop offset 보정)
+            _cb_x1 = _pc1x + max(0, _contact_base_local[0] - _src1x)
+            _cb_y1 = _pc1y + max(0, _contact_base_local[1] - _src1y)
+            _cb_x2 = _pc1x + min(_pc2x - _pc1x, _contact_base_local[2] - _src1x)
+            _cb_y2 = _pc1y + min(_pc2y - _pc1y, _contact_base_local[3] - _src1y)
+            _contact_base_sd = (_cb_x1, _cb_y1, _cb_x2, _cb_y2)
+            _cb_cx = (_cb_x1 + _cb_x2) // 2
+            _cb_w  = max(1, _cb_x2 - _cb_x1)
+
+            # 카테고리별 contact shadow 파라미터
+            if cat == "MONITOR":
+                _sh_hw, _sh_h, _sh_blur, _sh_str = max(_cb_w // 2, 8), 4, 9, 0.55
+            elif cat == "SPEAKER":
+                _sh_hw, _sh_h, _sh_blur, _sh_str = max(_cb_w // 2, 6), 4, 7, 0.55
+            else:
+                _sh_hw, _sh_h, _sh_blur, _sh_str = max(_cb_w // 3, 6), 3, 5, 0.40
+
+            _shadow_layer_arr = np.zeros((sd_h, sd_w), dtype=np.float32)
+            cv2.ellipse(_shadow_layer_arr, (_cb_cx, _cb_y2), (_sh_hw, _sh_h), 0, 0, 360, 1.0, -1)
+            _shadow_layer_arr = cv2.GaussianBlur(_shadow_layer_arr, (_sh_blur, _sh_blur), 0)
+            _shadow_layer_arr = np.clip(_shadow_layer_arr * _sh_str, 0.0, 0.55)
+
+            # composite_sd에 shadow darkening 적용 (SDXL 입력에 미리 포함)
+            _comp_arr = np.array(composite_sd).astype(np.float32)
+            _comp_arr = _comp_arr * (1.0 - _shadow_layer_arr[:, :, np.newaxis])
+            composite_sd = Image.fromarray(np.clip(_comp_arr, 0, 255).astype(np.uint8))
+            print(f"  [contact_base] {cat} bbox_sd=({_cb_x1},{_cb_y1},{_cb_x2},{_cb_y2}) "
+                  f"shadow=hw{_sh_hw}/blur{_sh_blur}/str{_sh_str}")
+        else:
+            print(f"  [contact_base] {cat} 검출 실패 — shadow skip")
+
+        # color matching: composite_sd는 SDXL 입력용 — 적용 안 함
         _color_matched_composite_sd = composite_sd.copy()
 
-        # C. silhouette mask: alpha 있으면 전 카테고리 적용, 없으면 bbox fallback
+        # C. silhouette mask: alpha 있으면 전 카테고리 적용, 없으면 bbox fallback.
+        # 추가: contact base 검출됐으면 shadow + floor 영역도 inpaint mask에 포함.
+        # → SDXL이 그림자 자체와 그림자 주변 책상면도 자연 생성.
         _has_alpha = np.array(prod_rgba.getchannel("A")).min() < 250
         mask_type = "bbox"
         if _has_alpha and _pc2x > _pc1x and _pc2y > _pc1y:
@@ -414,9 +692,23 @@ class ControlNetInpaintProcessor:
             _k   = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
             _sil = cv2.dilate(_sil, _k)
             _sil = cv2.GaussianBlur(_sil, (7, 7), 0)
-            mask_sd = Image.fromarray(_sil).convert("L")
             mask_type = "silhouette"
-            print(f"  [generate_product] {cat} silhouette mask 적용")
+            # contact base 있으면 shadow region + floor strip 추가
+            if _contact_base_sd is not None and _shadow_layer_arr is not None:
+                _cb_x1, _cb_y1, _cb_x2, _cb_y2 = _contact_base_sd
+                _floor_y1 = _cb_y2
+                _floor_y2 = min(sd_h, _cb_y2 + max(8, (_cb_y2 - _cb_y1) // 2 + 8))
+                _floor_x1 = max(0, _cb_x1 - 12)
+                _floor_x2 = min(sd_w, _cb_x2 + 12)
+                _floor_mask = np.zeros((sd_h, sd_w), dtype=np.uint8)
+                _floor_mask[_floor_y1:_floor_y2, _floor_x1:_floor_x2] = 255
+                _shadow_mask_u8 = (_shadow_layer_arr * 4 * 255 / 0.55).clip(0, 255).astype(np.uint8)
+                _expansion = np.maximum(_floor_mask, _shadow_mask_u8)
+                _expansion = cv2.GaussianBlur(_expansion, (7, 7), 0)
+                _sil = np.maximum(_sil, _expansion)
+                mask_type = "silhouette+contact_shadow+floor"
+            mask_sd = Image.fromarray(_sil).convert("L")
+            print(f"  [generate_product] {cat} mask_type={mask_type}")
         else:
             print(f"  [generate_product] {cat} bbox mask 사용 (has_alpha={_has_alpha})")
 
@@ -459,18 +751,24 @@ class ControlNetInpaintProcessor:
         )
 
         self.pipe.set_ip_adapter_scale(ip_adapter_scale)
-        # enable_model_cpu_offload 활성 시 .to() 호출하면 충돌 — diffusers가 자동 관리.
+        # SD1.5에선 CPU offload 안 씀 — 파이프라인은 init 시 GPU 상주됨.
 
+        # === [핵심] composite_sd를 SD init image로 전달 ===
+        # 이전 버그: image=img_sd(빈 책상)였음 → SD가 composite 못 보고 새로 그림.
+        # 수정: image=composite_sd(제품+그림자 합성됨) → SD가 init에서 시작해
+        #   strength 만큼만 다시 그림 → product identity 보존하며 edge/floor만 자연화.
+        # generation-based 2.5D compositing 철학의 핵심 구현.
         pipe_kwargs = dict(
             prompt=prompt,
             negative_prompt=negative_prompt,
-            image=img_sd,
+            image=composite_sd,
             mask_image=mask_sd,
             control_image=depth_sd,
             ip_adapter_image=prod_ip,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             controlnet_conditioning_scale=cn_scales,
+            strength=_INPAINT_STRENGTH,
             width=sd_w,
             height=sd_h,
         )
@@ -481,18 +779,23 @@ class ControlNetInpaintProcessor:
         result_sd_pass1 = self.pipe(**pipe_kwargs).images[0]
         result_sd = result_sd_pass1
 
-        # === 3-zone blend 정책 ===
-        # SD 결과(result_sd)와 CV pre-composite(composite_sd)를 silhouette 기반 zone별 가중치로 blend.
-        # 목표: 제품 외형은 어느 정도 보존(SD가 완전 새로 그리지 않게) + 경계는 자연스럽게.
+        # === Tier-specific 3-zone blend 정책 ===
+        # upright (MONITOR/SPEAKER/DESK_LAMP): CV composite 강하게 보존 (SDXL이 모니터 화면/스피커 그릴 거 기대 X).
+        # flat   (KEYBOARD/MOUSEPAD): 중간 보존 (warp으로 perspective 이미 적용).
+        # semi_flat (MOUSE/LAPTOP_STAND): 중간.
         #
-        # zone        | composite 비중 | SD 비중 | 의도
-        # ------------|---------------|--------|--------
-        # inner       | 0.65          | 0.35   | 제품 내부 — DB 픽셀 65% 유지 (얼굴/로고 인식 가능)
-        # edge ring   | 0.25          | 0.75   | 경계 — SD가 책상 톤과 융합하도록
-        # background  | 0.00          | 1.00   | 배경 — SD가 책상 환경 자유 생성
-        #
-        # 카테고리별 차등 적용은 향후 실험 — 우선 단일 가중치로 통일.
-        # 변경 시 docs/ARCHITECTURE.md §4.7 참조.
+        # tier        | inner | edge  | 의도
+        # ------------|-------|-------|--------
+        # upright     | 0.90  | 0.40  | 제품 원형 강하게 유지, 경계만 SDXL이 책상 톤과 융합
+        # semi_flat   | 0.75  | 0.30  | 제품 70% 유지, edge 자연화
+        # flat        | 0.65  | 0.25  | 기존 (warped product에 SDXL이 좀 더 자유롭게)
+        # blend weights: risk analysis가 산출한 adaptive 값 사용 (static constant fallback 아님).
+        # _UPRIGHT/_FLAT_*_WEIGHT 상수는 비상시 reference로만 보존.
+        _blend_inner_w = _risk["adaptive_inner_blend"]
+        _blend_edge_w  = _risk["adaptive_edge_blend"]
+        print(f"  [blend] {cat} tier={_form_tier} risk={_risk['shape_risk']} "
+              f"inner={_blend_inner_w} edge={_blend_edge_w}")
+
         _blend_inner_arr = _blend_edge_arr = _blend_result_arr = None
         if _has_alpha and _pc2x > _pc1x and _pc2y > _pc1y:
             _min_dim = max(1, min(_fpw, _fph))
@@ -519,7 +822,7 @@ class ControlNetInpaintProcessor:
                 _blur_edge += 1
             _sil_light_smooth = cv2.GaussianBlur(_sil_light, (_blur_edge, _blur_edge), 0)
             _edge_ring_smooth = np.clip(_sil_light_smooth - _inner_smooth, 0.0, 1.0)
-            _blend_w = np.clip(_inner_smooth * 0.65 + _edge_ring_smooth * 0.25, 0.0, 1.0)
+            _blend_w = np.clip(_inner_smooth * _blend_inner_w + _edge_ring_smooth * _blend_edge_w, 0.0, 1.0)
             # dark rim occlusion: KEYBOARD/MOUSE — contact 하단 2~4px 어둡게
             if cat in ("KEYBOARD", "MOUSE"):
                 _rim_h = max(2, min(4, max(_fph, 1) // 20))
@@ -541,6 +844,28 @@ class ControlNetInpaintProcessor:
             _blend_edge_arr   = (_edge_ring_smooth * 255).astype(np.uint8)
             _blend_result_arr = _blended
 
+            # === Depth shading (post-blend AO 효과) ===
+            # 제품 silhouette 내부에 vertical gradient darkening 적용 → 2.5D 입체감 illusion.
+            # 위쪽=1.0 (조명 받는 면), 아래쪽=1.0 - shading_max (그림자 면).
+            # SDXL output에 직접 적용하는 게 아니라 blended 결과에 — SDXL confuse 방지.
+            _shading_max = _CAT_DEPTH_SHADING.get(cat, 0.10)
+            if _shading_max > 0:
+                _sil_bin = (_sil_w > 0.5).astype(np.float32)
+                _sil_rows = np.where(_sil_bin.any(axis=1))[0]
+                if len(_sil_rows) > 0:
+                    _pmin, _pmax = int(_sil_rows[0]), int(_sil_rows[-1])
+                    _phgt = max(1, _pmax - _pmin + 1)
+                    _y_rel = (np.arange(sd_h) - _pmin) / _phgt
+                    _y_rel = np.clip(_y_rel, 0.0, 1.0)
+                    _vert_factor = 1.0 - _y_rel * _shading_max
+                    _depth_map = np.ones((sd_h, sd_w), dtype=np.float32)
+                    _depth_map[:, :] = _vert_factor[:, np.newaxis]
+                    _depth_factor = 1.0 - _sil_bin * (1.0 - _depth_map)
+                    _rsd_arr = np.array(result_sd).astype(np.float32)
+                    _rsd_arr = _rsd_arr * _depth_factor[:, :, np.newaxis]
+                    result_sd = Image.fromarray(np.clip(_rsd_arr, 0, 255).astype(np.uint8))
+                    print(f"  [depth_shading] {cat} max_darken={_shading_max} prod_y=[{_pmin},{_pmax}]")
+
         # refine mask: pass2 비활성화 상태에서도 debug/paste용으로 silhouette 확장만
         _refine_mask_arr = np.array(mask_sd)
         _dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -548,7 +873,8 @@ class ControlNetInpaintProcessor:
         _refine_mask_arr = cv2.GaussianBlur(_refine_mask_arr, (5, 5), 0)
         _refine_mask = Image.fromarray(_refine_mask_arr).convert("L")
 
-        # enable_model_cpu_offload가 자동으로 메모리 관리 — empty_cache만 명시.
+        # SD1.5 + ControlNet + IP-Adapter @ 512는 12GB GPU에 여유 — offload 불필요.
+        # 다음 inference에 메모리 안정 위해 empty_cache만 호출.
         torch.cuda.empty_cache()
 
         # 6. 원본 크기 복원: paste mask는 SD inpaint mask(부드러운)와 분리.
@@ -563,6 +889,10 @@ class ControlNetInpaintProcessor:
             _sharp_paste_sd[_pc1y:_pc2y, _pc1x:_pc2x] = np.array(
                 _prod_fit.getchannel("A")
             )[_src1y:_src2y, _src1x:_src2x]
+            # shadow 영역도 paste mask에 포함 — SDXL이 그린 shadow가 output에 반영되도록.
+            if _shadow_layer_arr is not None:
+                _sh_paste_u8 = (_shadow_layer_arr * 4 * 255 / 0.55).clip(0, 255).astype(np.uint8)
+                _sharp_paste_sd = np.maximum(_sharp_paste_sd, _sh_paste_u8)
             _sharp_paste_sd = cv2.GaussianBlur(_sharp_paste_sd, (3, 3), 0)
             final_paste_mask = Image.fromarray(_sharp_paste_sd).resize(
                 (cw, ch), Image.Resampling.LANCZOS,
@@ -580,12 +910,22 @@ class ControlNetInpaintProcessor:
                 _ddir.mkdir(parents=True, exist_ok=True)
                 _prefix = variant_prefix or cat
                 img_sd.save(_ddir / f"{_prefix}_crop_img.png")
-                composite_sd.save(_ddir / f"{_prefix}_composite_sd.png")
+                composite_sd.save(_ddir / f"{_prefix}_composite_with_shadow_sd.png")
                 mask_sd.save(_ddir / f"{_prefix}_mask_sd.png")
                 _refine_mask.save(_ddir / f"{_prefix}_refine_mask_sd.png")
                 final_paste_mask.save(_ddir / f"{_prefix}_final_paste_mask.png")
                 result_sd_pass1.save(_ddir / f"{_prefix}_pass1_result_sd.png")
                 prod_ip.save(_ddir / f"{_prefix}_prod_ip.png")
+                # contact base + shadow debug
+                if _contact_base_sd is not None:
+                    _cb_mask = np.zeros((sd_h, sd_w), dtype=np.uint8)
+                    _cb_x1, _cb_y1, _cb_x2, _cb_y2 = _contact_base_sd
+                    _cb_mask[_cb_y1:_cb_y2, _cb_x1:_cb_x2] = 255
+                    Image.fromarray(_cb_mask).save(_ddir / f"{_prefix}_contact_base_mask.png")
+                if _shadow_layer_arr is not None:
+                    Image.fromarray(
+                        (_shadow_layer_arr * 255 / 0.55).clip(0, 255).astype(np.uint8)
+                    ).save(_ddir / f"{_prefix}_contact_shadow_mask.png")
                 if _blend_inner_arr is not None:
                     Image.fromarray(_blend_inner_arr).save(_ddir / f"{_prefix}_inner_mask.png")
                     Image.fromarray(_blend_edge_arr).save(_ddir / f"{_prefix}_edge_ring_mask.png")
@@ -629,10 +969,34 @@ class ControlNetInpaintProcessor:
                     json.dumps(_dbg_json, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
                 _contact_info = {
+                    "form_tier":              _form_tier,
+                    "warp_applied":           bool(_warp_applied),
+                    "ip_adapter_scale":       float(ip_adapter_scale),
+                    "ip_adapter_scale_original": float(_orig_ip_scale),
+                    "inpaint_strength":       float(_INPAINT_STRENGTH),
+                    "sd_init_image":          "composite_sd_with_shadow",
+                    "blend_inner_weight":     float(_blend_inner_w),
+                    "blend_edge_weight":      float(_blend_edge_w),
+                    "risk_shape_risk":               _risk["shape_risk"],
+                    "risk_aspect_ratio":             _risk["aspect_ratio"],
+                    "risk_alpha_fill_ratio":         _risk["alpha_fill_ratio"],
+                    "risk_bottom_contact_w_ratio":   _risk["bottom_contact_width_ratio"],
+                    "risk_has_clear_contact_base":   _risk["has_clear_contact_base"],
+                    "risk_is_flat_like":             _risk["is_flat_like"],
+                    "risk_adaptive_strategy":        _risk["adaptive_strategy"],
+                    "risk_reasons":                  _risk["risk_reasons"],
+                    "warp_tilt_deg":          float(_tilt_deg) if _warp_applied else None,
+                    "depth_shading_max":      float(_CAT_DEPTH_SHADING.get(cat, 0.10)),
                     "alpha_bottom_norm":      round(_alpha_bottom_norm, 4),
                     "alpha_bottom_y_in_fit":  int(_obj_bottom_in_fit),
                     "placement_contact_y_sd": int(by2),
                     "applied_contact_shift":  int(_applied_contact_shift),
+                    "contact_base_bbox_sd":   list(_contact_base_sd) if _contact_base_sd else None,
+                    "contact_y_sd":           int(_contact_base_sd[3]) if _contact_base_sd else None,
+                    "shadow_offset":          [0, 0],
+                    "shadow_blur":            int(_sh_blur) if _contact_base_sd is not None else None,
+                    "shadow_opacity":         float(_sh_str) if _contact_base_sd is not None else None,
+                    "mask_type":              mask_type,
                 }
                 (_ddir / f"{_prefix}_contact_info.json").write_text(
                     json.dumps(_contact_info, indent=2, ensure_ascii=False), encoding="utf-8"
