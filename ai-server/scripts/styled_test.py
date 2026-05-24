@@ -48,6 +48,14 @@ PRODUCT_BLACKLIST_IDS: set[int] = {
 }
 
 
+# (style, category) → image_id: 검증된 깔끔한 단일 제품 컷 우선 사용.
+# random.choice보다 우선. 워터마크/추가 제품/lifestyle 컷이 섞이지 않도록 명시 지정.
+# 추가 검증 후 확장.
+PREFERRED_IDS: dict[tuple[str, str], int] = {
+    ("white", "KEYBOARD"): 383,   # 애플 매직 키보드 화이트 (정면 단품, 워터마크 X)
+}
+
+
 # 카테고리별 모의 가격 (CSV에 가격 없으므로 평균치로 budget 계산)
 MOCK_PRICES_KRW: dict[str, int] = {
     "MONITOR":      350000,
@@ -123,11 +131,26 @@ def select_setup(style: str, budget: int,
         if total + price > budget:
             print(f"  [skip] {cat} — 예산 초과 (현재 {total:,} + {price:,} > {budget:,})")
             continue
-        chosen = random.choice(pool)
+
+        # PREFERRED_IDS에 (style, cat) 등록되어 있으면 강제 선택
+        pref_id = PREFERRED_IDS.get((style, cat))
+        chosen = None
+        if pref_id is not None:
+            for cand in pool:
+                if cand["id"] == pref_id:
+                    chosen = cand
+                    break
+            if chosen is None:
+                # PREFERRED ID가 pool에 없으면 (스타일 키워드 매칭 실패 등) random fallback
+                print(f"  [warn] {cat} PREFERRED id={pref_id} not in pool → random fallback")
+        if chosen is None:
+            chosen = random.choice(pool)
+
         chosen["mock_price"] = price
         selected.append(chosen)
         total += price
-        print(f"  [pick] {cat:10} id={chosen['id']:5} price={price:,}원 → 누적 {total:,}원")
+        _marker = " ★preferred" if pref_id and chosen["id"] == pref_id else ""
+        print(f"  [pick] {cat:10} id={chosen['id']:5} price={price:,}원 → 누적 {total:,}원{_marker}")
 
     return selected, total
 
