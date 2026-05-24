@@ -1,265 +1,192 @@
+# Deskterior — 데스크 셋업 추천 시스템
+
+네이버 쇼핑 API로 수집한 상품 데이터를 Jina CLIP v2 멀티모달 임베딩으로 벡터화하고,
+PostgreSQL + pgvector 기반으로 테마·예산에 맞는 데스크 셋업 번들을 추천하는 시스템입니다.
 
 ---
 
-## 주요 기능
+## 팀원 빠른 시작 (DB 덤프 받은 경우)
 
-- 네이버 쇼핑 API를 통한 13개 카테고리 상품 자동 수집
-- rembg(BiRefNet)를 이용한 상품 이미지 배경 제거
-- Jina CLIP v2로 이미지/텍스트 임베딩 생성 (`notebooks/Jina_CLIP_v2_test.ipynb`)
-- PostgreSQL + pgvector 기반 코사인 유사도 검색
-- 색감 · 테마 · 용도 · 예산 · 카테고리 조건 기반 데스크 셋업 추천
+> 상품 수집·임베딩 생성 없이, DB 덤프 파일만 있으면 바로 추천 기능을 사용할 수 있습니다.
 
----
+### 1. 사전 준비
 
-## 전체 처리 흐름
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) 설치 및 실행
+- Python 3.11+
+- `dump.sql` 파일 (팀원에게 별도 공유 — Google Drive 등)
 
-```
-[1] 네이버 쇼핑 API → 상품 수집
-        ↓
-[2] PostgreSQL DB 적재 (products 테이블)
-        ↓
-[3] 상품 이미지 배경 제거 (notebooks/BiRefNet.ipynb)
-        ↓
-[4] Jina CLIP v2 임베딩 생성 (notebooks/Jina_CLIP_v2_test.ipynb, GPU 필요)
-    ├── 이미지 임베딩  (N × 1024)
-    └── 텍스트 임베딩  (N × 1024)
-        ↓
-[5] 임베딩 npy → 로컬 DB 적재 (scripts/import_embeddings.py)
-        ↓
-[6] pgvector 코사인 유사도 검색
-        ↓
-[7] 카테고리별 후보 검색 → 조합 스코어링 → 셋업 추천
-```
-
-> **Jina CLIP v2 모델(`jinaai/jina-clip-v2`)은 1024차원 벡터를 생성합니다. GPU 환경에서 실행하세요 (Google Colab 권장).**
-
----
-
-## 폴더 / 파일 구조
-
-```
-desk_project/
-│
-├── core/                      # 공통 기반 (외부 프로젝트 의존 없음)
-│   ├── config.py              # 전체 설정값 중앙 관리 (.env 로드 포함)
-│   └── scoring.py             # 점수 계산 유틸리티 (z-score, minmax 등)
-│
-├── db/                        # DB 연결 및 쿼리
-│   └── db_manager.py          # PostgreSQL 연결 및 products 테이블 관리
-│
-├── search/                    # 검색 & 추천 로직
-│   ├── searcher.py            # Jina CLIP v2 쿼리 임베딩 + pgvector 검색
-│   └── recommender.py         # 셋업 추천 (후보 검색 + 조합 스코어링)
-│
-├── pipeline/                  # 데이터 수집 & 벡터화
-│   ├── collector.py           # 네이버 쇼핑 API 상품 수집
-│   └── vectorizer.py          # [LEGACY] KoCLIP 기반 로컬 벡터화 백업
-│
-├── scripts/
-│   ├── export_for_csv.py      # DB → CSV 내보내기 (임베딩 생성 전 준비)
-│   └── import_embeddings.py   # npy 임베딩 → DB 적재
-│
-├── notebooks/                 # Jupyter 노트북 (코랩 GPU 작업용)
-│   ├── Jina_CLIP_v2_test.ipynb  # 메인: 이미지/텍스트 임베딩 생성 파이프라인
-│   ├── BiRefNet.ipynb           # 상품 이미지 배경 제거 (BiRefNet 모델)
-│   └── rembg_test.ipynb         # rembg 배경 제거 테스트
-│
-├── docs/
-│   ├── PROJECT_FLOW.md        # 전체 파이프라인 상세 설명
-│   ├── DB_SETUP.md            # Docker DB 설정 가이드
-│   └── RECOMMENDATION_LOGIC.md # 추천 로직 설명
-│
-├── cli.py                     # CLI 입력 파싱 및 결과 출력
-├── test.py                    # 대화형 메뉴 진입점 (검색 / 셋업 추천)
-├── main.py                    # 파이프라인 CLI (collect / vectorize / reset-embeddings)
-│
-├── docker-compose.yml         # PostgreSQL + pgvector 컨테이너 정의
-├── setup_db.sql               # DB 초기 설정 SQL (참고용)
-├── .env.example               # 환경변수 템플릿
-├── requirements.txt           # Python 패키지 목록
-│
-└── data/                      # ⚠️ .gitignore 처리
-    ├── raw/                   # products.csv, 배경제거 이미지
-    └── embeddings/            # npy 임베딩 파일
-```
-
----
-
-## clone한 뒤 따라야 할 순서
-
-```
-1. 레포 클론
-2. .env 설정
-3. Docker DB 실행
-4. Python 가상환경 생성 + 패키지 설치
-5. dump.sql 적재 (팀원에게 전달받은 파일)
-6. 검색 / 추천 실행
-```
-
-> 상품 수집과 임베딩 생성을 처음부터 직접 진행하려면 아래 순서를 따르세요.
-
----
-
-## 실행 전 준비사항
-
-- Python 3.11 이상
-- Docker Desktop 설치 및 실행
-- 네이버 개발자 계정 (쇼핑 API 키)
-- HuggingFace 계정 (토큰)
-
----
-
-## 1. 환경변수 설정
+### 2. 레포 클론 & 환경 설정
 
 ```bash
-cp .env.example .env
+git clone <repo-url>
+cd desk_project
+
+# 가상환경 생성 및 패키지 설치
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS/Linux
+
+pip install -r requirements.txt
 ```
 
-`.env` 파일을 열어 실제 값으로 채운다:
+### 3. 환경변수 설정
 
-```env
-POSTGRES_DB=postgres
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=여기에_비밀번호_입력
+`.env.example`을 복사해 `.env`를 만들고 DB 비밀번호를 입력합니다.
 
-NAVER_CLIENT_ID=네이버_클라이언트_ID
-NAVER_CLIENT_SECRET=네이버_클라이언트_시크릿
-
-HF_TOKEN=허깅페이스_토큰
+```bash
+copy .env.example .env      # Windows
+# cp .env.example .env      # macOS/Linux
 ```
 
-> 네이버 API 키: [developers.naver.com](https://developers.naver.com)  
-> HuggingFace 토큰: [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+`.env` 파일 내용 예시:
 
----
+```
+DB_PASSWORD=yourpassword
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=postgres
+DB_USER=postgres
+```
 
-## 2. Docker PostgreSQL 실행
+> `.env`는 절대 커밋하지 마세요 — `.gitignore`에 등록되어 있습니다.
+
+### 4. Docker DB 실행
 
 ```bash
 docker compose up -d
 ```
 
-컨테이너 상태 확인:
+컨테이너 `desk-postgres`가 실행 중인지 확인:
 
 ```bash
 docker ps
-# desk-postgres 컨테이너가 Up 상태인지 확인
 ```
 
-> 자세한 DB 설정은 [docs/DB_SETUP.md](docs/DB_SETUP.md) 참고
-
----
-
-## 3. Python 가상환경 생성 및 패키지 설치
-
-```bash
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# Mac / Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
-```
-
----
-
-## 4. 별도 파일 수령 및 배치
-
-깃허브에는 포함되지 않는 파일들을 별도로 받아야 한다.
-dump.sql
-processed_image
-embeddings_output
+### 5. DB 복원
 
 ```bash
 docker exec -i desk-postgres psql -U postgres postgres < dump.sql
 ```
 
----
+> `dump.sql`은 `.gitignore`에 등록되어 있으므로 Google Drive 등 별도 채널로 공유합니다.
 
-## 5. 검색 / 셋업 추천 실행
+### 6. 추천 실행
 
 ```bash
-python test.py
+python main.py recommend
 ```
 
-```
-1: 단일 상품 검색
-2: 셋업 추천
-모드 선택 (1/2, 종료=q):
-```
-
-- **1번** — 검색어를 입력하면 유사한 상품 Top 5 출력
-- **2번** — 색감, 테마, 용도, 예산, 카테고리를 입력하면 데스크 셋업 조합 추천
+테마(white / black / gaming / wood)와 예산을 입력하면 TOP 3 데스크 셋업 번들이 출력됩니다.
 
 ---
 
-## 처음부터 직접 데이터 구축하는 경우
+## 주요 명령어
 
-### 상품 수집
+| 명령어 | 설명 |
+|---|---|
+| `python main.py recommend` | 테마 + 예산 기반 셋업 번들 추천 (신규 엔진) |
+| `python main.py search` | 단일 상품 벡터 검색 |
+| `python main.py` | 인터랙티브 메뉴 (검색 / 추천) |
+| `python main.py collect` | 네이버 쇼핑 상품 수집 (데이터 구축 시) |
+| `python main.py vectorize` | 레거시 KoCLIP 벡터화 |
 
-```bash
-python main.py collect
+---
+
+## 프로젝트 구조
+
 ```
-
-카테고리별로 수집할 상품 수를 입력하는 프롬프트가 표시됩니다 (엔터 = 기본 10개).
-
-수집 카테고리: DESK, MONITOR, KEYBOARD, MOUSE, MONITOR_ARM, LAPTOP_STAND, MOUSEPAD, DESK_SHELF, LIGHTING, SPEAKER, CLOCK, DESK_LAMP, DECO
-
-### 배경 제거
-
-`notebooks/BiRefNet.ipynb` 를 Google Colab (GPU 환경)에서 실행한다.
-
-### 임베딩 생성 및 DB 적재
-
-```bash
-# 1) DB 데이터를 CSV로 내보내기
-python scripts/export_for_csv.py
-# → data/raw/products.csv 생성
-
-# 2) notebooks/Jina_CLIP_v2_test.ipynb 를 Google Colab에서 실행
-#    products.csv + 배경제거 이미지를 구글 드라이브에 올린 뒤 실행
-#    결과물: product_ids.npy, image_embeds.npy, text_embeds.npy
-
-# 3) npy 파일을 data/embeddings/ 에 배치 후 DB 적재
-python scripts/import_embeddings.py
+desk_project/
+├── deskterior/
+│   ├── cli/
+│   │   ├── recommend.py        # 테마+예산 추천 CLI (신규 엔진 진입점)
+│   │   ├── interactive.py      # 인터랙티브 메뉴
+│   │   ├── search.py           # 단일 상품 검색 CLI
+│   │   ├── pipeline.py         # 데이터 수집/벡터화 파이프라인 CLI
+│   │   └── cli.py              # CLI 공통 헬퍼
+│   ├── recommender/
+│   │   ├── engine.py           # Beam Search + ThemeEvidence 추천 알고리즘
+│   │   └── config.py           # 테마 프리셋, 카테고리, 임계값 설정
+│   ├── pipeline/
+│   │   ├── collector.py        # 네이버 쇼핑 API 수집기
+│   │   └── vectorizer.py       # 레거시 KoCLIP 벡터화
+│   ├── retrieval/
+│   │   └── searcher.py         # Jina CLIP v2 임베딩 + pgvector 검색
+│   ├── database/
+│   │   └── manager.py          # PostgreSQL 연결, UPSERT, 임베딩 업데이트
+│   ├── core/
+│   │   ├── config.py           # 환경설정 (.env 로드)
+│   │   └── scoring.py          # z-score, minmax 등 점수 유틸
+│   └── legacy/
+│       └── old_recommender.py  # 레거시 추천 엔진 (색감·테마·용도 기반)
+├── scripts/
+│   ├── import_embeddings.py    # npy 임베딩 → DB 적재
+│   ├── export_for_csv.py       # DB → CSV 내보내기
+│   ├── update_metadata.py      # 상품 사이즈 메타데이터 파싱 업데이트
+│   └── update_speaker_metadata.py  # 스피커 사이즈 추정값 업데이트
+├── tests/                      # 유닛테스트
+├── notebooks/                  # Colab 임베딩/배경제거 노트북
+├── docs/                       # 상세 문서
+├── main.py                     # 전체 진입점
+├── docker-compose.yml          # PostgreSQL + pgvector 컨테이너 설정
+├── .env.example                # 환경변수 템플릿
+└── requirements.txt
 ```
 
 ---
 
-## 기타 실행 명령
+## 추천 엔진 구조 (요약)
 
-```bash
-# 전체 파이프라인 (수집 → 벡터화)
-python main.py
+1. 선택한 테마(white/black/gaming/wood)에 맞는 카테고리별 검색 쿼리 생성
+2. Jina CLIP v2 텍스트 임베딩 → pgvector 코사인 유사도로 후보 상품 검색
+3. ThemeEvidence(키워드 매칭), ImageSim, TextSim, ValueScore로 개별 상품 점수화
+4. Beam Search(beam_size=50)로 예산 내 최적 번들 탐색
+5. SetupScore(ThemeEvidence + RoleAwareCompatibility + MandatoryCoverage 등) 기준 TOP 3 반환
 
-# 테이블 초기화 후 재수집
-python main.py clean-collect
-
-# 임베딩 전체 초기화 (지금 할 일 없음)
-python main.py reset-embeddings
-```
+자세한 로직: [docs/RECOMMENDATION_LOGIC.md](docs/RECOMMENDATION_LOGIC.md)
 
 ---
 
-## DB 데이터 공유 방법
+## 데이터 직접 구축 (데이터 제공자용)
+
+팀원이 아닌 데이터 구축 담당자는 아래 순서로 진행합니다.
+
+1. 상품 수집: `python main.py collect`
+2. CSV 내보내기: `python scripts/export_for_csv.py`
+3. Colab에서 Jina CLIP v2 임베딩 생성 (`notebooks/Jina_CLIP_v2_test.ipynb`)
+4. npy 3종(`product_ids.npy`, `image_embeds.npy`, `text_embeds.npy`)을 `data/embeddings/`에 배치
+5. DB 적재: `python scripts/import_embeddings.py`
+6. 덤프 생성 후 공유: `docker exec desk-postgres pg_dump -U postgres postgres > dump.sql`
+
+자세한 파이프라인: [docs/PROJECT_FLOW.md](docs/PROJECT_FLOW.md)
+
+---
+
+## DB 설정 및 공유
+
+자세한 설명: [docs/DB_SETUP.md](docs/DB_SETUP.md)
 
 ```bash
 # 덤프 추출 (데이터 제공자)
 docker exec desk-postgres pg_dump -U postgres postgres > dump.sql
 
-# 덤프 적용 (팀원)
-docker compose up -d
+# 덤프 복원 (팀원)
 docker exec -i desk-postgres psql -U postgres postgres < dump.sql
+```
+
+---
+
+## 테스트
+
+```bash
+python -m pytest tests/ -v
 ```
 
 ---
 
 ## 주의사항
 
-- `.env`는 절대 커밋하지 마세요 — `.gitignore`에 등록되어 있습니다.
-- `data/` 폴더의 이미지, npy, csv는 용량이 크기 때문에 커밋하지 않습니다.
-- `dump.sql`은 `.gitignore`에 등록되어 있으므로 별도 채널(구글 드라이브 등)로 공유하세요.
-- Docker 컨테이너를 중지해도 `pgdata` 볼륨에 데이터가 보존됩니다.
+- `dump.sql`은 `.gitignore`에 등록 — Git으로 공유하지 말고 Google Drive 등으로 공유
+- `.env`는 절대 커밋 금지 (DB 비밀번호 포함)
+- `data/` 폴더의 이미지, npy, CSV는 용량이 크므로 커밋하지 않음
+- Docker 컨테이너를 중지해도 `pgdata` 볼륨에 데이터 보존됨 (`docker compose stop`)
+- 볼륨까지 삭제하려면 `docker compose down -v` (데이터 완전 삭제 — 주의)

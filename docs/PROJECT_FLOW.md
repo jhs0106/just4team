@@ -55,14 +55,12 @@ docker exec desk-postgres pg_dump -U postgres postgres > dump.sql (팀원 공유
 
 ## Step 1. 네이버 쇼핑 API 상품 수집
 
-```bash
-python main.py collect
-```
+> `deskterior/pipeline/` 및 관련 CLI는 추천 기능 정리 과정에서 제거되었습니다.
+> 상품 재수집이 필요한 경우 Git 히스토리에서 `collector.py`를 참고하거나 직접 네이버 API를 호출하세요.
 
-- `deskterior/core/config.py`의 `CATEGORY_QUERIES`에 정의된 카테고리별 검색어로 네이버 쇼핑 API 호출
+- `deskterior/core/config.py`의 `CATEGORY_QUERIES`에 카테고리별 검색어 정의
 - `CATEGORY_EXCLUDE_KEYWORDS`에 등록된 키워드 포함 상품 자동 제외 (TV, 차량용 등)
 - `product_id` 기준 UPSERT — 재수집 시 중복 없이 정보 업데이트
-- 담당 파일: `deskterior/pipeline/collector.py`
 
 ---
 

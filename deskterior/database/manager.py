@@ -29,7 +29,20 @@ def parse_size(title: str, category: str):
     - MOUSEPAD / DESK_LAMP / SPEAKER : 보류 → None
     """
     if category == "MONITOR":
-        match = re.search(r'(\d{2})\s*(?:인치|inch|")', title, re.IGNORECASE)
+        # 1순위: "27인치", "27inch", '27"', "27인"
+        match = re.search(r'(\d{2})\s*(?:인치|인\b|inch|")', title, re.IGNORECASE)
+        # 2순위: cm 단위 — "68cm", "60.5cm(24)"
+        if not match:
+            cm_match = re.search(r'(\d{2,3}(?:\.\d)?)\s*cm', title, re.IGNORECASE)
+            if cm_match:
+                inch_f = float(cm_match.group(1)) / 2.54
+                inch = round(inch_f)
+                if 17 <= inch <= 49:
+                    diag_mm = inch * 25.4
+                    denom = math.sqrt(16 ** 2 + 9 ** 2)
+                    w = round(diag_mm * 16 / denom)
+                    h = round(diag_mm * 9  / denom)
+                    return {"width_mm": w, "height_mm": h, "diagonal_inch": inch, "source": "parsed"}
         if match:
             inch = int(match.group(1))
             diag_mm = inch * 25.4
