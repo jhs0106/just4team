@@ -88,6 +88,11 @@ class ProductItem(BaseModel):
     image_id: Optional[int] = Field(None, description="processed_images/{id}.png 파일 번호")
     width_mm: Optional[int] = Field(None, description="제품 실제 가로 치수 (mm)")
     depth_mm: Optional[int] = Field(None, description="제품 실제 세로 치수 (mm)")
+    view_type: Optional[str] = Field(
+        None,
+        description="제품 이미지 시점: 'front_view'|'top_view'|'side_view'|'product_cutout'. "
+                    "upright 제품인데 top_view면 IP-Adapter scale 자동 하향.",
+    )
 
 
 class GenerateRequest(BaseModel):

@@ -323,12 +323,22 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         import json as _jmeta
         _lora_ext_dir = Path(__file__).parent.parent / "outputs" / "models" / "lora_external"
+        _lora_reason  = (
+            "SD1.5 LoRA incompatible with SDXL (UNet attention dim mismatch)"
+            if not cn_proc._has_lora else None
+        )
         (_debug_dir / "generation_meta.json").write_text(
             _jmeta.dumps({
-                "backbone":         "sd1.5-controlnet+ip-adapter+lora",
+                "backbone":         "sdxl-inpaint+depth-controlnet+ip-adapter-plus",
+                "base_model":       "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+                "controlnets":      ["controlnet-depth-sdxl-1.0"],
+                "ip_adapter":       "ip-adapter-plus_sdxl_vit-h",
+                "image_encoder":    "CLIP-ViT-H/14 (h94/IP-Adapter models/image_encoder)",
                 "pipeline_mode":    _pipeline_mode,
                 "has_lora":         cn_proc._has_lora,
                 "lora_path_exists": _lora_ext_dir.exists(),
+                "lora_reason":      _lora_reason,
+                "lora_status":      "skipped" if not cn_proc._has_lora else "active",
             }, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -431,6 +441,15 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     ip_scale = 0.60
                 else:
                     ip_scale = 0.55
+
+                # upright 카테고리인데 제품 이미지가 top_view면 정체성과 perspective 충돌 →
+                # IP-Adapter scale 절반으로 낮춰 SD가 더 자유롭게 재해석하도록.
+                from .config import _PRODUCT_FORM_TIER
+                _vt = getattr(p, "view_type", None)
+                if _PRODUCT_FORM_TIER.get(cat) == "upright" and _vt == "top_view":
+                    _orig = ip_scale
+                    ip_scale = round(ip_scale * 0.5, 2)
+                    print(f"  [view_type] {cat} upright + top_view image → ip_scale {_orig}→{ip_scale}")
 
                 mask           = _make_rect_mask(img_w, img_h, x1, y1, x2, y2)
                 context_region = (0, img_h // 2, img_w, img_h) if cat in _FRONT_CATS else None

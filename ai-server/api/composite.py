@@ -204,12 +204,21 @@ def _add_shadows(
     cast_shadow    = np.zeros((h, w), dtype=np.float32)
 
     if cat == "MONITOR":
-        _shadow_half_w = max(_cw // 4, pw // 5, 40)
-        cv2.ellipse(contact_shadow, (_cx, _contact_y), (_shadow_half_w, 10), 0, 0, 360, 1.0, -1)
-        contact_blur_k, contact_str = 13, 0.52
-        _cast_hw = max(_shadow_half_w * 2, pw // 3, 60)
-        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (_cast_hw, 15), 0, 0, 360, 1.0, -1)
-        cast_blur_k, cast_str = 31, 0.15
+        # 스탠드 베이스가 책상과 접지 — alpha 바닥 cols(_cw) 기반 좁고 진한 contact.
+        # 이전엔 max(_cw//4, pw//5, 40)으로 너무 넓어져 책상 전체에 그림자 퍼짐.
+        _stand_hw = max(_cw // 2, 20)
+        cv2.ellipse(contact_shadow, (_cx, _contact_y), (_stand_hw, 8), 0, 0, 360, 1.0, -1)
+        contact_blur_k, contact_str = 11, 0.62
+        # cast shadow: 모니터 본체 폭의 1/3 정도, 옅고 흐림.
+        _cast_hw = max(pw // 4, 50)
+        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (_cast_hw, 14), 0, 0, 360, 1.0, -1)
+        cast_blur_k, cast_str = 33, 0.12
+    elif cat == "SPEAKER":
+        # 스피커 하단 폭 기반 타원 contact (좁고 진함).
+        cv2.ellipse(contact_shadow, (_cx, _contact_y), (max(_cw // 2, 18), 8), 0, 0, 360, 1.0, -1)
+        contact_blur_k, contact_str = 9, 0.58
+        cv2.ellipse(cast_shadow, (_cast_cx, _cast_cy), (max(_cw, 28), 12), 0, 0, 360, 1.0, -1)
+        cast_blur_k, cast_str = 23, 0.14
     elif cat == "KEYBOARD":
         contact_shadow[max(0, _contact_y - 4):min(h, _contact_y + 6),
                        max(0, _contact_x1):min(w, _contact_x2)] = 1.0
@@ -250,11 +259,15 @@ def _add_shadows(
                 "contact_y":              int(_contact_y),
                 "contact_x1":             int(_contact_x1),
                 "contact_x2":             int(_contact_x2),
+                "contact_base_bbox":      [int(_contact_x1), int(_contact_y - 5),
+                                           int(_contact_x2), int(_contact_y + 5)],
                 "contact_shadow_opacity": float(contact_str),
                 "contact_shadow_blur":    int(contact_blur_k),
                 "cast_shadow_opacity":    float(cast_str),
                 "cast_shadow_blur":       int(cast_blur_k),
                 "cast_shadow_offset":     [int(_cast_ox), int(_cast_oy)],
+                "cast_shadow_bbox":       [int(_cast_cx - max(pw // 4, 50)), int(_cast_cy - 14),
+                                           int(_cast_cx + max(pw // 4, 50)), int(_cast_cy + 14)],
             }
             _ci_path = _dd / f"{cat}_contact_info.json"
             _existing = json.loads(_ci_path.read_text(encoding="utf-8")) if _ci_path.exists() else {}

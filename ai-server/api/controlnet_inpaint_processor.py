@@ -6,7 +6,10 @@ import cv2
 from pathlib import Path
 from PIL import Image
 
-from .config import _PRODUCT_IS_FLAT_ON_DESK, _DEFAULT_DESK_TILT_DEG
+from .config import (
+    _PRODUCT_IS_FLAT_ON_DESK, _DEFAULT_DESK_TILT_DEG,
+    _PRODUCT_FORM_TIER, _UPRIGHT_PROMPT_TOKEN,
+)
 
 
 def _warp_product_to_desk_perspective(
@@ -324,14 +327,20 @@ class ControlNetInpaintProcessor:
         # 3. product RGBA — main.py에서 이미 tight-crop 처리된 상태
         prod_rgba = product_image if product_image.mode == "RGBA" else product_image.convert("RGBA")
 
-        # 평면(KEYBOARD/MOUSE/MOUSEPAD 등) 카테고리는 책상 perspective에 맞춰 pre-warp.
-        # warp 후 height가 sin(depression)배로 압축됨 → 이후 _sc/contact alignment 모두 warped 기준.
-        _is_flat = _PRODUCT_IS_FLAT_ON_DESK.get(cat, False)
+        # 3-tier 카테고리 분류에 따른 처리:
+        #   flat (KEYBOARD/MOUSEPAD): perspective warp 적용
+        #   semi_flat (MOUSE/LAPTOP_STAND): warp 미적용, upright prompt 미적용
+        #   upright (MONITOR/SPEAKER/DESK_LAMP 등): warp 절대 금지, upright prompt 추가
+        _form_tier   = _PRODUCT_FORM_TIER.get(cat, "semi_flat")
+        _is_flat     = (_form_tier == "flat")
+        _is_upright  = (_form_tier == "upright")
         _warp_applied = False
         if _is_flat:
             prod_rgba = _warp_product_to_desk_perspective(prod_rgba, _DEFAULT_DESK_TILT_DEG)
             _warp_applied = True
             print(f"  [perspective_warp] {cat} depression={_DEFAULT_DESK_TILT_DEG}° → {prod_rgba.size}")
+        else:
+            print(f"  [form_tier] {cat} = {_form_tier} (warp skip)")
 
         _prod_orig_w, _prod_orig_h = prod_rgba.width, prod_rgba.height
 
@@ -434,12 +443,15 @@ class ControlNetInpaintProcessor:
         cat_desc = _CAT_PROMPT.get(cat, "product on desk, natural lighting")
         lora_token = "JU_Style, " if (self._has_lora and _effective_lora_scale > 0) else ""
         # 평면 카테고리: SD에 perspective 명시. depth ControlNet + warp과 함께 정렬 보강.
-        _persp_token = (
-            "viewed from above at angle, foreshortened, matching desk perspective, "
-            if _is_flat else ""
-        )
+        # upright 카테고리: 수직으로 서 있음 명시 (모니터/스피커/스탠드 등).
+        if _is_flat:
+            _form_token = "viewed from above at angle, foreshortened, matching desk perspective, "
+        elif _is_upright:
+            _form_token = _UPRIGHT_PROMPT_TOKEN
+        else:
+            _form_token = ""
         prompt   = (
-            f"{lora_token}{_persp_token}{cat_desc}, {style} style, "
+            f"{lora_token}{_form_token}{cat_desc}, {style} style, "
             "on desk surface, drop shadow, photorealistic, sharp focus"
         )
         negative_prompt = _NEGATIVE_PROMPT + (
