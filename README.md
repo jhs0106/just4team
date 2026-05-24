@@ -70,13 +70,31 @@ docker exec -i desk-postgres psql -U postgres postgres < dump.sql
 
 > `dump.sql`은 `.gitignore`에 등록되어 있으므로 Google Drive 등 별도 채널로 공유합니다.
 
-### 6. 추천 실행
+### 6. 배경 제거 이미지 배치
+
+추천 결과에 로컬 이미지 경로를 표시하려면 `processed_images` 폴더를 아래 경로에 배치합니다.
+
+```
+desk_project/
+└── data/
+    └── raw/
+        └── processed_images/   ← 여기에 폴더 통째로 넣기
+            ├── 1.png
+            ├── 2.png
+            └── ...
+```
+
+> `processed_images/`는 용량이 크므로 Git에 포함되지 않습니다. Google Drive 등으로 별도 공유.
+> 폴더가 없어도 추천 기능은 정상 동작합니다 (이미지 경로 줄만 출력 안 됨).
+
+### 7. 추천 실행
 
 ```bash
-python main.py recommend
+python main.py
 ```
 
 테마(white / black / gaming / wood)와 예산을 입력하면 TOP 3 데스크 셋업 번들이 출력됩니다.
+각 상품에 가격, 사이즈, 로컬 이미지 경로가 함께 표시됩니다.
 
 ---
 
