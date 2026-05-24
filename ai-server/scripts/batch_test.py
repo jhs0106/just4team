@@ -71,7 +71,8 @@ def resolve_desk_paths(desk_arg: str | None, top_arg: str | None) -> tuple[Path,
 def run_one_style(style: str, budget: int, cats: list[str],
                   desk_path: Path, top_path: Path | None,
                   desk_width_mm: int, desk_depth_mm: int,
-                  out_dir: Path, seed: int | None) -> dict:
+                  out_dir: Path, seed: int | None,
+                  empty_desk: bool = False) -> dict:
     if seed is not None:
         random.seed(seed)
 
@@ -89,6 +90,10 @@ def run_one_style(style: str, budget: int, cats: list[str],
             "image_id": item["id"], "width_mm": w, "depth_mm": d,
         })
 
+    # 빈책상 모드면 DINO/LaMa 건너뜀 (이미 비어 있는 책상을 망치지 않도록)
+    mode_val             = "add" if empty_desk else "own_desk"
+    removal_strategy_val = "none" if empty_desk else "combined"
+
     payload = {
         "image_base64":          to_b64(desk_path),
         "style":                 style,
@@ -96,9 +101,9 @@ def run_one_style(style: str, budget: int, cats: list[str],
         "desk_width_mm":         desk_width_mm,
         "desk_depth_mm":         desk_depth_mm,
         "top_view_image_base64": to_b64(top_path) if top_path else None,
-        "mode":                  "own_desk",
+        "mode":                  mode_val,
         "generation_mode":       "controlnet",
-        "removal_strategy":      "combined",
+        "removal_strategy":      removal_strategy_val,
     }
 
     t0 = time.time()
@@ -152,6 +157,8 @@ def main():
     parser.add_argument("--desk-width-mm",  type=int, default=1400)
     parser.add_argument("--desk-depth-mm",  type=int, default=700)
     parser.add_argument("--seed",           type=int, default=42)
+    parser.add_argument("--empty",          action="store_true",
+                        help="빈책상 모드 — DINO/LaMa skip. 이미 비어 있는 책상 사진 사용 시 필수")
     args = parser.parse_args()
 
     styles = [s.strip() for s in args.styles.split(",") if s.strip()]
@@ -168,6 +175,7 @@ def main():
     print(f"top_view:   {top_path.name if top_path else '(none)'}")
     print(f"styles:     {styles}")
     print(f"categories: {cats}")
+    print(f"empty_desk: {args.empty} (DINO/LaMa {'skip' if args.empty else 'run'})")
     print(f"out:        {out_dir}")
 
     results = []
@@ -179,6 +187,7 @@ def main():
                 desk_path=desk_path, top_path=top_path,
                 desk_width_mm=args.desk_width_mm, desk_depth_mm=args.desk_depth_mm,
                 out_dir=out_dir, seed=args.seed,
+                empty_desk=args.empty,
             )
         except Exception as e:
             print(f"  [ERROR] {style}: {e}")
