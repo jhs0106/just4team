@@ -263,10 +263,12 @@ class ControlNetInpaintProcessor:
         _fpw = max(8, int(prod_rgba.width * _sc))
         _fph = max(8, int(prod_rgba.height * _sc))
 
-        # KEYBOARD만 horizontal stretch 허용 (MOUSE는 비율 유지 필수)
-        if cat == "KEYBOARD" and _fpw < bw * 0.80:
-            _fpw = max(8, int(bw * 0.90))
-            print(f"  [KEYBOARD stretch] width → {_fpw} (bbox_w={bw:.0f}, fill={_fpw/max(bw,1):.2f})")
+        # KEYBOARD horizontal stretch 비활성화 (2026-05-24)
+        # 이유: stretch 발동 시 세로로 짜부러진 왜곡 키보드 + SD가 정상 비율로 재생성 →
+        #      "키보드가 2개로 나뉘어 보임" 현상 발생.
+        # 자연 비율 유지가 시각적으로 더 자연스러움 (bbox에 여백 있어도 OK).
+        # if cat == "KEYBOARD" and _fpw < bw * 0.80:
+        #     _fpw = max(8, int(bw * 0.90))
 
         # MONITOR 최소 fill 0.82: aspect ratio 유지하며 확장, height cap 초과 시 height 기준 재계산
         _monitor_min_fill_applied = False

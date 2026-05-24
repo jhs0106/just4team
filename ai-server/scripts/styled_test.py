@@ -57,6 +57,14 @@ PREFERRED_IDS: dict[tuple[str, str], int] = {
     ("gaming", "MOUSE"):    533,   # Logitech G502 HERO (클래식 게이밍 단품)
 }
 
+# PREFERRED ID의 실측 mm (DEFAULT_SIZES_MM 덮어쓰기).
+# 카테고리 평균 mm이 제품에 안 맞을 때 정확한 크기로 배치하기 위함.
+PREFERRED_PRODUCT_MM: dict[int, tuple[int, int]] = {
+    383: (279, 115),    # Apple Magic Keyboard (basic, 텐키리스 무선)
+    266: (542, 211),    # QNIX QX24D 24" 모니터
+    533: (132, 75),     # Logitech G502 HERO 마우스
+}
+
 
 # 카테고리별 모의 가격 (CSV에 가격 없으므로 평균치로 budget 계산)
 MOCK_PRICES_KRW: dict[str, int] = {
@@ -163,7 +171,11 @@ def build_payload(selected: list[dict], style: str,
     products = []
     for item in selected:
         cat = item["category"]
-        w, d = DEFAULT_SIZES_MM.get(cat, (None, None))
+        # PREFERRED_PRODUCT_MM이 등록된 id면 그 실측치 우선, 아니면 카테고리 기본값
+        if item["id"] in PREFERRED_PRODUCT_MM:
+            w, d = PREFERRED_PRODUCT_MM[item["id"]]
+        else:
+            w, d = DEFAULT_SIZES_MM.get(cat, (None, None))
         products.append({
             "category":  cat,
             "name":      item["title"][:50],

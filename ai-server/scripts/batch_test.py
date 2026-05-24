@@ -29,7 +29,7 @@ AI_SERVER = "http://localhost:8000"
 sys.path.insert(0, str(REPO_ROOT / "ai-server"))
 from scripts.styled_test import (
     PRODUCTS_CSV, STYLE_KEYWORDS, PRODUCT_BLACKLIST_IDS,
-    PREFERRED_IDS, MOCK_PRICES_KRW, DEFAULT_SIZES_MM,
+    PREFERRED_IDS, PREFERRED_PRODUCT_MM, MOCK_PRICES_KRW, DEFAULT_SIZES_MM,
     to_b64, load_products_by_style, select_setup, poll,
 )
 
@@ -84,7 +84,10 @@ def run_one_style(style: str, budget: int, cats: list[str],
 
     products = []
     for item in selected:
-        w, d = DEFAULT_SIZES_MM.get(item["category"], (None, None))
+        if item["id"] in PREFERRED_PRODUCT_MM:
+            w, d = PREFERRED_PRODUCT_MM[item["id"]]
+        else:
+            w, d = DEFAULT_SIZES_MM.get(item["category"], (None, None))
         products.append({
             "category": item["category"], "name": item["title"][:50],
             "image_id": item["id"], "width_mm": w, "depth_mm": d,

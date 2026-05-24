@@ -122,8 +122,15 @@ def _front_bbox_for_anchor(
         fv_pw = max(min(int(fv_dw * 0.48), 420), 240)
         fv_ph = int(fv_pw * 0.60)
     elif cat == "KEYBOARD":
-        fv_pw = max(min(int(fv_dw * 0.38), 360), 220)
-        fv_ph = max(int(fv_pw * 0.20), 45)
+        # w_mm 기반 자연 크기. 옛 hardcoded 0.38 강제 → 작은 키보드(Apple Magic 등)가
+        # 비대해지고 horizontal stretch까지 발동해서 세로로 짜부러져 보임.
+        if w_mm and desk_width_mm:
+            _natural_pw = int(w_mm * fv_dw / desk_width_mm)
+            fv_pw = max(140, min(_natural_pw, int(fv_dw * 0.50)))
+        else:
+            fv_pw = max(min(int(fv_dw * 0.30), 280), 180)
+        # height 비율 0.20 → 0.28 (일반 키보드 자연 비율에 가깝게)
+        fv_ph = max(int(fv_pw * 0.28), 40)
         if "monitor_rx" in relation_state:
             _rx_adj = relation_state["monitor_rx"]  # 키보드는 모니터 가로축 정렬
     elif cat == "DESK_SHELF":
