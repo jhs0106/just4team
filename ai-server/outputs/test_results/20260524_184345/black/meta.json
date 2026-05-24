@@ -1,0 +1,47 @@
+{
+  "style": "black",
+  "budget": 600000,
+  "categories": [
+    "MONITOR",
+    "KEYBOARD",
+    "MOUSE",
+    "SPEAKER",
+    "DESK_LAMP"
+  ],
+  "desk_image": "ai-server\\data\\test\\front_view3.png",
+  "top_view_image": "ai-server\\data\\test\\top_view3.png",
+  "desk_width_mm": 1600,
+  "desk_depth_mm": 800,
+  "selected_products": [
+    {
+      "category": "MONITOR",
+      "image_id": 266,
+      "title": "큐닉스그룹 QX24D REAL 100 IPS PRO 블랙",
+      "mock_price": 350000
+    },
+    {
+      "category": "KEYBOARD",
+      "image_id": 496,
+      "title": "체리 MX 2.0S 기계식 키보드 사무용 저소음 풀배열 블랙, 청축",
+      "mock_price": 80000
+    },
+    {
+      "category": "MOUSE",
+      "image_id": 561,
+      "title": "프리플로우 싸이록스 Scyrox V6 8K 유무선 초경량화 40g 마우스 블랙",
+      "mock_price": 50000
+    },
+    {
+      "category": "SPEAKER",
+      "image_id": 1447,
+      "title": "[브리츠 판매점] 사운드바 스피커 BA-R9 SoundBar (블랙) 컴퓨터 PC스피커",
+      "mock_price": 80000
+    }
+  ],
+  "total_price": 560000,
+  "elapsed_s": 39.5,
+  "num_removed": 1,
+  "num_placed": 4,
+  "seed": 42,
+  "job_id": "2279f82a-38d0-4a78-b9a7-638d7656a9ba"
+}

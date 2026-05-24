@@ -157,8 +157,8 @@ def main():
                         help="data/test/<name>.png|jpg (예: front_view3, desk_image2)")
     parser.add_argument("--top", type=str, default=None,
                         help="data/test/<name>.png|jpg (예: top_view3, desk_top_image2)")
-    parser.add_argument("--desk-width-mm",  type=int, default=1400)
-    parser.add_argument("--desk-depth-mm",  type=int, default=700)
+    parser.add_argument("--desk-width-mm",  type=int, default=1200)
+    parser.add_argument("--desk-depth-mm",  type=int, default=600)
     parser.add_argument("--seed",           type=int, default=42)
     parser.add_argument("--empty",          action="store_true",
                         help="빈책상 모드 — DINO/LaMa skip. 이미 비어 있는 책상 사진 사용 시 필수")

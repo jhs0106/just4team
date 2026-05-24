@@ -1,0 +1,22 @@
+{
+  "timestamp": "20260524_211321",
+  "desk_image": "ai-server\\data\\test\\desk_image2.jpg",
+  "top_view": "ai-server\\data\\test\\desk_top_image2.jpg",
+  "results": [
+    {
+      "style": "white",
+      "ok": false,
+      "error": "job 2f89e3fe-e697-46e5-a7c8-e98dae78ac81 타임아웃"
+    },
+    {
+      "style": "black",
+      "ok": false,
+      "error": "job 실패: 제품 생성이 0개 수행되었습니다: MONITOR: ControlNet generation failed: mat1 and mat2 shapes cannot be multiplied (514x1664 and 1280x1280) | KEYBOARD: ControlNet generation failed: mat1 and mat2 shapes cannot be multiplied (514x1664 and 1280x1280) | MOUSE: ControlNet generation failed: mat1 and mat2 shapes cannot be multiplied (514x1664 and 1280x1280) | SPEAKER: ControlNet generation failed: mat1 and mat2 shapes cannot be multiplied (514x1664 and 1280x1280)"
+    },
+    {
+      "style": "gaming",
+      "ok": false,
+      "error": "job 실패: 제품 생성이 0개 수행되었습니다: MONITOR: ControlNet generation failed: mat1 and mat2 shapes cannot be multiplied (514x1664 and 1280x1280) | KEYBOARD: ControlNet generation failed: mat1 and mat2 shapes cannot be multiplied (514x1664 and 1280x1280) | MOUSE: ControlNet generation failed: mat1 and mat2 shapes cannot be multiplied (514x1664 and 1280x1280) | SPEAKER: ControlNet generation failed: mat1 and mat2 shapes cannot be multiplied (514x1664 and 1280x1280)"
+    }
+  ]
+}

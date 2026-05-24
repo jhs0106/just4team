@@ -253,8 +253,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
         mode        = req.mode
 
         remover  = get_object_removal_processor()
+        # LaMa 잔여물 방지 — DINO threshold 낮추고 mask dilation 키워 over-removal 유도.
+        # 잘못 제거된 영역은 LaMa가 책상 표면 텍스처로 잘 채움. under-removal보다 안전.
         detection = remover.detect_with_prompt(
             image=image, prompt=_REMOVAL_PROMPT, max_area_ratio=0.40,
+            box_threshold=0.20, dilation_size=35,
         )
         front_instances  = detection.get("individual_masks", [])
         front_detections = detection.get("detections", [])

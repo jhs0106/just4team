@@ -195,6 +195,27 @@ _RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD", "LIGHTING"}
 _FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
 _BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK", "LIGHTING"}
 
+# 책상 위에 누워있는(top-down 시각) 카테고리. True인 카테고리는 제품 이미지를
+# 책상 perspective에 맞게 pre-warp (top-down → 3/4 view foreshortening).
+# False인 카테고리(MONITOR/SPEAKER 등)는 수직 물체라 카메라 정면 그대로 OK.
+_PRODUCT_IS_FLAT_ON_DESK = {
+    "KEYBOARD":     True,
+    "MOUSE":        True,
+    "MOUSEPAD":     True,
+    "LAPTOP_STAND": True,
+    "MONITOR":      False,
+    "SPEAKER":      False,
+    "DESK_LAMP":    False,
+    "DESK_SHELF":   False,
+    "DECO":         False,
+    "CLOCK":        False,
+    "LIGHTING":     False,
+}
+
+# 기본 책상 카메라 pitch angle (도). 사용자 책상 사진의 일반적 각도 가정.
+# 향후 depth map plane fitting으로 자동 추정 가능 (TODO).
+_DEFAULT_DESK_TILT_DEG = 30.0
+
 # === LaMa removal prompt 정책 ===
 # Grounding DINO로 검출할 "책상 위 제거 대상 물체" 텍스트 목록.
 # 단어 추가 시 false-positive 위험 평가 필수:

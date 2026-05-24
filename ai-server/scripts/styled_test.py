@@ -196,7 +196,7 @@ def build_payload(selected: list[dict], style: str,
     }
 
 
-def poll(job_id: str, timeout: float = 300.0) -> dict:
+def poll(job_id: str, timeout: float = 1200.0) -> dict:
     t0 = time.time()
     while True:
         if time.time() - t0 > timeout:

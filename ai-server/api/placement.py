@@ -179,9 +179,13 @@ def _front_bbox_for_anchor(
 
     # 6. 카테고리간 관계 강제 (안전판)
     if cat == "MONITOR":
-        # 모니터 상단이 책상 위로 충분히 솟아야 함
-        y1 = max(int(fv_h * 0.05), y1)
-        y2 = y1 + fv_ph
+        # 모니터 스탠드 베이스(y2)는 책상 back edge에 anchor되어야 함.
+        # 이전 버그: y1 = max(fv_h*0.05, y1) 후 y2 = y1+fv_ph로 재계산 → y2가
+        #   책상 back에서 분리되어 책상 중간/허공에 떠보이는 현상 발생.
+        # 수정: y2를 책상 back ~ ry 위치에 직접 anchor, y1은 화면 밖이어도 OK
+        #   (큰 모니터일수록 화면 top 밖으로 일부 잘리는 것은 자연스러움).
+        y2 = max(fv_dy1, min(fv_dy2, int(fv_dy1 + ry_clamped * fv_dh)))
+        y1 = max(-fv_ph // 2, y2 - fv_ph)
         relation_state["monitor_contact_y"] = y2
     elif cat == "DESK_SHELF":
         # 모니터와 비슷한 깊이
@@ -534,11 +538,24 @@ def calc_placements_from_available_space(
     if fv_bbox_desk:
         fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox_desk
     else:
-        fv_dx1, fv_dy1 = 0, int(fv_h * 0.15)
+        fv_dx1, fv_dy1 = 0, int(fv_h * 0.45)
         fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.72)
-    # 책상 표면 끝 근사. 이전(0.68)은 너무 보수적, 그 다음(0.78)은 의자 영역 침범.
-    # 0.72는 desk_image2 기준 의자 시작점(0.75~) 직전까지만 허용 → 키보드가 의자 위 안 옴.
+
+    # === 책상 bbox sanity clamps (2026-05-25 floating monitor 버그 대응) ===
+    # 이전: dy2만 0.72 cap, dy1은 DINO 결과 그대로 사용.
+    #   문제: DINO가 책상 위쪽 벽 영역까지 책상으로 detect하면 fv_dy1이 너무 작아져
+    #         모니터/스피커가 책상 back에 anchor돼야 하는데 벽 area에 anchor → 떠보임.
+    # 수정: dy1을 0.45 floor (typical camera-down 책상 사진의 desk back 위치).
+    #   detect 결과가 더 낮으면(즉 더 아래) 그대로 사용 (camera 위치 높을 경우 대응).
+    fv_dy1 = max(fv_dy1, int(fv_h * 0.45))
+    # dy2: 0.72(desk_image2 의자 시작점). 다른 사진에서 chair 위치 다르면 fall-through.
     fv_dy2 = min(fv_dy2, int(fv_h * 0.72))
+    # dy1 floor가 dy2를 넘어버리는 비정상 케이스: heuristic fallback
+    if fv_dy2 - fv_dy1 < int(fv_h * 0.15):
+        fv_dy1 = int(fv_h * 0.50)
+        fv_dy2 = int(fv_h * 0.72)
+        print(f"[Desk bbox] dh too small after clamp — fallback to heuristic [{fv_dy1}, {fv_dy2}]")
+    print(f"[Desk bbox] fv_dy1={fv_dy1} fv_dy2={fv_dy2} fv_dh={fv_dy2-fv_dy1} (img_h={fv_h})")
     fv_dw  = max(1, fv_dx2 - fv_dx1)
     fv_dh  = max(1, fv_dy2 - fv_dy1)
 
@@ -566,10 +583,19 @@ def calc_placements_from_available_space(
         overlap_reject   = 0
         low_score_reject = 0
 
+        # ry pre-filter: 카테고리별 안전 범위 밖 후보는 score 무의미 (어차피 clamp됨).
+        # 이전엔 모든 후보 scoring → ry=0.07 같은 out-of-range 값이 best로 뜨고,
+        #   _front_bbox_for_anchor에서 0.18로 clamp되어 score 의미 불일치.
+        _ry_min, _ry_max = _CAT_RY_RANGE.get(cat, (0.05, 0.95))
+        ry_filtered_reject = 0
+
         for region in available_regions:
             for anchor_x, anchor_y in _sample_points_in_region(region, n=7):
                 rx = max(0.0, min(1.0, (anchor_x - tv_dx1) / tv_dw))
                 ry = max(0.0, min(1.0, (anchor_y - tv_dy1) / tv_dh))
+                if not (_ry_min <= ry <= _ry_max):
+                    ry_filtered_reject += 1
+                    continue
                 fv_bbox = _front_bbox_for_anchor(
                     cat, rx, ry, w_mm,
                     fv_dx1, fv_dy1, fv_dx2, fv_dy2, fv_dw, fv_dh, fv_w, fv_h,
@@ -634,7 +660,7 @@ def calc_placements_from_available_space(
             print(f"  [Score] {cat} rx={best_cand['rx']:.2f} ry={best_cand['ry']:.2f} "
                   f"score={best_score:.2f} region_id={best_cand['region_id']} "
                   f"cand={candidate_count} ov_rej={overlap_reject} ls_rej={low_score_reject} "
-                  f"→ fv({x1},{y1},{x2},{y2})")
+                  f"ry_rej={ry_filtered_reject} → fv({x1},{y1},{x2},{y2})")
             placements.append({
                 "product":               p,
                 "region":                (x1, y1, x2, y2),

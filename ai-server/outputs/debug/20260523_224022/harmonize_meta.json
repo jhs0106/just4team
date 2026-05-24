@@ -1,0 +1,25 @@
+{
+  "categories": [
+    "MONITOR",
+    "KEYBOARD",
+    "MOUSE",
+    "SPEAKER",
+    "SPEAKER",
+    "DESK_LAMP"
+  ],
+  "style": "white",
+  "num_inference_steps": 28,
+  "guidance_scale": 7.0,
+  "seam_strength": 0.42,
+  "shadow_strength": 0.36,
+  "seam_width_px": 14,
+  "shadow_height_px": 36,
+  "cn_depth_scale": 0.55,
+  "cn_canny_scale": 0.5,
+  "lora_scale": 0.3,
+  "has_lora": true,
+  "sd_size": "512x272",
+  "orig_size": "1016x533",
+  "prompt": "JU_Style, white style desk setup with monitor, keyboard, wireless mouse, desktop speaker, desk lamp, natural lighting, soft contact shadows, cohesive scene, photorealistic, sharp focus, professional product photography",
+  "negative_prompt": "blurry, low quality, distorted, watermark, text, person, face, deformed, ugly, missing object, extra objects, duplicate objects, floating, levitating, melted, smeared, colorful screen, bright screen, screen content, display image, glowing screen, wrong perspective, tilted, rotated, replaced object"
+}

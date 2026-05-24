@@ -1,0 +1,12 @@
+{
+  "timestamp": "20260524_225333",
+  "desk_image": "ai-server\\data\\test\\desk_image2.jpg",
+  "top_view": "ai-server\\data\\test\\desk_top_image2.jpg",
+  "results": [
+    {
+      "style": "white",
+      "ok": false,
+      "error": "job 4ae7d8f1-a629-444d-bf5b-d689fea7a513 타임아웃"
+    }
+  ]
+}

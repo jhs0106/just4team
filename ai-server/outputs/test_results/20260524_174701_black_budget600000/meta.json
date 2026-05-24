@@ -1,0 +1,45 @@
+{
+  "style": "black",
+  "budget": 600000,
+  "categories": [
+    "MONITOR",
+    "KEYBOARD",
+    "MOUSE",
+    "SPEAKER",
+    "DESK_LAMP"
+  ],
+  "desk_width_mm": 1400,
+  "desk_depth_mm": 700,
+  "selected_products": [
+    {
+      "category": "MONITOR",
+      "image_id": 293,
+      "title": "삼성 삼탠바이미 80cm(32인치) M50F M5 스마트 모니터 블랙에디션+이동식 스탠드",
+      "mock_price": 350000
+    },
+    {
+      "category": "KEYBOARD",
+      "image_id": 360,
+      "title": "AULA F108 유무선 독거미 한글 기계식 키보드 펀키스 국내 정품 스카이 블랙, KTT 저소음바다축",
+      "mock_price": 80000
+    },
+    {
+      "category": "MOUSE",
+      "image_id": 534,
+      "title": "삼성전자 삼성 저소음 무선 마우스 SPA-KMA4PRB 블랙",
+      "mock_price": 50000
+    },
+    {
+      "category": "SPEAKER",
+      "image_id": 1527,
+      "title": "캔스톤 블루투스 게이밍 스피커 F1BT 블랙",
+      "mock_price": 80000
+    }
+  ],
+  "total_price": 560000,
+  "elapsed_s": 32.2,
+  "num_removed": 19,
+  "num_placed": 4,
+  "seed": 42,
+  "job_id": "794e6ea4-24fa-4f7e-a263-24f3d74f6feb"
+}

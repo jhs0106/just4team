@@ -1,0 +1,28 @@
+{
+  "timestamp": "20260524_205425",
+  "desk_image": "ai-server\\data\\test\\desk_image2.jpg",
+  "top_view": "ai-server\\data\\test\\desk_top_image2.jpg",
+  "results": [
+    {
+      "style": "white",
+      "ok": true,
+      "elapsed": 54.63399958610535,
+      "num_placed": 3,
+      "out_dir": "C:\\Users\\JMS\\Desktop\\just4team\\ai-server\\outputs\\test_results\\20260524_205425\\white"
+    },
+    {
+      "style": "black",
+      "ok": true,
+      "elapsed": 39.45344805717468,
+      "num_placed": 4,
+      "out_dir": "C:\\Users\\JMS\\Desktop\\just4team\\ai-server\\outputs\\test_results\\20260524_205425\\black"
+    },
+    {
+      "style": "gaming",
+      "ok": true,
+      "elapsed": 39.44527745246887,
+      "num_placed": 4,
+      "out_dir": "C:\\Users\\JMS\\Desktop\\just4team\\ai-server\\outputs\\test_results\\20260524_205425\\gaming"
+    }
+  ]
+}

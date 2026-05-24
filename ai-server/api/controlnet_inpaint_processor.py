@@ -1,13 +1,60 @@
 import json
+import math
 import torch
 import numpy as np
 import cv2
 from pathlib import Path
 from PIL import Image
 
+from .config import _PRODUCT_IS_FLAT_ON_DESK, _DEFAULT_DESK_TILT_DEG
+
+
+def _warp_product_to_desk_perspective(
+    product_rgba: Image.Image, depression_deg: float = _DEFAULT_DESK_TILT_DEG,
+) -> Image.Image:
+    # top-down 제품 이미지를 책상 perspective(3/4 view)에 맞게 변형.
+    # depression_deg = 카메라 광축이 수평선 아래로 기운 각도.
+    #   90°: 완전 top-down (변형 없음), 30°(기본): h를 sin(30°)=0.5로 압축.
+    # taper: 위쪽이 약간 좁아짐 (perspective 원근감, 5%).
+    if product_rgba.mode != "RGBA":
+        product_rgba = product_rgba.convert("RGBA")
+    w, h = product_rgba.size
+    fore = max(0.3, min(1.0, math.sin(math.radians(depression_deg))))
+    new_h = max(8, int(h * fore))
+    taper = 0.05
+    src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    dst = np.float32([
+        [w * taper, 0], [w * (1 - taper), 0],
+        [w, new_h],     [0, new_h],
+    ])
+    M = cv2.getPerspectiveTransform(src, dst)
+    arr = np.array(product_rgba)
+    # RGB와 alpha를 분리해 warp — RGB는 부드러운 LANCZOS4, alpha는 NEAREST + 임계값.
+    # 이유: alpha에 LANCZOS 보간 적용 시 가장자리에 partial alpha(50~200) 생성됨.
+    #   → 3-zone blend에서 부분 가중치 → 제품이 투명해 보이는 현상 발생.
+    rgb   = arr[:, :, :3]
+    alpha = arr[:, :, 3]
+    warped_rgb = cv2.warpPerspective(
+        rgb, M, (w, new_h),
+        flags=cv2.INTER_LANCZOS4,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    warped_alpha = cv2.warpPerspective(
+        alpha, M, (w, new_h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    # NEAREST 사용에도 발생 가능한 가장자리 sub-pixel artifact 제거 (임계값 binary).
+    warped_alpha = np.where(warped_alpha > 128, 255, 0).astype(np.uint8)
+    warped = np.dstack([warped_rgb, warped_alpha])
+    return Image.fromarray(warped, mode="RGBA")
+
 
 def _letterbox_512(img: Image.Image) -> Image.Image:
-    # RGBA: transparent 영역을 중립 회색으로 합성 후 비율 유지 패딩
+    # IP-Adapter SDXL은 CLIP-H image encoder 사용 → 224×224로 자동 리사이즈됨.
+    # 여기선 비율 보존만 중요하므로 512x512 letterbox 유지 (속도/품질 trade-off).
     if img.mode == "RGBA":
         bg = Image.new("RGB", img.size, (210, 210, 210))
         bg.paste(img.convert("RGB"), mask=img.getchannel("A"))
@@ -96,18 +143,28 @@ _CAT_MAX_SCALE = {
 
 
 class ControlNetInpaintProcessor:
+    # SDXL backbone (2026-05-24 upgrade, 2026-05-25 perspective warp 도입)
+    #   - 기존: SD1.5 + sd-controlnet-{depth,canny} + ip-adapter-plus_sd15
+    #   - 현재: SDXL Inpaint + controlnet-depth-sdxl-1.0 + ip-adapter-plus_sdxl
+    #           해상도 768 (12GB GPU 균형), depth ControlNet 단일.
+    # Canny ControlNet 제거 이유:
+    #   - 평면 product silhouette을 강제해 perspective 재해석 방해.
+    #   - VRAM 2.5GB 절약 (12GB GPU에서 spillover 해소).
+    # 평면 카테고리(KEYBOARD/MOUSE 등)는 _warp_product_to_desk_perspective로
+    # 책상 각도에 맞춰 pre-warp 후 SD/IP-Adapter에 전달.
+    # LoRA(JU_DeskStyle)는 SD1.5용으로 학습됨 → SDXL 호환 안 됨, 일단 skip.
+
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype  = torch.float16 if self.device == "cuda" else torch.float32
-        print("[ControlNetInpaint] 모델 로드 중...")
+        print("[ControlNetInpaint/SDXL] 모델 로드 중...")
         self._load_depth_model()
         self._load_pipeline()
-        print("[ControlNetInpaint] 로드 완료.")
+        print("[ControlNetInpaint/SDXL] 로드 완료.")
 
     def _load_depth_model(self):
         from transformers import DPTImageProcessor, DPTForDepthEstimation
         self._depth_proc  = DPTImageProcessor.from_pretrained("Intel/dpt-large")
-        # low_cpu_mem_usage=False: thread pool 내부 충돌(Python 3.12) 방지
         self._depth_model = DPTForDepthEstimation.from_pretrained(
             "Intel/dpt-large", low_cpu_mem_usage=False
         ).to(self.device)
@@ -116,70 +173,81 @@ class ControlNetInpaintProcessor:
     def _load_pipeline(self):
         from diffusers import (
             ControlNetModel,
-            StableDiffusionControlNetInpaintPipeline,
+            StableDiffusionXLControlNetInpaintPipeline,
             DPMSolverMultistepScheduler,
         )
+        from transformers import CLIPVisionModelWithProjection
 
+        # ControlNet은 depth만 사용 (canny 제거).
+        # - VRAM 2.5GB 절약 (12GB GPU에서 spillover 해소)
+        # - Canny는 평면 product silhouette을 강제해 perspective 재해석 방해.
+        #   pre-warp으로 어차피 perspective-aware한 외형 됨.
         cn_depth = ControlNetModel.from_pretrained(
-            "lllyasviel/sd-controlnet-depth",
-            torch_dtype=self.dtype,
-            low_cpu_mem_usage=False,
-        )
-        cn_canny = ControlNetModel.from_pretrained(
-            "lllyasviel/sd-controlnet-canny",
+            "diffusers/controlnet-depth-sdxl-1.0",
             torch_dtype=self.dtype,
             low_cpu_mem_usage=False,
         )
 
-        pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5",
-            controlnet=[cn_depth, cn_canny],
+        # ip-adapter-plus_sdxl_vit-h.bin은 CLIP ViT-H(1280-dim) image encoder 사용.
+        # 명시 안 하면 diffusers가 SDXL OpenCLIP ViT-bigG(1664-dim)을 로드해 dim mismatch.
+        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+            "h94/IP-Adapter",
+            subfolder="models/image_encoder",
             torch_dtype=self.dtype,
             low_cpu_mem_usage=False,
+        )
+
+        pipe = StableDiffusionXLControlNetInpaintPipeline.from_pretrained(
+            "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+            controlnet=cn_depth,
+            image_encoder=image_encoder,
+            torch_dtype=self.dtype,
+            low_cpu_mem_usage=False,
+            variant="fp16",
         )
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(
             pipe.scheduler.config,
             algorithm_type="dpmsolver++",
             use_karras_sigmas=True,
         )
-        pipe.safety_checker = None
         pipe.vae.enable_slicing()
+        # SDXL은 VAE tiling도 권장 (큰 해상도 OOM 방지)
+        try:
+            pipe.vae.enable_tiling()
+        except Exception:
+            pass
+        # VRAM 부족 시 자동 CPU↔GPU offload (8~16GB GPU 환경 대응).
+        # 순수 GPU 대비 20~40% 느리지만 OOM 방지가 우선.
+        try:
+            pipe.enable_model_cpu_offload()
+        except Exception as _e:
+            print(f"[ControlNetInpaint/SDXL] CPU offload 활성화 실패: {_e}")
 
-        # IP-Adapter-Plus: attention processor 설정 전에 먼저 로드해야 충돌 없음
+        # IP-Adapter Plus SDXL 변형
         pipe.load_ip_adapter(
             "h94/IP-Adapter",
-            subfolder="models",
-            weight_name="ip-adapter-plus_sd15.bin",
+            subfolder="sdxl_models",
+            weight_name="ip-adapter-plus_sdxl_vit-h.bin",
         )
         pipe.set_ip_adapter_scale(0.7)
 
-        # style LoRA
-        lora_path = (
-            Path(__file__).parent.parent
-            / "outputs" / "models" / "lora_external"
-        )
+        # LoRA: SD1.5용으로 학습됨 → SDXL 호환 안 됨. 일단 skip.
+        # 향후 SDXL용 재학습 필요 (별도 TODO)
         self._has_lora = False
-        if lora_path.exists():
-            try:
-                from peft import PeftModel
-                pipe.unet = PeftModel.from_pretrained(pipe.unet, str(lora_path))
-                self._has_lora = True
-                print("[ControlNetInpaint] style LoRA 로드 완료 (PEFT).")
-            except Exception as e:
-                print(f"[ControlNetInpaint] LoRA 로드 실패 (스킵): {e}")
-        else:
-            print("[ControlNetInpaint] style LoRA 없음, 스킵.")
 
         self.pipe = pipe
 
     def _sd_size(self, w: int, h: int) -> tuple[int, int]:
-        # 비율 유지 SD 호환 크기: 긴 변=512, 짧은 변≥256, 8의 배수
+        # SDXL 호환 크기: 긴 변=768, 짧은 변≥512, 8의 배수.
+        # SDXL native는 1024지만 GPU 부담 큼(2x ControlNet+IP-Adapter+inpaint).
+        # 768은 SD1.5(512)보다 2.25x 픽셀이면서 속도/품질 균형점.
+        base = 768
         if w >= h:
-            sw = 512
-            sh = max(256, round(h * 512 / w / 8) * 8)
+            sw = base
+            sh = max(512, round(h * base / w / 8) * 8)
         else:
-            sh = 512
-            sw = max(256, round(w * 512 / h / 8) * 8)
+            sh = base
+            sw = max(512, round(w * base / h / 8) * 8)
         return sw, sh
 
     def _get_depth(self, image: Image.Image) -> Image.Image:
@@ -207,7 +275,7 @@ class ControlNetInpaintProcessor:
         product_image: Image.Image,
         category: str,
         style: str,
-        num_inference_steps: int = 40,
+        num_inference_steps: int = 28,
         guidance_scale: float = 9.0,
         ip_adapter_scale: float = 0.4,
         controlnet_scale: float = 0.6,
@@ -255,6 +323,16 @@ class ControlNetInpaintProcessor:
 
         # 3. product RGBA — main.py에서 이미 tight-crop 처리된 상태
         prod_rgba = product_image if product_image.mode == "RGBA" else product_image.convert("RGBA")
+
+        # 평면(KEYBOARD/MOUSE/MOUSEPAD 등) 카테고리는 책상 perspective에 맞춰 pre-warp.
+        # warp 후 height가 sin(depression)배로 압축됨 → 이후 _sc/contact alignment 모두 warped 기준.
+        _is_flat = _PRODUCT_IS_FLAT_ON_DESK.get(cat, False)
+        _warp_applied = False
+        if _is_flat:
+            prod_rgba = _warp_product_to_desk_perspective(prod_rgba, _DEFAULT_DESK_TILT_DEG)
+            _warp_applied = True
+            print(f"  [perspective_warp] {cat} depression={_DEFAULT_DESK_TILT_DEG}° → {prod_rgba.size}")
+
         _prod_orig_w, _prod_orig_h = prod_rgba.width, prod_rgba.height
 
         # fit product into SD placement bbox (category max scale 적용, 1.0 cap 제거)
@@ -333,28 +411,35 @@ class ControlNetInpaintProcessor:
         else:
             print(f"  [generate_product] {cat} bbox mask 사용 (has_alpha={_has_alpha})")
 
-        # 4. ControlNet: depth=빈 배경(책상 구조), canny=composite(제품 엣지)
+        # 4. ControlNet: depth(빈 배경, 책상 구조)만 사용. canny 제거됨.
+        # 이유: canny는 평면 product silhouette을 강제해 perspective 재해석 방해.
         depth_sd = self._get_depth(img_sd)
-        canny_sd = self._get_canny(composite_sd)
 
-        # 5. IP-Adapter: letterbox 비율 유지 512×512
-        prod_ip = _letterbox_512(product_image)
+        # 5. IP-Adapter: letterbox 비율 유지 512×512.
+        # warp이 적용됐다면 warped prod_rgba 사용해 SD가 perspective 일관된 reference 받음.
+        prod_ip = _letterbox_512(prod_rgba if _warp_applied else product_image)
 
-        # 카테고리별 depth/canny 가중치
+        # 카테고리별 depth 가중치 (canny 제거 후 단일 ControlNet).
+        # 평면 카테고리는 책상 plane geometry가 perspective 결정에 중요 → 더 강하게.
         if cn_scales_override is not None:
-            cn_scales = cn_scales_override
+            cn_scales = cn_scales_override[0] if isinstance(cn_scales_override, list) else cn_scales_override
+        elif cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
+            cn_scales = 0.45
         elif cat == "MONITOR":
-            cn_scales = [0.08, 0.20]
-        elif cat == "KEYBOARD":
-            cn_scales = [0.08, 0.18]
+            cn_scales = 0.30
         else:
-            cn_scales = [0.10, 0.22]
+            cn_scales = 0.35
 
         _effective_lora_scale = lora_scale if lora_scale_override is None else lora_scale_override
         cat_desc = _CAT_PROMPT.get(cat, "product on desk, natural lighting")
         lora_token = "JU_Style, " if (self._has_lora and _effective_lora_scale > 0) else ""
+        # 평면 카테고리: SD에 perspective 명시. depth ControlNet + warp과 함께 정렬 보강.
+        _persp_token = (
+            "viewed from above at angle, foreshortened, matching desk perspective, "
+            if _is_flat else ""
+        )
         prompt   = (
-            f"{lora_token}{cat_desc}, {style} style, "
+            f"{lora_token}{_persp_token}{cat_desc}, {style} style, "
             "on desk surface, drop shadow, photorealistic, sharp focus"
         )
         negative_prompt = _NEGATIVE_PROMPT + (
@@ -362,14 +447,14 @@ class ControlNetInpaintProcessor:
         )
 
         self.pipe.set_ip_adapter_scale(ip_adapter_scale)
-        self.pipe.to(self.device)
+        # enable_model_cpu_offload 활성 시 .to() 호출하면 충돌 — diffusers가 자동 관리.
 
         pipe_kwargs = dict(
             prompt=prompt,
             negative_prompt=negative_prompt,
             image=img_sd,
             mask_image=mask_sd,
-            control_image=[depth_sd, canny_sd],
+            control_image=depth_sd,
             ip_adapter_image=prod_ip,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
@@ -451,7 +536,7 @@ class ControlNetInpaintProcessor:
         _refine_mask_arr = cv2.GaussianBlur(_refine_mask_arr, (5, 5), 0)
         _refine_mask = Image.fromarray(_refine_mask_arr).convert("L")
 
-        self.pipe.to("cpu")
+        # enable_model_cpu_offload가 자동으로 메모리 관리 — empty_cache만 명시.
         torch.cuda.empty_cache()
 
         # 6. 원본 크기 복원: paste mask는 SD inpaint mask(부드러운)와 분리.
@@ -484,7 +569,6 @@ class ControlNetInpaintProcessor:
                 _prefix = variant_prefix or cat
                 img_sd.save(_ddir / f"{_prefix}_crop_img.png")
                 composite_sd.save(_ddir / f"{_prefix}_composite_sd.png")
-                canny_sd.save(_ddir / f"{_prefix}_canny_sd.png")
                 mask_sd.save(_ddir / f"{_prefix}_mask_sd.png")
                 _refine_mask.save(_ddir / f"{_prefix}_refine_mask_sd.png")
                 final_paste_mask.save(_ddir / f"{_prefix}_final_paste_mask.png")
