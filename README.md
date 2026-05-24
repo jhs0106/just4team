@@ -1,12 +1,11 @@
 
-
 ---
 
 ## 주요 기능
 
 - 네이버 쇼핑 API를 통한 13개 카테고리 상품 자동 수집
-- rembg(BiRefNet)를 이용한 상품 이미지 배경 제거 -> 현재는 colab으로 진행
-- Google Colab 환경에서 Jina CLIP v2로 이미지/텍스트 임베딩 생성
+- rembg(BiRefNet)를 이용한 상품 이미지 배경 제거
+- Jina CLIP v2로 이미지/텍스트 임베딩 생성 (`notebooks/Jina_CLIP_v2_test.ipynb`)
 - PostgreSQL + pgvector 기반 코사인 유사도 검색
 - 색감 · 테마 · 용도 · 예산 · 카테고리 조건 기반 데스크 셋업 추천
 
@@ -19,20 +18,20 @@
         ↓
 [2] PostgreSQL DB 적재 (products 테이블)
         ↓
-[3] 상품 이미지 배경 제거 (rembg BiRefNet)
+[3] 상품 이미지 배경 제거 (notebooks/BiRefNet.ipynb)
         ↓
-[4] Google Colab — Jina CLIP v2 임베딩 생성
+[4] Jina CLIP v2 임베딩 생성 (notebooks/Jina_CLIP_v2_test.ipynb, GPU 필요)
     ├── 이미지 임베딩  (N × 1024)
     └── 텍스트 임베딩  (N × 1024)
         ↓
-[5] 임베딩 npy → 로컬 DB 적재 (import_embeddings.py)
+[5] 임베딩 npy → 로컬 DB 적재 (scripts/import_embeddings.py)
         ↓
 [6] pgvector 코사인 유사도 검색
         ↓
 [7] 카테고리별 후보 검색 → 조합 스코어링 → 셋업 추천
 ```
 
-> **Jina CLIP v2 모델(`jinaai/jina-clip-v2`)은 1024차원 벡터를 생성하며, GPU 환경(Colab 권장)에서 임베딩을 생성합니다.**
+> **Jina CLIP v2 모델(`jinaai/jina-clip-v2`)은 1024차원 벡터를 생성합니다. GPU 환경에서 실행하세요 (Google Colab 권장).**
 
 ---
 
@@ -49,34 +48,38 @@ desk_project/
 │   └── db_manager.py          # PostgreSQL 연결 및 products 테이블 관리
 │
 ├── search/                    # 검색 & 추천 로직
-│   ├── searcher.py            # Jina CLIP v2 쿼리 임베딩 + pgvector 검색 
+│   ├── searcher.py            # Jina CLIP v2 쿼리 임베딩 + pgvector 검색
 │   └── recommender.py         # 셋업 추천 (후보 검색 + 조합 스코어링)
 │
 ├── pipeline/                  # 데이터 수집 & 벡터화
 │   ├── collector.py           # 네이버 쇼핑 API 상품 수집
-│   └── vectorizer.py          # [LEGACY] KoCLIP 기반 로컬 벡터화 백업 -> 지금은 사용안함
+│   └── vectorizer.py          # [LEGACY] KoCLIP 기반 로컬 벡터화 백업
 │
 ├── scripts/
-│   ├── export_for_csv.py      # DB → CSV 내보내기 (Colab 업로드용)
-│   └── import_embeddings.py   # Colab npy 임베딩 → DB 적재
+│   ├── export_for_csv.py      # DB → CSV 내보내기 (임베딩 생성 전 준비)
+│   └── import_embeddings.py   # npy 임베딩 → DB 적재
+│
+├── notebooks/                 # Jupyter 노트북 (코랩 GPU 작업용)
+│   ├── Jina_CLIP_v2_test.ipynb  # 메인: 이미지/텍스트 임베딩 생성 파이프라인
+│   ├── BiRefNet.ipynb           # 상품 이미지 배경 제거 (BiRefNet 모델)
+│   └── rembg_test.ipynb         # rembg 배경 제거 테스트
 │
 ├── docs/
 │   ├── PROJECT_FLOW.md        # 전체 파이프라인 상세 설명
 │   ├── DB_SETUP.md            # Docker DB 설정 가이드
-│   ├── RECOMMENDATION_LOGIC.md # 추천 로직 설명
-│ 
+│   └── RECOMMENDATION_LOGIC.md # 추천 로직 설명
 │
 ├── cli.py                     # CLI 입력 파싱 및 결과 출력
 ├── test.py                    # 대화형 메뉴 진입점 (검색 / 셋업 추천)
-├── main.py                    # 전체 파이프라인 CLI (collect / vectorize / search)
+├── main.py                    # 파이프라인 CLI (collect / vectorize / reset-embeddings)
 │
 ├── docker-compose.yml         # PostgreSQL + pgvector 컨테이너 정의
 ├── setup_db.sql               # DB 초기 설정 SQL (참고용)
 ├── .env.example               # 환경변수 템플릿
 ├── requirements.txt           # Python 패키지 목록
 │
-└── data/                      # ⚠️ .gitignore 처리 
-    ├── raw/                   # products.csv, 이미지 파일
+└── data/                      # ⚠️ .gitignore 처리
+    ├── raw/                   # products.csv, 배경제거 이미지
     └── embeddings/            # npy 임베딩 파일
 ```
 
@@ -89,10 +92,11 @@ desk_project/
 2. .env 설정
 3. Docker DB 실행
 4. Python 가상환경 생성 + 패키지 설치
-5. 상품 수집 실행
-6. Colab에서 임베딩 생성 → DB 적재
-7. 검색 / 추천 실행
+5. dump.sql 적재 (팀원에게 전달받은 파일)
+6. 검색 / 추천 실행
 ```
+
+> 상품 수집과 임베딩 생성을 처음부터 직접 진행하려면 아래 순서를 따르세요.
 
 ---
 
@@ -102,7 +106,6 @@ desk_project/
 - Docker Desktop 설치 및 실행
 - 네이버 개발자 계정 (쇼핑 API 키)
 - HuggingFace 계정 (토큰)
-- Google Colab 접근 가능
 
 ---
 
@@ -143,14 +146,6 @@ docker ps
 # desk-postgres 컨테이너가 Up 상태인지 확인
 ```
 
-접속 확인:
-
-```bash
-docker exec -it desk-postgres psql -U postgres -d postgres
-# \dt 로 테이블 목록 확인
-# \q 로 종료
-```
-
 > 자세한 DB 설정은 [docs/DB_SETUP.md](docs/DB_SETUP.md) 참고
 
 ---
@@ -169,45 +164,22 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> PyTorch는 CPU / GPU 환경에 따라 설치 명령이 다를 수 있습니다.  
-> GPU 환경: [pytorch.org](https://pytorch.org/get-started/locally/) 에서 CUDA 버전에 맞는 명령 확인
-
 ---
 
-## 4. 상품 수집
+## 4. 별도 파일 수령 및 배치
+
+깃허브에는 포함되지 않는 파일들을 별도로 받아야 한다.
+dump.sql
+processed_image
+embeddings_output
 
 ```bash
-python main.py collect
+docker exec -i desk-postgres psql -U postgres postgres < dump.sql
 ```
-
-실행하면 카테고리별로 수집할 상품 수를 입력하는 프롬프트가 표시됩니다 (엔터 = 기본 10개).
-
-수집 카테고리: DESK, MONITOR, KEYBOARD, MOUSE, MONITOR_ARM, LAPTOP_STAND, MOUSEPAD, DESK_SHELF, LIGHTING, SPEAKER, CLOCK, DESK_LAMP, DECO
 
 ---
 
-## 5. 임베딩 생성 및 DB 적재
-
-**Colab 권장 (GPU 필요)**
-
-```bash
-# 1) DB 데이터를 CSV로 내보내기
-python scripts/export_for_csv.py
-# → data/raw/products.csv 생성
-
-# 2) Colab에 products.csv 업로드 후 Jina CLIP v2로 임베딩 생성
-#    (Colab 코드는 docs/COLAB_EMBEDDING.md 참고)
-#    결과물: product_ids.npy, image_embeds.npy, text_embeds.npy
-
-# 3) npy 파일을 data/embeddings/ 에 배치 후 DB 적재
-python scripts/import_embeddings.py
-```
-
-> 자세한 흐름: [docs/COLAB_EMBEDDING.md](docs/COLAB_EMBEDDING.md)
-
----
-
-## 6. 검색 / 셋업 추천 실행
+## 5. 검색 / 셋업 추천 실행
 
 ```bash
 python test.py
@@ -224,22 +196,49 @@ python test.py
 
 ---
 
+## 처음부터 직접 데이터 구축하는 경우
+
+### 상품 수집
+
+```bash
+python main.py collect
+```
+
+카테고리별로 수집할 상품 수를 입력하는 프롬프트가 표시됩니다 (엔터 = 기본 10개).
+
+수집 카테고리: DESK, MONITOR, KEYBOARD, MOUSE, MONITOR_ARM, LAPTOP_STAND, MOUSEPAD, DESK_SHELF, LIGHTING, SPEAKER, CLOCK, DESK_LAMP, DECO
+
+### 배경 제거
+
+`notebooks/BiRefNet.ipynb` 를 Google Colab (GPU 환경)에서 실행한다.
+
+### 임베딩 생성 및 DB 적재
+
+```bash
+# 1) DB 데이터를 CSV로 내보내기
+python scripts/export_for_csv.py
+# → data/raw/products.csv 생성
+
+# 2) notebooks/Jina_CLIP_v2_test.ipynb 를 Google Colab에서 실행
+#    products.csv + 배경제거 이미지를 구글 드라이브에 올린 뒤 실행
+#    결과물: product_ids.npy, image_embeds.npy, text_embeds.npy
+
+# 3) npy 파일을 data/embeddings/ 에 배치 후 DB 적재
+python scripts/import_embeddings.py
+```
+
+---
+
 ## 기타 실행 명령
 
 ```bash
-# 전체 파이프라인 (수집 → 벡터화 → 검색 테스트)
+# 전체 파이프라인 (수집 → 벡터화)
 python main.py
 
-# 테이블 초기화 후 재수집 (지금 쓸 필요 없음)
+# 테이블 초기화 후 재수집
 python main.py clean-collect
 
-# 로컬 이미지 zip으로 벡터화 (얘도 지금 사용 X)
-python main.py vectorize-local data/raw/processed_images.zip
-
-# 검색 모드 지정 테스트
-python main.py search "화이트 미니멀 책상" --mode equal_zsum
-
-# 임베딩 전체 초기화
+# 임베딩 전체 초기화 (지금 할 일 없음)
 python main.py reset-embeddings
 ```
 
@@ -258,4 +257,9 @@ docker exec -i desk-postgres psql -U postgres postgres < dump.sql
 
 ---
 
+## 주의사항
 
+- `.env`는 절대 커밋하지 마세요 — `.gitignore`에 등록되어 있습니다.
+- `data/` 폴더의 이미지, npy, csv는 용량이 크기 때문에 커밋하지 않습니다.
+- `dump.sql`은 `.gitignore`에 등록되어 있으므로 별도 채널(구글 드라이브 등)로 공유하세요.
+- Docker 컨테이너를 중지해도 `pgdata` 볼륨에 데이터가 보존됩니다.

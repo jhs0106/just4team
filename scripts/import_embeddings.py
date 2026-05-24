@@ -12,7 +12,7 @@ import numpy as np
 import psycopg2
 from tqdm import tqdm
 
-from core.config import DB_CONFIG, EMBEDDING_DIM
+from deskterior.core.config import DB_CONFIG, EMBEDDING_DIM
 
 NPY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "embeddings")
 IDS_PATH = os.path.join(NPY_DIR, "product_ids.npy")

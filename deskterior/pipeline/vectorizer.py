@@ -19,8 +19,8 @@ from PIL import Image
 from rembg import new_session as rembg_new_session, remove as rembg_remove
 from transformers import CLIPModel, CLIPProcessor
 
-from core.config import SKIP_REMBG_CATEGORIES
-from db.db_manager import DBManager
+from deskterior.core.config import SKIP_REMBG_CATEGORIES
+from deskterior.database.manager import DBManager
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ class ProductVectorizer:
         features = F.normalize(features, dim=-1)
         return features[0]  # (D,) tensor
 
-    # ── 텍스트 임베딩 ─────────────────────────────────────────────────────────
+    # ── 텍스트 임베딩 ────────────────────────────────────────────���────────────
 
     def _embed_text(self, title: str, category: str | None = None) -> torch.Tensor:
         """상품명 텍스트를 512차원 L2 정규화 텐서로 변환."""
@@ -132,7 +132,7 @@ class ProductVectorizer:
 
         return F.normalize(features, dim=-1)[0]  # (512,)
 
-    # ── 전체 벡터화 ───────────────────────────────────────────────────────────
+    # ── 전체 벡터화 ───────────────────────────��───────────────────────────────
 
     def vectorize_all(self) -> int:
         """embedding IS NULL인 상품을 모두 처리하여 DB를 업데이트. 업데이트 수 반환."""

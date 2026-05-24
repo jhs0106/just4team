@@ -1,6 +1,6 @@
 # === cli.py — CLI 입력 처리 및 결과 출력
 
-from core.config import (
+from deskterior.core.config import (
     CATEGORY_ALIASES,
     CATEGORY_LABELS,
     CATEGORY_KEYWORDS,
@@ -11,8 +11,8 @@ from core.config import (
     DEFAULT_TEXT_WEIGHT,
     DEFAULT_TOP_K,
 )
-from search.recommender import SetupPreference, SetupRecommender, _category_label
-from search.searcher import ProductSearcher
+from deskterior.legacy.old_recommender import SetupPreference, SetupRecommender, _category_label
+from deskterior.retrieval.searcher import ProductSearcher
 
 
 def _normalize_category_token(token: str) -> str | None:

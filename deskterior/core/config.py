@@ -44,6 +44,8 @@ CATEGORY_QUERIES = {
     "CLOCK":        "인테리어 시계 탁상시계",
     "DESK_LAMP":    "스탠드 조명 독서등",
     "DECO":         "인테리어 소품 장식 오브제",
+    "HEADSET":      "헤드셋 헤드폰 게이밍 헤드셋",
+    "HEADSET_STAND": "헤드셋 거치대 헤드폰 거치대",
 }
 
 
@@ -65,14 +67,17 @@ CATEGORY_KEYWORDS = {
     "CLOCK":        ["시계", "탁상시계", "벽시계", "알람시계", "clock"],
     "DESK_LAMP":    ["스탠드", "독서등", "스탠드 조명", "desk lamp", "테이블 램프"],
     "DECO":         ["인테리어 소품", "오브제", "장식품", "데코", "소품", "캔들", "화분"],
+    "HEADSET_STAND": ["헤드셋 거치대", "헤드폰 거치대", "헤드셋 스탠드", "헤드폰 스탠드",
+                      "headset stand", "headphone stand"],
+    "HEADSET":      ["헤드셋", "헤드폰", "headset", "headphone", "게이밍 헤드셋", "무선 헤드셋"],
 }
 
 # ── 카테고리별 표준 사이즈 (mm) ───────────────────────────────────────────────
-DEFAULT_SIZES = { 
+DEFAULT_SIZES = {
     "DESK":             {"width_mm": 1200, "depth_mm": 600},
     "CHAIR":            {"width_mm": 680,  "depth_mm": 680},
-    "MONITOR":          {"width_mm": 600,  "depth_mm": 200},
-    "KEYBOARD":         {"width_mm": 440,  "depth_mm": 135},
+    "MONITOR":          {"width_mm": 598,  "height_mm": 336},   # 27인치 16:9 패널 기준
+    "KEYBOARD":         {"width_mm": 440,  "depth_mm": 150},
     "MOUSE":            {"width_mm": 70,   "depth_mm": 120},
     "MONITOR_ARM":      {"width_mm": 120,  "depth_mm": 500},
     "LAPTOP_STAND":     {"width_mm": 260,  "depth_mm": 230},
@@ -80,10 +85,11 @@ DEFAULT_SIZES = {
     "DESK_SHELF":       {"width_mm": 600,  "depth_mm": 200},
     "LIGHTING":         {"width_mm": 500,  "depth_mm": 30},
     "SPEAKER":          {"width_mm": 150,  "depth_mm": 150},
+    "HEADSET":          {"width_mm": 180,  "depth_mm": 85},
 }
 
-# 사이즈 파싱이 의미 있는 카테고리
-SIZE_RELEVANT = {"DESK", "MONITOR", "DESK_SHELF", "MOUSEPAD"}
+# 사이즈 적재 대상 카테고리 (DESK_LAMP / SPEAKER 는 보류)
+SIZE_RELEVANT = {"MONITOR", "KEYBOARD", "MOUSE", "HEADSET", "MOUSEPAD"}
 
 # rembg 배경제거를 스킵할 카테고리 (납작한 면 제품 등 rembg가 오히려 해가 되는 경우)
 SKIP_REMBG_CATEGORIES = {"MOUSEPAD", "DESK_SHELF"}
@@ -105,6 +111,8 @@ CATEGORY_EXCLUDE_KEYWORDS = {
     "CLOCK":        ["차량용", "주방", "욕실", "야외", "수중", "방수", "벽시계"],
     "DESK_LAMP":    ["차량용", "실외", "수중", "방수", "가로등", "천장", "야외"],
     "DECO":         ["식품", "먹는", "차량용", "야외", "공사", "업소용"],
+    "HEADSET_STAND": ["차량용", "야외", "모터사이클", "헬멧"],
+    "HEADSET":      ["이어폰", "earphone", "이어버드", "earbuds", "보청기", "차량용", "헬멧", "마이크 단품", "케이블", "커버", "파우치", "이어패드", "쿠션", "거치대", "스탠드"],
 }
 
 # ── 카테고리 한글 레이블 ──────────────────────────────────────────────────────
@@ -122,6 +130,8 @@ CATEGORY_LABELS = {
     "CLOCK":        "시계",
     "DESK_LAMP":    "데스크 조명",
     "DECO":         "데코 소품",
+    "HEADSET_STAND": "헤드셋 거치대",
+    "HEADSET":      "헤드셋/헤드폰",
 }
 
 # ── 카테고리 입력 별칭 (CLI 파싱용) ──────────────────────────────────────────
@@ -161,7 +171,22 @@ CATEGORY_ALIASES = {
     "deco": "DECO",
     "오브제": "DECO",
     "소품": "DECO",
+    "headset_stand": "HEADSET_STAND",
+    "headsetstand": "HEADSET_STAND",
+    "headphone_stand": "HEADSET_STAND",
+    "headphonestand": "HEADSET_STAND",
+    "헤드셋거치대": "HEADSET_STAND",
+    "헤드폰거치대": "HEADSET_STAND",
+    "헤드셋스탠드": "HEADSET_STAND",
+    "헤드폰스탠드": "HEADSET_STAND",
+    "headset": "HEADSET",
+    "headphone": "HEADSET",
+    "헤드셋": "HEADSET",
+    "헤드폰": "HEADSET",
 }
+
+# ── KEYBOARD/MOUSE 카테고리 세트 ──────────────────────────────────────────────
+KEYBOARD_MOUSE_CATEGORIES = {"KEYBOARD", "MOUSE"}
 
 # ── 검색 기본값 ───────────────────────────────────────────────────────────────
 TITLE_BOOST_WEIGHT = 1.5

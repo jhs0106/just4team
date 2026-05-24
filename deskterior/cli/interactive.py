@@ -1,9 +1,9 @@
-# === test.py — 진입점 (검색 / 셋업 추천 인터랙티브 메뉴)
+# === interactive.py — 진입점 (검색 / 셋업 추천 인터랙티브 메뉴)
 
-from cli import run_search, run_setup_recommendation
-from db.db_manager import DBManager
-from search.recommender import SetupRecommender
-from search.searcher import ProductSearcher
+from deskterior.cli.cli import run_search, run_setup_recommendation
+from deskterior.database.manager import DBManager
+from deskterior.legacy.old_recommender import SetupRecommender
+from deskterior.retrieval.searcher import ProductSearcher
 
 
 def main():

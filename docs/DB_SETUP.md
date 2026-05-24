@@ -1,13 +1,13 @@
 # DB 설정 가이드
 
-이 문서는 Docker 기반 PostgreSQL + pgvector 환경 설정 방법을 설명합니다.
+Docker 기반 PostgreSQL + pgvector 환경 설정 방법을 설명합니다.
 
 ---
 
 ## 사전 준비
 
 - Docker Desktop 설치 및 실행 중인 상태
-- `.env` 파일에 DB 비밀번호 설정 완료
+- `.env` 파일에 DB 연결 정보 설정 완료 (`.env.example` 참고)
 
 ---
 
@@ -18,6 +18,7 @@ docker compose up -d
 ```
 
 `docker-compose.yml` 구성:
+
 - 이미지: `pgvector/pgvector:pg16` (PostgreSQL 16 + pgvector 확장 내장)
 - 컨테이너명: `desk-postgres`
 - 포트: 로컬 5432 → 컨테이너 5432
@@ -35,68 +36,57 @@ docker ps
 
 ---
 
-## DB 접속 방법
+## DB 접속
 
 ```bash
 # psql로 직접 접속
 docker exec -it desk-postgres psql -U postgres -d postgres
 
 # 유용한 psql 명령어
-\dt          -- 테이블 목록
-\d products  -- products 테이블 컬럼 구조
-\q           -- 종료
-```
-
----
-
-## 테이블 자동 생성
-
-테이블은 `db_manager.py`가 자동으로 생성합니다. 별도로 SQL을 실행할 필요 없습니다.
-
-```bash
-# main.py collect 실행 시 자동으로 create_table() 호출됨
-python main.py collect
-```
-
-수동으로 테이블만 생성하려면:
-```bash
-python -c "from db_manager import DBManager; db = DBManager(); db.create_table(); db.close()"
+\dt            -- 테이블 목록
+\d products    -- products 테이블 컬럼 구조
+SELECT COUNT(*) FROM products;
+\q             -- 종료
 ```
 
 ---
 
 ## products 테이블 구조
 
+테이블은 `deskterior/database/manager.py`의 `create_table()`이 자동으로 생성합니다.
+별도로 SQL 파일을 실행할 필요 없습니다.
+
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | id | SERIAL | 자동 증가 PK |
 | title | TEXT | 상품명 (HTML 태그 제거됨) |
-| link | TEXT | 상품 링크 |
-| image | TEXT | 이미지 URL |
+| link | TEXT | 상품 상세 링크 |
+| image | TEXT | 상품 이미지 URL |
 | lprice | INTEGER | 최저가 (원) |
 | mall_name | TEXT | 쇼핑몰명 |
 | product_id | TEXT (UNIQUE) | 네이버 상품 고유 ID |
 | brand | TEXT | 브랜드명 |
-| category | TEXT | 카테고리 코드 (예: KEYBOARD) |
+| category | TEXT | 카테고리 코드 (예: `KEYBOARD`, `MONITOR`) |
 | embedding_img | vector(1024) | Jina CLIP v2 이미지 임베딩 |
 | embedding_txt | vector(1024) | Jina CLIP v2 텍스트 임베딩 |
-| embedding | vector(1024) | 하이브리드 임베딩 (이미지 0.6 + 텍스트 0.4) |
-| metadata | JSONB | 파싱된 사이즈 정보 (책상/모니터 등) |
+| metadata | JSONB | 파싱된 사이즈 정보 (모니터 인치, 키보드 배열 등) |
+
+> `metadata` 예시: `{"inch": 27, "source": "title"}` (MONITOR), `{"layout": "TKL", "source": "title"}` (KEYBOARD)
 
 ---
 
-## pgvector 사용 여부 확인
+## pgvector 설치 확인
 
 ```sql
--- psql 접속 후
+-- psql 접속 후 실행
 SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';
 ```
 
-`vector` 확장이 설치되어 있으면 pgvector가 활성화된 상태입니다. `pgvector/pgvector:pg16` 이미지를 사용하면 자동으로 내장되어 있습니다.
+`pgvector/pgvector:pg16` 이미지는 pgvector가 내장되어 있습니다.
 
 ---
 
-## 컨테이너 관리 명령어
+## 컨테이너 관리
 
 ```bash
 # 중지 (데이터 보존)
@@ -105,32 +95,34 @@ docker compose stop
 # 재시작
 docker compose up -d
 
-# 완전 삭제 (데이터 포함)
+# 컨테이너만 삭제 (볼륨/데이터 보존)
+docker compose down
+
+# 완전 삭제 (데이터 포함 — 주의)
 docker compose down -v
 ```
-
-> `docker compose down` (v 옵션 없음)은 컨테이너만 삭제하고 볼륨(데이터)은 보존합니다.  
-> `-v` 옵션을 붙이면 볼륨까지 삭제되므로 데이터가 완전히 사라집니다. 주의하세요.
 
 ---
 
 ## DB 데이터 공유
 
-데이터를 공유할 때는 dump 파일을 사용합니다.
+상품 데이터, 임베딩 등은 Git에 포함되지 않으므로 덤프 파일로 공유합니다.
 
 ```bash
-# 덤프 추출 (제공자)
+# 덤프 추출 (데이터 제공자)
 docker exec desk-postgres pg_dump -U postgres postgres > dump.sql
 
-# 덤프 적용 (팀원)
+# 덤프 복원 (팀원)
 docker compose up -d
 docker exec -i desk-postgres psql -U postgres postgres < dump.sql
 ```
+
+> `dump.sql`은 `.gitignore`에 등록되어 있으므로 Google Drive 등 별도 채널로 공유하세요.
 
 ---
 
 ## 주의사항
 
-- `dump.sql`은 .gitignore에 등록되어 있으므로 커밋되지 않습니다. 별도 채널로 공유하세요.
-- DB 비밀번호는 `.env`에서 관리하며, `.env`는 절대 커밋하지 않습니다.
-- `setup_db.sql`은 초기 스키마 참고용 파일이며, 현재는 `db_manager.create_table()`이 자동 처리합니다.
+- `.env`는 절대 커밋 금지 (DB 비밀번호 포함)
+- `docker compose down -v`는 볼륨까지 삭제하므로 데이터가 완전히 사라집니다
+- 임베딩(`embedding_img`, `embedding_txt`)은 1024차원 벡터로, 덤프 파일 크기가 클 수 있습니다

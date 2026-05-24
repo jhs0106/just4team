@@ -1,4 +1,4 @@
-# === scoring.py — 점수 계산 유틸리티 (z-score, title match, minmax)
+# === scoring.py — 점수 계산 유틸리티 (z-score, title match, minmax)-> 구버전 지금 사용x
 
 import re
 

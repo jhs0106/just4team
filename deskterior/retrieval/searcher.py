@@ -13,9 +13,9 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModel
 
-from core.config import CATEGORY_KEYWORDS, MODEL_NAME, TITLE_BOOST_WEIGHT
-from db.db_manager import DBManager
-from core.scoring import _title_match_scores, _zscore
+from deskterior.core.config import CATEGORY_KEYWORDS, MODEL_NAME, TITLE_BOOST_WEIGHT
+from deskterior.database.manager import DBManager
+from deskterior.core.scoring import _title_match_scores, _zscore
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,17 @@ def _load_jina_model():
         _jina_model.eval()
         print("[모델 로드] 완료")
     return _jina_model
+
+
+def embed_text_query(query_text: str) -> list[float]:
+    """텍스트 쿼리를 Jina CLIP v2 임베딩 벡터로 변환 (모듈 레벨 편의 함수)."""
+    model = _load_jina_model()
+    with torch.no_grad():
+        feat = model.encode_text([query_text])
+        if isinstance(feat, np.ndarray):
+            feat = torch.from_numpy(feat)
+        feat = F.normalize(feat.float(), dim=-1)
+        return feat[0].cpu().numpy().tolist()
 
 
 class ProductSearcher:

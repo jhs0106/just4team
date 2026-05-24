@@ -3,7 +3,8 @@
 import csv
 import os
 import psycopg2
-from core.config import DB_CONFIG
+import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from deskterior.core.config import DB_CONFIG
 
 conn = psycopg2.connect(**DB_CONFIG)
 with conn.cursor() as cur:

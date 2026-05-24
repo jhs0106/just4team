@@ -1,14 +1,15 @@
 # =============================================================================
-# db_manager.py — DB 연결, 테이블 관리, UPSERT, 유틸리티 함수
+# manager.py — DB 연결, 테이블 관리, UPSERT, 유틸리티 함수
 # =============================================================================
 
 import re
+import math
 import logging
 from html import unescape
 import psycopg2
 from psycopg2.extras import Json
 
-from core.config import DB_CONFIG, DEFAULT_SIZES, SIZE_RELEVANT, EMBEDDING_DIM
+from deskterior.core.config import DB_CONFIG, DEFAULT_SIZES, SIZE_RELEVANT, EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
 
@@ -21,23 +22,41 @@ def strip_html(text: str) -> str:
 
 
 def parse_size(title: str, category: str):
-    """DESK/MONITOR/DESK_SHELF만 사이즈 파싱. 나머지는 None 반환."""
-    if category not in SIZE_RELEVANT:
+    """카테고리별 사이즈 파싱.
+
+    - MONITOR  : 상품명에서 인치 추출 → 16:9 기준 패널 가로×세로(mm) 변환
+    - KEYBOARD / MOUSE / HEADSET : DEFAULT_SIZES 기본값 적재
+    - MOUSEPAD / DESK_LAMP / SPEAKER : 보류 → None
+    """
+    if category == "MONITOR":
+        match = re.search(r'(\d{2})\s*(?:인치|inch|")', title, re.IGNORECASE)
+        if match:
+            inch = int(match.group(1))
+            diag_mm = inch * 25.4
+            denom = math.sqrt(16 ** 2 + 9 ** 2)
+            w = round(diag_mm * 16 / denom)
+            h = round(diag_mm * 9  / denom)
+            return {"width_mm": w, "height_mm": h, "diagonal_inch": inch, "source": "parsed"}
         return None
-    match = re.search(r"(\d{2,4})\s*[xX×*]\s*(\d{2,4})", title)
-    if match:
-        w, d = int(match.group(1)), int(match.group(2))
-        if w < 100:
-            w *= 10
-        if d < 100:
-            d *= 10
-        return {"width_mm": w, "depth_mm": d, "source": "parsed"}
-    defaults = DEFAULT_SIZES.get(category, {})
-    return {
-        "width_mm": defaults.get("width_mm"),
-        "depth_mm": defaults.get("depth_mm"),
-        "source": "default",
-    }
+
+    elif category == "MOUSEPAD":
+        # 패턴: 900x400, 800 x 400 x 3mm, 80x34, 20x25cm 등
+        match = re.search(r'(\d{2,4})\s*[xX×*]\s*(\d{2,4})(?:\s*[xX×*]\s*\d+)?\s*(cm|mm)?', title, re.IGNORECASE)
+        if match:
+            w, d = int(match.group(1)), int(match.group(2))
+            unit = (match.group(3) or "").lower()
+            if unit == "cm" or (unit != "mm" and max(w, d) <= 200):
+                w *= 10
+                d *= 10
+            return {"width_mm": w, "depth_mm": d, "source": "parsed"}
+        return None
+
+    elif category in {"KEYBOARD", "MOUSE", "HEADSET"}:
+        defaults = DEFAULT_SIZES.get(category, {})
+        return {"width_mm": defaults.get("width_mm"), "depth_mm": defaults.get("depth_mm"), "source": "default"}
+
+    # DESK_LAMP, SPEAKER 등 보류
+    return None
 
 
 # ── DB 매니저 클래스 ──────────────────────────────────────────────────────────

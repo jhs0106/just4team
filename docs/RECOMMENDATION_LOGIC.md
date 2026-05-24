@@ -1,151 +1,178 @@
 # 추천 로직 설명
 
-이 문서는 데스크 셋업 추천 시스템의 내부 동작 방식을 설명합니다.
+데스크테리어 추천 시스템의 신규 엔진(`deskterior/recommender/engine.py`) 동작 방식을 설명합니다.
 
 ---
 
-## 전체 흐름 (그냥 테스트용 추가로 튜닝해야 함)
+## 전체 흐름
 
 ```
-사용자 조건 입력 (색감 / 테마 / 용도 / 예산 / 카테고리)
+테마 + 예산 입력
     ↓
-카테고리별 다중 쿼리 생성
+카테고리별 후보 상품 검색 (Jina CLIP v2 + pgvector)
     ↓
-Jina CLIP v2 query embedding
+개별 상품 점수화 (ThemeEvidence, ImageSim, TextSim, ValueScore → ItemScore)
     ↓
-pgvector 코사인 유사도 → image_score, text_score 계산
+Beam Search (beam_size=50) — 예산 내 최적 번들 탐색
     ↓
-후보 집계 (minmax 정규화 + 가중 합산 → product_match_score)
+번들 점수화 (SetupScore)
     ↓
-카테고리 간 전수 조합 생성
-    ↓
-예산 초과 조합 제거
-    ↓
-setup_score 계산 → 정렬 → 상위 N개 반환
+TOP 3 셋업 번들 반환
 ```
 
 ---
 
-## 1. 사용자 조건 입력
+## 1. 테마 + 예산 입력
 
-`test.py` → `cli.py`의 `run_setup_recommendation()` 에서 다음 항목을 입력받습니다:
+`python main.py recommend` 실행 시 두 가지를 입력받습니다.
 
-| 항목 | 예시 |
+| 항목 | 선택지 |
 |---|---|
-| 색감 | 화이트톤, 블랙, 우드톤 |
-| 테마 | 미니멀, 게이밍, 빈티지 |
-| 용도 | 개발자 데스크셋업, 재택근무 |
-| 예산 | 500000 (원, 비우면 무제한) |
-| 카테고리 | keyboard, mouse, lamp 또는 번호 선택 |
+| 테마 | `white` (화이트 클린) / `black` (블랙 다크) / `gaming` (RGB 게이밍) / `wood` (우드 내추럴) |
+| 예산 | 원 단위 정수 (예: 1500000) |
 
-카테고리는 번호 또는 텍스트로 입력할 수 있으며, `cli.py`의 `_prompt_categories_selection()`이 파싱합니다.
+테마별 설정은 `deskterior/recommender/config.py`의 `THEME_PRESETS`에 정의되어 있습니다.
 
 ---
 
-## 2. 카테고리별 다중 쿼리 생성
+## 2. 후보 상품 검색
 
-`recommender.py`의 `build_category_queries()`가 입력 조건으로 카테고리당 최대 4개 쿼리를 생성합니다.
+카테고리별로 테마에 맞는 검색 쿼리를 `THEME_CATEGORY_QUERIES`에서 가져와 Jina CLIP v2로 임베딩 후 pgvector로 검색합니다.
 
-| 쿼리 형태 | 가중치 |
+예시 (gaming 테마):
+
+| 카테고리 | 검색 쿼리 |
 |---|---|
-| `"{색감} 데스크셋업에 어울리는 {카테고리}"` | 0.35 |
-| `"{테마} 데스크셋업에 어울리는 {카테고리}"` | 0.35 |
-| `"{용도}에 적합한 {카테고리}"` | 0.20 |
-| `"{색감+테마+용도}에 어울리는 {카테고리}"` | 0.10 |
-
-입력하지 않은 항목은 해당 쿼리가 생략되고, 나머지 가중치가 합이 1.0이 되도록 자동 정규화됩니다.
-
----
-
-## 3. Jina CLIP v2 Query Embedding
-
-`searcher.py`의 `get_query_embedding()`이 각 쿼리 텍스트를 Jina CLIP v2 `encode_text()`로 1024차원 벡터로 변환하고 L2 정규화합니다.
-
-```python
-feat = model.encode_text([query_text])
-feat = F.normalize(feat, dim=-1)
-```
-
----
-
-## 4. image_score / text_score 계산
-
-pgvector `<=>` 연산자(코사인 거리)로 쿼리 벡터와 DB 임베딩 간 유사도를 계산합니다.
+| MONITOR | "게이밍 모니터 144Hz 165Hz" |
+| KEYBOARD | "RGB 게이밍 기계식 키보드" |
+| MOUSE | "게이밍 마우스 DPI RGB 경량" |
+| MOUSEPAD | "RGB 게이밍 장패드 마우스패드" |
 
 ```sql
-1 - (embedding_img <=> query_vector::vector)  AS image_score
-1 - (embedding_txt <=> query_vector::vector)  AS text_score
+-- 이미지 유사도 60%, 텍스트 유사도 40% 가중치로 정렬
+ORDER BY (0.60 * (embedding_img <=> query_vec)
+        + COALESCE(0.40 * (embedding_txt <=> query_vec), 0.20)) ASC
+LIMIT 50
 ```
 
-### 검색 모드 (mode 파라미터)
-
-| 모드 | 계산식 | 설명 |
-|---|---|---|
-| `image_only` | `image_score` | 이미지 임베딩 유사도만 사용 **(현재 기본값)** |
-| `text_only` | `text_score` | 텍스트 임베딩 유사도만 사용 |
-| `raw_sum` | `image + text` | 단순 합산 |
-| `weighted_sum` | `w_img×image + w_txt×text` | 가중치 지정 합산 |
-| `equal_zsum` | `z(image) + z(text) + 1.5×title_match` | z-score 정규화 + 키워드 매칭 보정 |
-
-`equal_zsum`의 title_match는 쿼리 토큰과 상품명 토큰의 겹침 비율로 계산합니다 (`scoring.py`의 `_title_match_scores()`).
+카테고리: 필수(MANDATORY) — `MONITOR`, `KEYBOARD`, `MOUSE` / 선택(OPTIONAL) — `MOUSEPAD`, `SPEAKER`, `DESK_LAMP`, `HEADSET`
 
 ---
 
-## 5. 후보 집계 (product_match_score)
+## 3. 개별 상품 점수화
 
-각 카테고리에 대해 여러 쿼리를 실행한 결과를 하나의 점수로 합산합니다 (`search_category_candidates()`).
+### ThemeEvidence
 
-```python
-# 쿼리별로 minmax 정규화 후 가중 합산
-product_match_score[id] += minmax(final_score) * query_weight
+상품명과 태그에서 테마 키워드 매칭으로 테마 부합도를 측정합니다.
+
+```
+ThemeEvidence = min(1.0, positive_hits / 2.0)
+              - min(0.6, negative_hits × 0.20)
+              + CategoryThemeBonus
 ```
 
-최종 `product_match_score` 기준으로 내림차순 정렬 후 카테고리별 상위 N개(기본 5개)를 후보로 선정합니다.
+- `positive_keywords`: 테마와 맞는 키워드 (예: gaming → "rgb", "144hz", "게이밍")
+- `negative_keywords`: 테마와 반대되는 키워드 (예: gaming → "우드", "북유럽", "파스텔")
+- `CategoryThemeBonus`: 특정 카테고리+테마 조합에 추가 보너스 (예: gaming 모니터에 "144hz" 포함 시 +0.20)
+
+### ItemScore
+
+```
+ItemScore = 0.30 × ImageSim
+          + 0.25 × TextSim
+          + 0.35 × ThemeEvidence
+          + 0.10 × ValueScore
+```
+
+- `ImageSim`: pgvector 이미지 임베딩 코사인 유사도
+- `TextSim`: pgvector 텍스트 임베딩 코사인 유사도
+- `ValueScore`: 카테고리 내 min-max 정규화된 가성비 점수 (`relevance / log(1 + price)`)
 
 ---
 
-## 6. 카테고리 간 조합 생성
+## 4. Beam Search
 
-`itertools.product`로 카테고리별 후보를 전수 조합합니다.
+beam_size=50을 유지하며 카테고리를 순서대로 추가해 예산 내 최적 번들을 탐색합니다.
 
-```python
-for combo in itertools.product(*candidate_lists):
-    ...
+```
+초기 상태: 빈 번들 (beam_size=1)
+    ↓
+각 카테고리 후보를 확장 → 예산 초과 가지 제거
+    ↓
+quick_score 기준 상위 beam_size=50 상태만 유지
+    ↓
+모든 카테고리 처리 후 SetupScore 계산
 ```
 
-카테고리가 5개 이상이면 조합 폭발을 방지하기 위해 카테고리당 후보를 최대 5개로 제한합니다.
+### OptionalGain
+
+선택 카테고리(MOUSEPAD 등)는 번들에 추가했을 때 실제 점수 향상이 임계값 이상일 때만 포함됩니다.
+
+```
+OptionalGain = 0.35 × ItemScore
+             + 0.35 × ThemeEvidence
+             + 0.20 × RoleCompatibility
+             + 0.10 × ThemeOptionalPriority
+             - conflict_penalty
+```
+
+임계값 예시 (config.py의 `OPTIONAL_GAIN_THRESHOLD`):
+
+| 테마 | MOUSEPAD | HEADSET | SPEAKER | DESK_LAMP |
+|---|---|---|---|---|
+| white | 0.30 | 0.42 | 0.38 | 0.34 |
+| gaming | 0.28 | 0.30 | 0.36 | 0.42 |
 
 ---
 
-## 7. 예산 초과 조합 제거
-
-각 조합의 알려진 가격 합계가 예산을 초과하면 제거합니다.
-
-```python
-total_price = sum(item["lprice"] for item in combo if item.get("lprice") is not None)
-if pref.budget is not None and total_price > pref.budget:
-    continue  # 제거
-```
-
----
-
-## 8. setup_score 계산
+## 5. SetupScore (번들 점수)
 
 ```
-setup_score = 0.65 × avg_match_score
-            + 0.25 × budget_score
-            + 0.10 × completeness_score
+SetupScore = 0.35 × SetupThemeEvidence
+           + 0.20 × AvgItemScore
+           + 0.20 × RoleAwareCompatibility
+           + 0.15 × MandatoryCoverage
+           + 0.05 × OptionalUsefulness
+           + 0.05 × ValueEfficiency
 ```
 
 | 항목 | 설명 |
 |---|---|
-| `avg_match_score` | 조합 내 상품 `product_match_score` 평균 |
-| `budget_score` | `1.0 - │남은금액 / 예산│ × 0.3` (예산 없으면 1.0 고정) |
-| `completeness_score` | 모든 카테고리 채워진 경우 1.0 (현재 고정) |
+| `SetupThemeEvidence` | 번들 내 전체 상품의 ThemeEvidence 평균 |
+| `AvgItemScore` | 번들 내 전체 상품의 ItemScore 평균 |
+| `RoleAwareCompatibility` | 카테고리 쌍의 테마 일치도 가중 평균 (키보드-마우스 등 핵심 쌍에 높은 가중치) |
+| `MandatoryCoverage` | 필수 카테고리(MONITOR, KEYBOARD, MOUSE) 포함 비율 |
+| `OptionalUsefulness` | 선택 카테고리 상품의 테마 우선순위 점수 |
+| `ValueEfficiency` | 번들 내 ValueScore 평균 |
 
-가격 미상 상품 포함 시 `-0.05` 페널티 (최대 `-0.15`).
+### RoleAwareCompatibility 가중치 (ROLE_PAIR_WEIGHTS)
 
-`setup_score` 기준 내림차순 정렬 후 상위 N개(기본 3개)를 반환합니다.
+| 카테고리 쌍 | 가중치 |
+|---|---|
+| KEYBOARD ↔ MOUSE | 1.00 |
+| KEYBOARD ↔ MOUSEPAD | 0.95 |
+| MOUSE ↔ MOUSEPAD | 0.95 |
+| MONITOR ↔ SPEAKER | 0.60 |
+| KEYBOARD ↔ HEADSET | 0.55 |
+| MOUSE ↔ HEADSET | 0.55 |
+| MONITOR ↔ DESK_LAMP | 0.50 |
+
+---
+
+## 6. ThemeGate (통과 기준)
+
+최종 추천 전 테마 부합도 최소 기준을 검사합니다.
+
+예시 (config.py의 `mandatory_rule`):
+
+| 테마 | 필수 카테고리 최소 매칭 수 | 평균 ThemeEvidence 최소값 |
+|---|---|---|
+| white | 1개 이상 | 0.58 |
+| black | 2개 이상 | 0.60 |
+| gaming | 2개 이상 | 0.65 |
+| wood | 1개 이상 | 0.53 |
+
+기준 미달 번들은 `ALLOW_THEME_GATE_FALLBACK = True`인 경우 폴백 허용.
 
 ---
 
@@ -153,8 +180,7 @@ setup_score = 0.65 × avg_match_score
 
 | 파일 | 역할 |
 |---|---|
-| `config.py` | 검색 기본값 (DEFAULT_SEARCH_MODE, DEFAULT_CANDIDATE_PER_CATEGORY 등) |
-| `scoring.py` | z-score, title_match, minmax 계산 함수 |
-| `searcher.py` | query embedding + pgvector 검색 |
-| `recommender.py` | 다중 쿼리 집계 + 조합 스코어링 |
-| `cli.py` | 사용자 입력 파싱 + 결과 출력 |
+| `deskterior/recommender/engine.py` | 추천 알고리즘 전체 구현 |
+| `deskterior/recommender/config.py` | 테마 프리셋, 카테고리, threshold, ROLE_PAIR_WEIGHTS |
+| `deskterior/retrieval/searcher.py` | Jina CLIP v2 임베딩 + pgvector 검색 |
+| `deskterior/core/config.py` | DB 연결 설정, 카테고리 키워드 |

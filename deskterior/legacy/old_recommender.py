@@ -1,17 +1,17 @@
-# === recommender.py — 셋업 추천 (카테고리별 후보 검색 + 조합 스코어링)
+# === old_recommender.py — 셋업 추천 (카테고리별 후보 검색 + 조합 스코어링)
 
 import itertools
 from dataclasses import dataclass
 
 import numpy as np
 
-from core.config import (
+from deskterior.core.config import (
     CATEGORY_LABELS,
     DEFAULT_CANDIDATE_PER_CATEGORY,
     DEFAULT_SETUP_TOP_K,
 )
-from core.scoring import minmax_scores
-from search.searcher import ProductSearcher
+from deskterior.core.scoring import minmax_scores
+from deskterior.retrieval.searcher import ProductSearcher
 
 
 def _category_label(category_code: str) -> str:

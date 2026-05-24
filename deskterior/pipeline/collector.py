@@ -7,8 +7,8 @@ import logging
 import certifi
 import requests
 
-from core.config import NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, NAVER_SHOP_URL, CATEGORY_QUERIES, CATEGORY_EXCLUDE_KEYWORDS
-from db.db_manager import DBManager
+from deskterior.core.config import NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, NAVER_SHOP_URL, CATEGORY_QUERIES, CATEGORY_EXCLUDE_KEYWORDS
+from deskterior.database.manager import DBManager
 
 logger = logging.getLogger(__name__)
 
