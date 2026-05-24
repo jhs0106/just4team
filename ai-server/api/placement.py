@@ -274,53 +274,26 @@ def _make_ranker_feature(
     cat: str, rx: float, ry: float, rw: float, rh: float,
     relation_state: dict, placed_norm: list,
 ) -> list:
-    pref       = _PREFERRED_POS.get(cat, {"rx": 0.5, "ry": 0.5})
-    dist_pref  = ((rx - pref["rx"])**2 + (ry - pref["ry"])**2) ** 0.5
-    edge_x     = min(rx, 1.0 - rx)
-    edge_y     = min(ry, 1.0 - ry)
-    monitor_rx = float(relation_state.get("monitor_rx", -1.0))
-    monitor_ry = float(relation_state.get("monitor_ry", -1.0))
-    if monitor_rx >= 0:
-        dx_mon   = rx - monitor_rx
-        dy_mon   = ry - monitor_ry
-        dist_mon = (dx_mon**2 + dy_mon**2) ** 0.5
-    else:
-        dx_mon = dy_mon = dist_mon = -1.0
+    # 학습된 ranker는 13개 feature 사용 (layout_ranker.pkl의 feature_names 확인됨).
+    # 순서: cat_id, rx, ry, rw, rh, dist_to_preferred, edge_margin_x, edge_margin_y,
+    #       monitor_rx, monitor_ry, keyboard_rx, keyboard_ry, n_other_objects
+    # 추가 feature(dist_mon, is_left, overlap 등)는 모델 재학습 전까지 제외.
+    pref         = _PREFERRED_POS.get(cat, {"rx": 0.5, "ry": 0.5})
+    dist_pref    = ((rx - pref["rx"])**2 + (ry - pref["ry"])**2) ** 0.5
+    edge_x       = min(rx, 1.0 - rx)
+    edge_y       = min(ry, 1.0 - ry)
+    monitor_rx   = float(relation_state.get("monitor_rx",  -1.0))
+    monitor_ry   = float(relation_state.get("monitor_ry",  -1.0))
     keyboard_rx  = float(relation_state.get("keyboard_rx", -1.0))
     keyboard_ry  = float(relation_state.get("keyboard_ry", -1.0))
-    center_dist  = ((rx - 0.5)**2 + (ry - 0.5)**2) ** 0.5
-    is_left  = 1 if rx < 0.35 else 0
-    is_right = 1 if rx > 0.65 else 0
-    is_back  = 1 if ry < 0.35 else 0
-    is_front = 1 if ry > 0.65 else 0
-    cand_box = [rx - rw/2, ry - rh/2, rx + rw/2, ry + rh/2]
-    overlap  = 0.0
-    for prev in placed_norm:
-        if prev.get("cat") == cat:
-            continue
-        prw = prev.get("rw", 0.10)
-        prh = prev.get("rh", 0.10)
-        pb  = [prev["rx"] - prw/2, prev["ry"] - prh/2, prev["rx"] + prw/2, prev["ry"] + prh/2]
-        ix1 = max(cand_box[0], pb[0]); iy1 = max(cand_box[1], pb[1])
-        ix2 = min(cand_box[2], pb[2]); iy2 = min(cand_box[3], pb[3])
-        iw  = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
-        inter  = iw * ih
-        a_area = max(1e-8, (cand_box[2]-cand_box[0]) * (cand_box[3]-cand_box[1]))
-        b_area = max(1e-8, (pb[2]-pb[0]) * (pb[3]-pb[1]))
-        iou    = inter / (a_area + b_area - inter + 1e-8)
-        overlap = max(overlap, iou)
-    n_others = len([p for p in placed_norm if p.get("cat") != cat])
+    n_others     = len([p for p in placed_norm if p.get("cat") != cat])
     return [
         _RANKER_CAT_ID.get(cat, -1),
         round(rx, 4), round(ry, 4), round(rw, 4), round(rh, 4),
         round(dist_pref, 4),
         round(edge_x, 4), round(edge_y, 4),
         round(monitor_rx, 4), round(monitor_ry, 4),
-        round(dist_mon, 4), round(dx_mon, 4), round(dy_mon, 4),
         round(keyboard_rx, 4), round(keyboard_ry, 4),
-        round(center_dist, 4),
-        is_left, is_right, is_back, is_front,
-        round(overlap, 4),
         n_others,
     ]
 
