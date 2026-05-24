@@ -14,9 +14,11 @@
 import argparse
 import base64
 import csv
+import json
 import random
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -231,12 +233,48 @@ def main():
     print(f"  완료: num_removed={result.get('num_removed')}, "
           f"num_placed={result.get('num_placed')}, elapsed={elapsed:.1f}s")
 
-    out_dir = REPO_ROOT / "ai-server" / "outputs" / "styled_test"
+    # 기존 컨벤션과 동일: outputs/test_results/<timestamp>/
+    # 같은 폴더에 step1_cleaned.png(빈 책상), step3_final.png(최종),
+    # meta.json(테스트 입력값) 저장.
+    ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = REPO_ROOT / "ai-server" / "outputs" / "test_results" / f"{ts}_{args.style}_budget{args.budget}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    ts  = time.strftime("%Y%m%d_%H%M%S")
-    out = out_dir / f"{ts}_{args.style}_budget{args.budget}.png"
-    out.write_bytes(base64.b64decode(result["result_image"]))
-    print(f"\n결과 이미지: {out}")
+
+    if result.get("cleaned_image"):
+        (out_dir / "step1_cleaned.png").write_bytes(base64.b64decode(result["cleaned_image"]))
+    (out_dir / "step3_final.png").write_bytes(base64.b64decode(result["result_image"]))
+
+    _meta = {
+        "style":              args.style,
+        "budget":             args.budget,
+        "categories":         cats,
+        "desk_width_mm":      args.desk_width_mm,
+        "desk_depth_mm":      args.desk_depth_mm,
+        "selected_products": [
+            {"category": p["category"], "image_id": p["id"], "title": p["title"],
+             "mock_price": p.get("mock_price")}
+            for p in selected
+        ],
+        "total_price":        total,
+        "elapsed_s":          round(elapsed, 1),
+        "num_removed":        result.get("num_removed"),
+        "num_placed":         result.get("num_placed"),
+        "seed":               args.seed,
+        "job_id":             job_id,
+    }
+    (out_dir / "meta.json").write_text(
+        json.dumps(_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    print(f"\n[결과 파일 — test_results]")
+    print(f"  {out_dir / 'step1_cleaned.png'}  — LaMa 물체 제거 후")
+    print(f"  {out_dir / 'step3_final.png'}    — 최종 결과")
+    print(f"  {out_dir / 'meta.json'}          — 테스트 입력값")
+    print(f"\n[디버그 파일 — outputs/debug/<timestamp>/]")
+    print(f"  placement_debug.png  — bbox 시각화")
+    print(f"  cv_composite_result.png — CV 합성 결과 (SD 전)")
+    print(f"  products_list.json   — 좌표/점수/ranker 정보")
+    print(f"  products/<cat>_*.png — 카테고리별 SD 중간 산출물")
 
 
 if __name__ == "__main__":
