@@ -60,7 +60,12 @@ public class CustomizeController {
                 redirectAttributes.addFlashAttribute("error", "정면 책상 사진이 필요합니다.");
                 return "redirect:/customize";
             }
-            String topB64 = extractBase64(topFile, topImageData);  // null 허용 (ai-server default 사용)
+            // top-view 사진도 필수 — 사용자 책상의 실제 top-view 없으면 placement 불가
+            String topB64 = extractBase64(topFile, topImageData);
+            if (topB64 == null) {
+                redirectAttributes.addFlashAttribute("error", "위에서 본 책상 사진(top-view)도 필수입니다.");
+                return "redirect:/customize";
+            }
 
             // 2. style → ai-server theme enum 변환
             String key = style == null ? "" : style.trim().toLowerCase();
@@ -76,9 +81,14 @@ public class CustomizeController {
                 return "redirect:/customize";
             }
 
-            // 4. cm → mm 변환 (JSP 입력은 cm)
+            // 4. cm → mm 변환 (JSP 입력은 cm). width/depth 필수 — 사진만으론 실측 mm 불가
             Integer widthMm = parseCmToMm(width);
             Integer depthMm = parseCmToMm(depth);
+            if (widthMm == null || depthMm == null) {
+                redirectAttributes.addFlashAttribute("error",
+                        "책상 가로(width)와 깊이(depth)를 cm 단위로 입력해주세요.");
+                return "redirect:/customize";
+            }
 
             // 5. deskMode 정규화 — ai-server RemoveMode enum과 일치하는 값만 허용
             String mode = deskMode == null ? "own_desk" : deskMode.trim();

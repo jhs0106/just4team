@@ -1,8 +1,11 @@
 # FastAPI wrapper for recommendation engine.
 # 실행: uvicorn deskterior.api.server:app --host 0.0.0.0 --port 8001
-# 호출: GET http://localhost:8001/recommend?theme=white&budget=1000000
+# 호출: POST http://localhost:8001/recommend  body={"theme","budget","image_base64?"}
 
-from fastapi import FastAPI, HTTPException, Query
+import base64
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
 from deskterior.recommender.config import (
     THEME_PRESETS, MANDATORY_CATEGORIES, OPTIONAL_CATEGORIES,
@@ -14,7 +17,16 @@ from deskterior.recommender.engine import (
     get_db_connection, retrieve_candidates, compute_theme_evidence,
     normalize_value_scores, compute_item_score, recommend_setup, clamp,
 )
-from deskterior.retrieval.searcher import embed_text_query
+from deskterior.retrieval.searcher import embed_text_query, embed_image_query
+
+
+class RecommendRequest(BaseModel):
+    theme: str = Field(..., description="white | black | gaming | wood")
+    budget: int = Field(..., gt=0, description="예산 (원, 양수)")
+    image_base64: str | None = Field(
+        None,
+        description="사용자 책상 정면 사진 base64 (옵션). 주어지면 사진 임베딩을 카테고리 쿼리와 가중 평균해 검색.",
+    )
 
 
 app = FastAPI(title="Deskterior Recommendation API", version="0.1.0")
@@ -69,43 +81,70 @@ def themes() -> dict:
     }
 
 
-@app.get("/recommend")
-def recommend(
-    theme:  str = Query(..., description="white | black | gaming | wood"),
-    budget: int = Query(..., gt=0, description="예산 (원, 양수)"),
-) -> dict:
-    # 테마 + 예산 기반 TOP 1 셋업 추천 → setup dict 반환.
-    if theme not in THEME_PRESETS:
+@app.post("/recommend")
+def recommend(req: RecommendRequest) -> dict:
+    # 테마 + 예산 + (옵션) 사용자 책상 정면 사진 기반 TOP 1 셋업 추천 → setup dict 반환.
+    if req.theme not in THEME_PRESETS:
         raise HTTPException(
             400,
-            f"Invalid theme: {theme!r}. Must be one of {list(THEME_PRESETS.keys())}",
+            f"Invalid theme: {req.theme!r}. Must be one of {list(THEME_PRESETS.keys())}",
         )
 
-    # 1. theme prompt embedding (사용 안 해도 모델 워밍업 효과)
-    theme_prompt = THEME_PRESETS[theme]["theme_prompt"]
+    # 1. theme prompt embedding (모델 워밍업)
+    theme_prompt = THEME_PRESETS[req.theme]["theme_prompt"]
     _ = embed_text_query(theme_prompt)
 
-    # 2. DB 연결 확인
+    # 2. 사용자 사진 임베딩 (옵션)
+    user_image_emb: list[float] | None = None
+    if req.image_base64:
+        _b64 = req.image_base64.strip()
+        # 혹시 "data:image/...;base64,XXX" prefix 잔존 시 자동 제거
+        if _b64.startswith("data:"):
+            _comma = _b64.find(",")
+            if _comma >= 0:
+                _b64 = _b64[_comma + 1:]
+        try:
+            image_bytes = base64.b64decode(_b64, validate=False)
+        except Exception as e:
+            msg = (
+                f"image_base64 디코딩 실패: {type(e).__name__}: {e} "
+                f"(len={len(req.image_base64)}, head={req.image_base64[:40]!r})"
+            )
+            print(f"[/recommend ERROR] {msg}", flush=True)
+            raise HTTPException(400, msg)
+        try:
+            user_image_emb = embed_image_query(image_bytes)
+        except Exception as e:
+            import traceback as _tb
+            tb_str = _tb.format_exc()
+            msg = (
+                f"image_base64 임베딩 실패 (PIL/모델): {type(e).__name__}: {e} "
+                f"(bytes_len={len(image_bytes)}, b64_head={req.image_base64[:40]!r})"
+            )
+            print(f"[/recommend ERROR] {msg}\n{tb_str}", flush=True)
+            raise HTTPException(400, msg)
+
+    # 3. DB 연결 확인
     try:
         conn = get_db_connection()
         conn.close()
     except Exception as e:
         raise HTTPException(500, f"DB 연결 실패: {e}")
 
-    # 3. 카테고리별 후보 검색
+    # 4. 카테고리별 후보 검색
     all_categories = MANDATORY_CATEGORIES + OPTIONAL_CATEGORIES
     raw_by_category: dict[str, list[ScoredProduct]] = {}
     for category in all_categories:
-        products = retrieve_candidates(theme, category)
+        products = retrieve_candidates(req.theme, category, user_image_embedding=user_image_emb)
         scored: list[ScoredProduct] = []
         for p in products:
-            te = compute_theme_evidence(p, theme)
+            te = compute_theme_evidence(p, req.theme)
             scored.append(ScoredProduct(
                 product=p, theme_evidence=te, value_score=0.0, item_score=0.0,
             ))
         raw_by_category[category] = scored
 
-    # 4. ValueScore 정규화 + ItemScore
+    # 5. ValueScore 정규화 + ItemScore
     normalize_value_scores(raw_by_category)
     for scored_list in raw_by_category.values():
         for sp in scored_list:
@@ -117,9 +156,9 @@ def recommend(
             )
         scored_list.sort(key=lambda sp: sp.item_score, reverse=True)
 
-    # 5. Beam search로 TOP-K 추천
+    # 6. Beam search로 TOP-K 추천
     bundles = recommend_setup(
-        theme=theme, budget=budget,
+        theme=req.theme, budget=req.budget,
         candidates_by_category=raw_by_category,
         beam_size=BEAM_SIZE_DEFAULT,
         top_m=TOP_M_DEFAULT,
@@ -132,9 +171,10 @@ def recommend(
             "유효한 추천 결과 없음. 예산을 높이거나 다른 테마를 시도하세요.",
         )
 
-    # 6. TOP 1 setup 반환 (config의 TOP_K_DEFAULT=1)
+    # 7. TOP 1 setup 반환 (config의 TOP_K_DEFAULT=1)
     return {
-        "theme":  theme,
-        "budget": budget,
+        "theme":  req.theme,
+        "budget": req.budget,
+        "image_used": user_image_emb is not None,
         "setup":  _bundle_to_setup_dict(bundles[0]),
     }

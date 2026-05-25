@@ -26,6 +26,7 @@ from deskterior.recommender.config import (
     OPTIONAL_CATEGORIES,
     ROLE_PAIR_WEIGHTS,
     OPTIONAL_GAIN_THRESHOLD,
+    USER_IMAGE_BLEND_WEIGHT,
 )
 from deskterior.retrieval.searcher import embed_text_query
 from deskterior.core.config import DB_CONFIG
@@ -171,9 +172,24 @@ def _apply_exclude_filter(products: list[Product], category: str) -> list[Produc
     ]
 
 
-def retrieve_candidates(theme: str, category: str, limit: int = CANDIDATE_LIMIT) -> list[Product]:
+def retrieve_candidates(
+    theme: str,
+    category: str,
+    user_image_embedding: list[float] | None = None,
+    limit: int = CANDIDATE_LIMIT,
+) -> list[Product]:
+    # 카테고리 텍스트 쿼리 임베딩 + (옵션) 사용자 책상 정면 사진 임베딩 가중 평균
     query_text = THEME_CATEGORY_QUERIES[theme][category]
-    query_embedding = embed_text_query(query_text)
+    text_emb = np.array(embed_text_query(query_text), dtype=np.float32)
+
+    if user_image_embedding is not None:
+        img_emb = np.array(user_image_embedding, dtype=np.float32)
+        blended = (1.0 - USER_IMAGE_BLEND_WEIGHT) * text_emb + USER_IMAGE_BLEND_WEIGHT * img_emb
+        norm = float(np.linalg.norm(blended))
+        query_embedding = (blended / norm).tolist() if norm > 1e-9 else text_emb.tolist()
+    else:
+        query_embedding = text_emb.tolist()
+
     return search_products_by_vector(category, query_embedding, limit)
 
 

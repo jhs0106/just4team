@@ -10,6 +10,12 @@ TOP_M_DEFAULT = 10
 TOP_K_DEFAULT = 1
 ALLOW_THEME_GATE_FALLBACK = True
 
+# 사용자 책상 사진 임베딩과 카테고리 텍스트 쿼리 임베딩의 가중 평균 비율.
+# query = (1 - W) * text_emb + W * user_image_emb 후 L2 정규화.
+# 0.0 = 사진 무시(테마 텍스트만), 1.0 = 사진만(테마 무시).
+# 0.4 = 테마 의도(0.6) 우선하되 사용자 책상 분위기 반영.
+USER_IMAGE_BLEND_WEIGHT = 0.4
+
 # 5종 모두 필수 (사용자 명세). DESK_LAMP/HEADSET 제외.
 MANDATORY_CATEGORIES = ["MONITOR", "KEYBOARD", "MOUSE", "MOUSEPAD", "SPEAKER"]
 

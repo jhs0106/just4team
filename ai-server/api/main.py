@@ -255,39 +255,51 @@ _RECOMMENDATION_API_URL = os.getenv("RECOMMENDATION_API_URL", "http://127.0.0.1:
 async def recommend_and_generate(req: RecommendAndGenerateRequest):
     from .adapters.recommendation_bridge import setup_to_generate_request
 
-    # 1. 추천 서버 호출
+    # 1. 추천 서버 호출 — 사용자 정면 사진을 함께 전달해 사진 임베딩 기반 검색
     try:
-        rec_resp = _requests.get(
+        rec_resp = _requests.post(
             f"{_RECOMMENDATION_API_URL}/recommend",
-            params={"theme": req.theme, "budget": req.budget},
+            json={
+                "theme":        req.theme,
+                "budget":       req.budget,
+                "image_base64": req.image_base64,
+            },
             timeout=180,
         )
-        rec_resp.raise_for_status()
     except _requests.RequestException as e:
-        raise HTTPException(503, f"추천 서버 호출 실패: {e}")
+        raise HTTPException(503, f"추천 서버 연결 실패: {e}")
+
+    if rec_resp.status_code >= 400:
+        # 추천 서버 detail(JSON.detail) 또는 raw body를 그대로 노출 — 디버깅 가능하도록
+        try:
+            _detail = rec_resp.json().get("detail") or rec_resp.text
+        except Exception:
+            _detail = rec_resp.text
+        raise HTTPException(
+            502,
+            f"추천 서버 {rec_resp.status_code}: {_detail}",
+        )
 
     setup = rec_resp.json().get("setup")
     if not setup:
         raise HTTPException(502, "추천 서버 응답에 setup 없음")
 
-    # 2a. top_view 자동 보충: 없으면 default desk_top_image2.jpg 사용.
-    # 이유: top_view 있어야 placement.py의 ranker/scoring 알고리즘 동작.
-    #   없으면 main.py fallback (_match_products_to_detections + _calc_regions)으로 가서
-    #   우리가 만든 배치 알고리즘이 무시됨. 데모 안정성 위해 default 보충.
+    # 2a. top_view 처리: 모드 무관 항상 필수.
+    # 사용자가 안 주면 즉시 400 에러 (default 폴백 X — 다른 책상 분석으로 인한 잘못된 결과 방지)
     _top_view_b64 = req.top_view_image_base64
-    _top_view_source = "user_provided"
     if not _top_view_b64:
-        import base64 as _b64
-        _default_tv = Path(__file__).parent.parent / "data" / "test" / "desk_top_image2.jpg"
-        if _default_tv.exists():
-            _top_view_b64 = _b64.b64encode(_default_tv.read_bytes()).decode()
-            _top_view_source = "default_fallback"
-            print(f"[recommend-and-generate] top_view 미제공 → default {_default_tv.name} 자동 사용 "
-                  "(placement_scoring 활성화)")
-        else:
-            _top_view_source = "none"
-            print(f"[recommend-and-generate] top_view 없고 default도 없음 → "
-                  "fallback 배치 사용 (ranker 미적용)")
+        raise HTTPException(
+            400,
+            "top_view 사진이 필요합니다. 모든 모드에서 사용자 책상의 top-view 사진이 필수입니다.",
+        )
+    _top_view_source = "user_provided"
+
+    # desk_width_mm/depth_mm도 필수 (사진만으론 실측 mm 불가)
+    if req.desk_width_mm is None or req.desk_depth_mm is None:
+        raise HTTPException(
+            400,
+            "desk_width_mm과 desk_depth_mm은 필수입니다. (사용자가 입력한 cm × 10)",
+        )
 
     # 2b. setup → GenerateRequest 변환 (style_mapper가 theme 자동 인식)
     try:
@@ -336,30 +348,74 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
 
 
 def extract_desk_top_band(mask_np: np.ndarray) -> tuple | None:
-    # SAM2 mask에서 책상 윗면 띠만 추출 (다리/받침대 제외).
-    # 알고리즘: row별 white pixel 폭의 분포에 Otsu's threshold 적용.
-    #   - 책상 윗면: 폭 매우 넓음 (peak1)
-    #   - 책상 다리: 폭 좁음 (peak2)
-    #   - Otsu가 두 그룹 사이 valley를 데이터에서 자동 도출 → 하드코딩 X
-    # 가장 긴 연속 wide-row run = 책상 윗면 띠.
-    h, w = mask_np.shape
+    # SAM2 mask에서 책상 윗면 사다리꼴 전체 추출 (다리/받침대 제외).
+    #
+    # 책상 윗면 == 사다리꼴: 위쪽 가장자리(짧음) → 아래쪽 가장자리(길음) 점진 증가/감소.
+    # 책상 다리 == 윗면 아래쪽에서 폭이 급격히 감소.
+    # → row별 폭의 derivative(차이)에서 "가장 큰 단일 감소" 위치 = 다리 시작점.
+    #
+    # 이전 알고리즘(Otsu)은 사다리꼴 옆면(점진 감소 구간)을 다리와 같은 그룹으로 묶어버려
+    # 윗면 위쪽 좁은 띠만 추출되는 문제 있었음. derivative 방식은 점진/급격 변화를 구분.
+    #
+    # 데이터 기반 자동 — 사다리꼴 모양/사진 시점에 따라 자동 적응.
     bin_mask   = (mask_np > 127).astype(np.uint8)
     row_widths = bin_mask.sum(axis=1).astype(np.float32)
     if row_widths.max() == 0:
         return None
 
-    # row_widths를 0-255 uint8로 정규화 후 Otsu 적용
-    row_widths_norm = (row_widths / row_widths.max() * 255).astype(np.uint8)
+    valid = np.where(row_widths > 0)[0]
+    if len(valid) < 5:
+        return None
+    y_top = int(valid[0])  # 책상 윗면 위쪽 가장자리
+
+    # y_top부터 mask 끝까지 row 폭 변화량 (음수 = 폭 감소)
+    section     = row_widths[y_top:int(valid[-1]) + 1]
+    derivatives = np.diff(section)  # i번째 = section[i+1] - section[i]
+
+    # 가장 큰 단일 감소 위치 = 다리 시작 직전 row
+    biggest_drop_idx = int(np.argmin(derivatives))
+    biggest_drop_val = float(derivatives[biggest_drop_idx])
+
+    # 감소가 미미하면 (윗면이 mask 전체) Otsu fallback
+    # 기준: 평균 행 폭의 20% 이상 한 번에 감소 = 다리 경계
+    avg_width = float(row_widths.mean())
+    if -biggest_drop_val < avg_width * 0.2:
+        return _otsu_band_fallback(mask_np, y_top, int(valid[-1]))
+
+    y_bottom = y_top + biggest_drop_idx
+
+    if y_bottom - y_top < 5:
+        return _otsu_band_fallback(mask_np, y_top, int(valid[-1]))
+
+    band       = mask_np[y_top:y_bottom + 1]
+    xs_in_band = np.where((band > 127).any(axis=0))[0]
+    if len(xs_in_band) == 0:
+        return None
+    x_min, x_max = int(xs_in_band.min()), int(xs_in_band.max())
+
+    print(f"  [DeskBand] derivative-based: y_top={y_top} y_bottom={y_bottom} "
+          f"dh={y_bottom - y_top} drop={biggest_drop_val:.0f}px "
+          f"(avg_width={avg_width:.0f})")
+    return (x_min, y_top, x_max, y_bottom)
+
+
+def _otsu_band_fallback(mask_np: np.ndarray, y_start: int, y_end: int) -> tuple | None:
+    # derivative 방식 실패 시 fallback — Otsu로 wide row 그룹의 가장 긴 연속 run 추출.
+    bin_mask   = (mask_np > 127).astype(np.uint8)
+    row_widths = bin_mask.sum(axis=1).astype(np.float32)
+    section    = row_widths[y_start:y_end + 1]
+    if section.max() == 0:
+        return None
+    section_norm = (section / section.max() * 255).astype(np.uint8)
     thresh_val, _ = cv2.threshold(
-        row_widths_norm.reshape(-1, 1), 0, 255,
+        section_norm.reshape(-1, 1), 0, 255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
-    actual_threshold = (thresh_val / 255.0) * row_widths.max()
-    wide_rows = row_widths >= actual_threshold
+    actual_threshold = (thresh_val / 255.0) * section.max()
+    wide_rows = section >= actual_threshold
 
-    # 가장 긴 연속 True run 탐색
-    runs:       list[tuple[int, int]] = []
-    start_idx:  int | None             = None
+    runs: list[tuple[int, int]] = []
+    start_idx = None
     for i, v in enumerate(wide_rows):
         if v and start_idx is None:
             start_idx = i
@@ -370,16 +426,15 @@ def extract_desk_top_band(mask_np: np.ndarray) -> tuple | None:
         runs.append((start_idx, len(wide_rows) - 1))
     if not runs:
         return None
-
-    y_top, y_bottom = max(runs, key=lambda r: r[1] - r[0])
-
-    # 띠 내부의 x 범위
-    band_mask = (mask_np[y_top:y_bottom + 1] > 127)
-    xs_in_band = np.where(band_mask.any(axis=0))[0]
-    if len(xs_in_band) == 0:
+    rel_top, rel_bottom = max(runs, key=lambda r: r[1] - r[0])
+    y_top    = y_start + rel_top
+    y_bottom = y_start + rel_bottom
+    band     = mask_np[y_top:y_bottom + 1]
+    xs       = np.where((band > 127).any(axis=0))[0]
+    if len(xs) == 0:
         return None
-    x_min, x_max = int(xs_in_band.min()), int(xs_in_band.max())
-    return (x_min, y_top, x_max, y_bottom)
+    print(f"  [DeskBand] Otsu fallback: y_top={y_top} y_bottom={y_bottom} dh={y_bottom - y_top}")
+    return (int(xs.min()), y_top, int(xs.max()), y_bottom)
 
 
 def _run_generate(job_id: str, req: GenerateRequest):
@@ -642,117 +697,118 @@ def _run_generate(job_id: str, req: GenerateRequest):
         placement_items:    list[dict] = []
         _unplaced_for_json: list[dict] = []
 
-        if req.top_view_image_base64:
-            print(f"[Generate] desk_width_mm={req.desk_width_mm} desk_depth_mm={req.desk_depth_mm}")
-            top_image_for_place = b64_to_image(req.top_view_image_base64)
+        # === SAM2 책상 윗면 mask 추출 (mode=add + 클릭 좌표 있을 때) ===
+        # top-view 유무와 무관하게 항상 시도. 결과는 두 placement 경로에서 공통 사용.
+        _front_desk_bbox_override = None
+        _click_x = getattr(req, "desk_click_x", None)
+        _click_y = getattr(req, "desk_click_y", None)
+        if mode == RemoveMode.add and _click_x is not None and _click_y is not None:
+            try:
+                from .sam2_processor import get_sam2_processor, b64_to_image as _sam_b2i
+                _sam = get_sam2_processor()
+                _px = int(_click_x * current.size[0])
+                _py = int(_click_y * current.size[1])
+                print(f"[DeskClick] add mode + click=({_click_x:.3f},{_click_y:.3f}) "
+                      f"→ pixel=({_px},{_py}) → SAM2 segment")
+                _sam_result = _sam.segment(
+                    image=current, points=[[_px, _py]], point_labels=[1],
+                )
+                _desk_mask_pil = _sam_b2i(_sam_result["mask"]).convert("L")
+                _desk_mask_np  = np.array(_desk_mask_pil)
+                _desk_mask_pil.save(_debug_dir / "front_desk_click_mask.png")
 
-            # 빈 책상 모드(add) + 사용자 클릭 좌표 → SAM2로 책상 윗면 mask → bbox 추출.
-            # 검은 책상 등 DINO만으로 책상 윗면 인식 실패 케이스 보정.
-            _front_desk_bbox_override = None
-            _click_x = getattr(req, "desk_click_x", None)
-            _click_y = getattr(req, "desk_click_y", None)
-            if mode == RemoveMode.add and _click_x is not None and _click_y is not None:
-                try:
-                    from .sam2_processor import get_sam2_processor, b64_to_image as _sam_b2i
-                    _sam = get_sam2_processor()
-                    _px = int(_click_x * current.size[0])
-                    _py = int(_click_y * current.size[1])
-                    print(f"[DeskClick] add mode + click=({_click_x:.3f},{_click_y:.3f}) "
-                          f"→ pixel=({_px},{_py}) → SAM2 segment")
-                    _sam_result = _sam.segment(
-                        image=current, points=[[_px, _py]], point_labels=[1],
-                    )
-                    _desk_mask_pil = _sam_b2i(_sam_result["mask"]).convert("L")
-                    _desk_mask_np  = np.array(_desk_mask_pil)
-                    _desk_mask_pil.save(_debug_dir / "front_desk_click_mask.png")
-
-                    _ys, _xs = np.where(_desk_mask_np > 127)
-                    if len(_xs) == 0:
-                        print("[DeskClick] SAM2 mask empty — fallback to default desk detection")
-                    else:
-                        _full_bbox = (int(_xs.min()), int(_ys.min()),
-                                      int(_xs.max()), int(_ys.max()))
-                        # SAM이 책상 다리까지 한 mask로 잡는 케이스 대응 — Otsu로 책상 윗면 띠만 추출
-                        _band = extract_desk_top_band(_desk_mask_np)
-                        if _band is not None:
-                            _front_desk_bbox_override = _band
-                            # 추출된 band 시각화 (debug)
-                            _band_img = np.zeros_like(_desk_mask_np)
-                            _band_img[_band[1]:_band[3] + 1, _band[0]:_band[2] + 1] = 255
-                            Image.fromarray(_band_img).save(
-                                _debug_dir / "front_desk_top_band.png"
-                            )
-                            print(f"[DeskClick] SAM2 full bbox={_full_bbox} → "
-                                  f"Otsu band={_band} "
-                                  f"(dh: {_full_bbox[3]-_full_bbox[1]} → {_band[3]-_band[1]})")
-                        else:
-                            _front_desk_bbox_override = _full_bbox
-                            print(f"[DeskClick] Otsu band extraction failed → "
-                                  f"fallback to SAM full bbox = {_full_bbox}")
-                except Exception as _e:
-                    print(f"[DeskClick] SAM2 호출 실패: {_e} — fallback to default")
-
-            _all_space_results  = calc_placements_from_available_space(
-                front_image=current,
-                top_view_image=top_image_for_place,
-                products=products,
-                desk_width_mm=req.desk_width_mm,
-                desk_depth_mm=req.desk_depth_mm,
-                mode=mode,
-                remover=remover,
-                debug_dir=_debug_dir,
-                front_desk_bbox_override=_front_desk_bbox_override,
-            )
-
-            _scored_items = [i for i in _all_space_results if i.get("region") is not None]
-            _failed_items = [i for i in _all_space_results if i.get("region") is None]
-            _failed_meta  = {id(i["product"]): i for i in _failed_items}
-
-            _deduped: list[dict] = []
-            for _item in _scored_items:
-                _cat = normalize_category(_item["product"].category)
-                # dedup도 _OVERLAP_TOLERANCE 따름 (MOUSE↔MOUSEPAD 같은 의도된 겹침 허용)
-                if all(
-                    bbox_iou(_item["region"], _prev["region"])
-                    < _overlap_threshold(_cat, normalize_category(_prev["product"].category))
-                    for _prev in _deduped
-                ):
-                    _deduped.append(_item)
+                _ys, _xs = np.where(_desk_mask_np > 127)
+                if len(_xs) == 0:
+                    print("[DeskClick] SAM2 mask empty — fallback to default desk detection")
                 else:
-                    print(f"[Placement SKIP] internal overlap: {_cat} {_item['region']}")
-            placement_items = _deduped
-
-            _failed_products = [i["product"] for i in _failed_items]
-            if _failed_products:
-                _desk_bbox_fb  = _detect_desk_bbox(current)
-                _raw_fallback  = _calc_regions(img_w, img_h, _failed_products, _desk_bbox_fb, req.desk_width_mm)
-                _added = 0
-                for _fi in _raw_fallback:
-                    _fi_cat  = normalize_category(_fi["product"].category)
-                    _fi_meta = _failed_meta.get(id(_fi["product"]), {})
-                    _fi.update({
-                        "placement_source":    "fallback",
-                        "fallback_reason":     _fi_meta.get("fallback_reason"),
-                        "candidate_count":     _fi_meta.get("candidate_count", 0),
-                        "score":               None,
-                        "available_region_id": None,
-                        "anchor_rx":           None,
-                        "anchor_ry":           None,
-                    })
-                    if all(
-                        bbox_iou(_fi["region"], _prev["region"])
-                        < _overlap_threshold(_fi_cat, normalize_category(_prev["product"].category))
-                        for _prev in placement_items
-                    ):
-                        placement_items.append(_fi)
-                        _added += 1
+                    _full_bbox = (int(_xs.min()), int(_ys.min()),
+                                  int(_xs.max()), int(_ys.max()))
+                    # SAM이 책상 다리까지 한 mask로 잡는 케이스 대응 — Otsu로 책상 윗면 띠만 추출
+                    _band = extract_desk_top_band(_desk_mask_np)
+                    if _band is not None:
+                        _front_desk_bbox_override = _band
+                        _band_img = np.zeros_like(_desk_mask_np)
+                        _band_img[_band[1]:_band[3] + 1, _band[0]:_band[2] + 1] = 255
+                        Image.fromarray(_band_img).save(
+                            _debug_dir / "front_desk_top_band.png"
+                        )
+                        print(f"[DeskClick] SAM2 full bbox={_full_bbox} → "
+                              f"Otsu band={_band} "
+                              f"(dh: {_full_bbox[3]-_full_bbox[1]} → {_band[3]-_band[1]})")
                     else:
-                        print(f"[Placement SKIP] overlap: {_fi_cat} {_fi['region']}")
-                print(f"[Generate] space-fail {len(_failed_products)}개 → fallback {_added}개 추가")
+                        _front_desk_bbox_override = _full_bbox
+                        print(f"[DeskClick] Otsu band extraction failed → "
+                              f"fallback to SAM full bbox = {_full_bbox}")
+            except Exception as _e:
+                print(f"[DeskClick] SAM2 호출 실패: {_e} — fallback to default")
 
-            _placed_ids        = {id(i["product"]) for i in placement_items}
-            _unplaced_for_json = [i for i in _failed_items if id(i["product"]) not in _placed_ids]
-            print(f"[Generate] available_space 배치: {len(placement_items)}개")
+        # === Placement: top-view 항상 받으므로 단일 경로 ===
+        # top-view는 main.py 진입 단계에서 필수 검증됨 → 여기 도달 시 항상 존재.
+        # SAM2 클릭 mask가 있으면 front_desk_bbox_override로 활용 (검은 책상 등 DINO 약한 케이스 보정).
+        print(f"[Generate] desk_width_mm={req.desk_width_mm} desk_depth_mm={req.desk_depth_mm}")
+        top_image_for_place = b64_to_image(req.top_view_image_base64)
+        _all_space_results  = calc_placements_from_available_space(
+            front_image=current,
+            top_view_image=top_image_for_place,
+            products=products,
+            desk_width_mm=req.desk_width_mm,
+            desk_depth_mm=req.desk_depth_mm,
+            mode=mode,
+            remover=remover,
+            debug_dir=_debug_dir,
+            front_desk_bbox_override=_front_desk_bbox_override,
+        )
+
+        # === dedup + space-fail fallback (분기 공통) ===
+        _scored_items = [i for i in _all_space_results if i.get("region") is not None]
+        _failed_items = [i for i in _all_space_results if i.get("region") is None]
+        _failed_meta  = {id(i["product"]): i for i in _failed_items}
+
+        _deduped: list[dict] = []
+        for _item in _scored_items:
+            _cat = normalize_category(_item["product"].category)
+            # dedup도 _OVERLAP_TOLERANCE 따름 (MOUSE↔MOUSEPAD 같은 의도된 겹침 허용)
+            if all(
+                bbox_iou(_item["region"], _prev["region"])
+                < _overlap_threshold(_cat, normalize_category(_prev["product"].category))
+                for _prev in _deduped
+            ):
+                _deduped.append(_item)
+            else:
+                print(f"[Placement SKIP] internal overlap: {_cat} {_item['region']}")
+        placement_items = _deduped
+
+        _failed_products = [i["product"] for i in _failed_items]
+        if _failed_products:
+            _desk_bbox_fb  = _detect_desk_bbox(current)
+            _raw_fallback  = _calc_regions(img_w, img_h, _failed_products, _desk_bbox_fb, req.desk_width_mm)
+            _added = 0
+            for _fi in _raw_fallback:
+                _fi_cat  = normalize_category(_fi["product"].category)
+                _fi_meta = _failed_meta.get(id(_fi["product"]), {})
+                _fi.update({
+                    "placement_source":    "fallback",
+                    "fallback_reason":     _fi_meta.get("fallback_reason"),
+                    "candidate_count":     _fi_meta.get("candidate_count", 0),
+                    "score":               None,
+                    "available_region_id": None,
+                    "anchor_rx":           None,
+                    "anchor_ry":           None,
+                })
+                if all(
+                    bbox_iou(_fi["region"], _prev["region"])
+                    < _overlap_threshold(_fi_cat, normalize_category(_prev["product"].category))
+                    for _prev in placement_items
+                ):
+                    placement_items.append(_fi)
+                    _added += 1
+                else:
+                    print(f"[Placement SKIP] overlap: {_fi_cat} {_fi['region']}")
+            print(f"[Generate] space-fail {len(_failed_products)}개 → fallback {_added}개 추가")
+
+        _placed_ids        = {id(i["product"]) for i in placement_items}
+        _unplaced_for_json = [i for i in _failed_items if id(i["product"]) not in _placed_ids]
+        print(f"[Generate] available_space 배치: {len(placement_items)}개")
 
         if not placement_items:
             desk_bbox = _detect_desk_bbox(current)

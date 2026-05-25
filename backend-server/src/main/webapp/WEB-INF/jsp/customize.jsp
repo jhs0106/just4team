@@ -217,16 +217,14 @@
 
                                                 <div class="row g-3">
 
-                                                    <div class="col-md-4">
-                                                        <input type="number" class="form-control" name="width" placeholder="Width (cm)">
+                                                    <div class="col-md-6">
+                                                        <input type="number" class="form-control" name="width"
+                                                               placeholder="Width (cm) *" required min="1">
                                                     </div>
 
-                                                    <div class="col-md-4">
-                                                        <input type="number" class="form-control" name="depth" placeholder="Depth (cm)">
-                                                    </div>
-
-                                                    <div class="col-md-4">
-                                                        <input type="number" class="form-control" name="height" placeholder="Height (cm)">
+                                                    <div class="col-md-6">
+                                                        <input type="number" class="form-control" name="depth"
+                                                               placeholder="Depth (cm) *" required min="1">
                                                     </div>
 
                                                     <div class="col-12">
@@ -514,9 +512,23 @@ document.addEventListener("DOMContentLoaded", () => {
     updateClickUI();
 });
 
-// 폼 submit 직전: 빈 책상 모드면 클릭 필수 검증
+// 폼 submit 직전: 필수 입력 검증 (top-view, 정면 사진, 빈 책상 모드면 클릭)
 document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("customizeForm").addEventListener("submit", (ev) => {
+        const frontData = document.getElementById("frontImageData").value;
+        if (!frontData) {
+            ev.preventDefault();
+            alert("정면 책상 사진을 업로드해주세요.");
+            document.getElementById("previewFront").scrollIntoView({behavior: "smooth"});
+            return;
+        }
+        const topData = document.getElementById("topImageData").value;
+        if (!topData) {
+            ev.preventDefault();
+            alert("위에서 본 책상 사진(top-view)도 필수입니다. 업로드해주세요.");
+            document.getElementById("previewTop").scrollIntoView({behavior: "smooth"});
+            return;
+        }
         if (isEmptyDeskMode()) {
             const cx = document.getElementById("deskClickX").value;
             if (!cx) {

@@ -12,6 +12,7 @@ from .config import (
     _FRONT_HEIGHT_RATIO, _DESK_W_RATIO,
     _DINO_LABEL_TO_CATEGORY, _RANKER_CAT_ID, _RANKER_SKIP_CATS,
     _FRONT_CATS, _BACK_CATS, _REMOVAL_PROMPT, _CAT_RY_RANGE,
+    _PRODUCT_FORM_TIER,
 )
 from .utils import normalize_category
 from .composite import _detect_desk_bbox, _calc_regions
@@ -99,6 +100,8 @@ def _front_bbox_for_anchor(
     fv_dw: int, fv_dh: int, fv_w: int, fv_h: int,
     desk_width_mm: int | None,
     relation_state: dict,
+    d_mm: int | None = None,           # 제품 depth (mm, 책상 안쪽 방향). flat 카테고리 fv_ph 계산용.
+    desk_depth_mm: int | None = None,  # 책상 depth (mm, 사용자 입력). flat 카테고리 perspective용.
 ) -> tuple[int, int, int, int] | None:
     # ranker가 선택한 (rx, ry)를 front-view bbox로 변환.
     # ry는 카테고리별 안전 범위(_CAT_RY_RANGE)로 clamp하여 비현실적 배치 방지.
@@ -108,10 +111,19 @@ def _front_bbox_for_anchor(
     ry_min, ry_max = _CAT_RY_RANGE.get(cat, (0.10, 0.85))
     ry_clamped     = max(ry_min, min(ry_max, ry))
 
-    # 2. 픽셀 크기 계산 (perspective scale은 clamp된 ry 사용)
+    # 2. 픽셀 크기 계산 — 제품 width_mm/depth_mm를 책상 가로 px_per_mm로 그대로 변환
+    # desk_width_mm은 main.py에서 None 체크 후 도착 → 여기 도달 시 항상 정수.
+    # 안전판으로만 1mm 최소값 (0 division 방지).
     ps = 0.60 + 0.40 * ry_clamped
-    fv_pw = max(40, min(int(w_mm * fv_dw / (desk_width_mm or 1200) * ps), int(fv_dw * 0.65)))
-    fv_ph = max(20, int(fv_pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80)))
+    _desk_w_mm_safe = max(1, int(desk_width_mm)) if desk_width_mm else 1
+    _px_per_mm = fv_dw / _desk_w_mm_safe
+    fv_pw = max(40, min(int(w_mm * _px_per_mm * ps), int(fv_dw * 0.65)))
+    if d_mm:
+        fv_ph = max(20, int(int(d_mm) * _px_per_mm * ps))
+    else:
+        # depth_mm 정보가 없으면 정사각 가정
+        fv_ph = max(20, int(fv_pw * 0.5))
+
     min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
     fv_pw = max(fv_pw, min_w)
     fv_ph = max(fv_ph, min_h)
@@ -129,8 +141,7 @@ def _front_bbox_for_anchor(
             fv_pw = max(140, min(_natural_pw, int(fv_dw * 0.50)))
         else:
             fv_pw = max(min(int(fv_dw * 0.30), 280), 180)
-        # height 비율 0.20 → 0.28 (일반 키보드 자연 비율에 가깝게)
-        fv_ph = max(int(fv_pw * 0.28), 40)
+        # fv_ph는 위 perspective 계산 결과 유지 (옛 magic 0.28 제거).
         if "monitor_rx" in relation_state:
             _rx_adj = relation_state["monitor_rx"]  # 키보드는 모니터 가로축 정렬
     elif cat == "DESK_SHELF":
@@ -151,9 +162,10 @@ def _front_bbox_for_anchor(
         fv_ph = max(fv_ph, 45)
     elif cat == "MOUSE":
         fv_pw = max(fv_pw, 60)
-        fv_ph = max(int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"]), 45)
+        # fv_ph는 perspective 계산 결과 유지 (옛 magic 0.75 제거).
     elif cat == "MOUSEPAD":
-        fv_ph = int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSEPAD"])
+        # fv_ph는 perspective 계산 결과 유지 (옛 magic 0.25 제거).
+        pass
     elif cat == "LIGHTING":
         # 모니터 위 가로 라이트바 — 모니터 가로폭과 비슷하게, 매우 얇음
         if "monitor_rx" in relation_state:
@@ -642,6 +654,7 @@ def calc_placements_from_available_space(
     for p in sorted_products:
         cat  = normalize_category(p.category)
         w_mm = getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
+        d_mm = getattr(p, "depth_mm", None) or _CATEGORY_DIMS_MM[cat][1]
 
         best_score       = -999.0
         best_cand        = None
@@ -667,6 +680,7 @@ def calc_placements_from_available_space(
                     cat, rx, ry, w_mm,
                     fv_dx1, fv_dy1, fv_dx2, fv_dy2, fv_dw, fv_dh, fv_w, fv_h,
                     desk_width_mm, relation_state,
+                    d_mm=d_mm, desk_depth_mm=desk_depth_mm,
                 )
                 if fv_bbox is None:
                     continue
@@ -698,6 +712,7 @@ def calc_placements_from_available_space(
                     cat, _forced_rx, _fry, w_mm,
                     fv_dx1, fv_dy1, fv_dx2, fv_dy2, fv_dw, fv_dh, fv_w, fv_h,
                     desk_width_mm, relation_state,
+                    d_mm=d_mm, desk_depth_mm=desk_depth_mm,
                 )
                 if _fb is None:
                     continue
