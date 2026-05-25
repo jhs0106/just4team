@@ -42,6 +42,9 @@ public class CustomizeController {
             @RequestParam("style")  String style,
             @RequestParam(value = "prompt", required = false) String prompt,
             @RequestParam("budget") String budget,
+            @RequestParam(value = "deskMode", required = false, defaultValue = "own_desk") String deskMode,
+            @RequestParam(value = "deskClickX", required = false) String deskClickXStr,
+            @RequestParam(value = "deskClickY", required = false) String deskClickYStr,
 
             @RequestParam(value = "frontFile", required = false) MultipartFile frontFile,
             @RequestParam(value = "topFile",   required = false) MultipartFile topFile,
@@ -77,9 +80,31 @@ public class CustomizeController {
             Integer widthMm = parseCmToMm(width);
             Integer depthMm = parseCmToMm(depth);
 
-            // 5. ai-server 호출 → job_id
+            // 5. deskMode 정규화 — ai-server RemoveMode enum과 일치하는 값만 허용
+            String mode = deskMode == null ? "own_desk" : deskMode.trim();
+            if (!mode.equals("add") && !mode.equals("own_desk")
+                && !mode.equals("replace") && !mode.equals("empty_desk")) {
+                mode = "own_desk";
+            }
+
+            // 6. 빈 책상 모드면 클릭 좌표 파싱 (없거나 잘못된 형식이면 null → ai-server가 default DINO 사용)
+            Double clickX = null, clickY = null;
+            if ("add".equals(mode)) {
+                try {
+                    if (deskClickXStr != null && !deskClickXStr.isBlank()
+                     && deskClickYStr != null && !deskClickYStr.isBlank()) {
+                        double cx = Double.parseDouble(deskClickXStr);
+                        double cy = Double.parseDouble(deskClickYStr);
+                        if (cx >= 0.0 && cx <= 1.0 && cy >= 0.0 && cy <= 1.0) {
+                            clickX = cx; clickY = cy;
+                        }
+                    }
+                } catch (NumberFormatException ignore) {}
+            }
+
+            // 7. ai-server 호출 → job_id
             String jobId = aiServerClient.submitRecommendAndGenerate(
-                    theme, budgetInt, frontB64, topB64, widthMm, depthMm
+                    theme, budgetInt, frontB64, topB64, widthMm, depthMm, mode, clickX, clickY
             );
 
             return "redirect:/result?jobId=" + jobId;

@@ -114,8 +114,11 @@
                 const status = data.status || "unknown";
                 const placed = data.num_placed || 0;
                 const removed = data.num_removed || 0;
-                progressStatus.textContent =
-                    "상태: " + status + " (제거 " + removed + " / 배치 " + placed + "/5)";
+                // 빈 책상 모드(add)에서는 제거 단계가 없으므로 "제거 N" 표시 생략
+                const isEmptyMode = data.mode === "add";
+                progressStatus.textContent = isEmptyMode
+                    ? ("상태: " + status + " (배치 " + placed + "/5)")
+                    : ("상태: " + status + " (제거 " + removed + " / 배치 " + placed + "/5)");
 
                 if (status === "done") {
                     if (!data.result_image) {

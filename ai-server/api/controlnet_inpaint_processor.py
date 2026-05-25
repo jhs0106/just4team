@@ -512,6 +512,16 @@ class ControlNetInpaintProcessor:
         cn_scales_override: list | None = None,
         lora_scale_override: float | None = None,
     ) -> Image.Image:
+        # 안전판: pipe가 GPU에 없으면 다시 올림.
+        # 외부에서 pipe.to("cpu") 같은 거 호출했을 때 다음 호출 hang 방지.
+        try:
+            _pipe_dev = str(next(self.pipe.unet.parameters()).device)
+            if _pipe_dev != self.device:
+                print(f"  [generate_product] pipe device={_pipe_dev} → {self.device} 이동")
+                self.pipe.to(self.device)
+        except Exception:
+            pass
+
         iw, ih = image.size
         cat = category.upper()
 

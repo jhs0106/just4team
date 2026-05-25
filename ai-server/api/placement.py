@@ -462,6 +462,7 @@ def calc_placements_from_available_space(
     mode,
     remover=None,
     debug_dir: Path | None = None,
+    front_desk_bbox_override: tuple | None = None,  # (x1,y1,x2,y2) — SAM2 클릭 mask에서 추출한 책상 윗면 bbox
 ) -> list[dict]:
     import json as _dj
     from .space_analysis import (
@@ -561,12 +562,19 @@ def calc_placements_from_available_space(
     tv_dw = max(1, tv_dx2 - tv_dx1)
     tv_dh = max(1, tv_dy2 - tv_dy1)
 
-    fv_bbox_desk = _detect_desk_bbox(front_image)
-    if fv_bbox_desk:
-        fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox_desk
+    # 사용자 클릭 SAM2 mask로 책상 윗면 bbox가 명시되면 그걸 강제 사용 (DINO 무시).
+    # 빈 책상 모드(add)에서 검은 책상 등 DINO 인식 실패 케이스 보정용.
+    if front_desk_bbox_override is not None:
+        fv_dx1, fv_dy1, fv_dx2, fv_dy2 = front_desk_bbox_override
+        print(f"[Desk bbox] override (user click + SAM2): "
+              f"({fv_dx1},{fv_dy1},{fv_dx2},{fv_dy2})")
     else:
-        fv_dx1, fv_dy1 = 0, int(fv_h * 0.45)
-        fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.72)
+        fv_bbox_desk = _detect_desk_bbox(front_image)
+        if fv_bbox_desk:
+            fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox_desk
+        else:
+            fv_dx1, fv_dy1 = 0, int(fv_h * 0.45)
+            fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.72)
 
     # === 책상 bbox sanity clamps (2026-05-25 floating monitor 버그 대응) ===
     # 이전: dy2만 0.72 cap, dy1은 DINO 결과 그대로 사용.

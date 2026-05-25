@@ -107,6 +107,8 @@ class GenerateRequest(BaseModel):
     generation_mode:       str               = Field("controlnet", description="생성 모드: controlnet (기본, per-product SD+IP-Adapter+ControlNet+LoRA) | cv_composite (SD 미사용, 합성+그림자만) | placement_only (배치 시각화)")
     removal_strategy:      str               = Field("combined",   description="제거 방식: none | sequential | combined")
     top_view_source:       Optional[str]     = Field(None, description="top_view 출처: 'user_provided' | 'default_fallback' | 'none' (디버그 메타 기록용)")
+    desk_click_x:          Optional[float]   = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add)에서 사용자가 클릭한 책상 윗면 x 좌표 (front-view 기준, 0~1 정규화)")
+    desk_click_y:          Optional[float]   = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add)에서 사용자가 클릭한 책상 윗면 y 좌표 (front-view 기준, 0~1 정규화)")
 
 
 class RecommendedProduct(BaseModel):
@@ -122,6 +124,7 @@ class RecommendedProduct(BaseModel):
 class GenerateResult(BaseModel):
     job_id:           str
     status:           JobStatus
+    mode:             Optional[str] = None  # 'add' | 'own_desk' | 'replace' | 'empty_desk' — result.jsp가 진행 표시 분기에 사용
     cleaned_image:    Optional[str] = None  # Step 1: 물체 제거 후
     composited_image: Optional[str] = None  # Step 2: CV 합성 후
     result_image:     Optional[str] = None  # Step 3: SD refinement 후
@@ -143,3 +146,5 @@ class RecommendAndGenerateRequest(BaseModel):
     mode:                  RemoveMode    = Field(RemoveMode.own_desk)
     generation_mode:       str           = Field("controlnet")
     removal_strategy:      str           = Field("combined")
+    desk_click_x:          Optional[float] = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add) 시 SAM2 prompt용 클릭 x (0~1)")
+    desk_click_y:          Optional[float] = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add) 시 SAM2 prompt용 클릭 y (0~1)")

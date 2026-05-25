@@ -306,6 +306,9 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
             on_missing           = "skip",
         )
         gen_req.top_view_source = _top_view_source
+        # 빈 책상 모드용 클릭 좌표 전달 (SAM2 prompt로 사용)
+        gen_req.desk_click_x = req.desk_click_x
+        gen_req.desk_click_y = req.desk_click_y
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, f"setup → GenerateRequest 변환 실패: {e}")
 
@@ -343,6 +346,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
         image       = b64_to_image(req.image_base64)
         img_w, img_h = image.size
         mode        = req.mode
+
+        # result.jsp가 mode 따라 진행 표시 분기 (빈 책상이면 '제거' 안 보임)
+        job_store[job_id].mode = mode.value if hasattr(mode, "value") else str(mode)
 
         remover  = get_object_removal_processor()
         # LaMa 잔여물 방지 — DINO threshold 낮추고 mask dilation 키워 over-removal 유도.
@@ -592,6 +598,39 @@ def _run_generate(job_id: str, req: GenerateRequest):
         if req.top_view_image_base64:
             print(f"[Generate] desk_width_mm={req.desk_width_mm} desk_depth_mm={req.desk_depth_mm}")
             top_image_for_place = b64_to_image(req.top_view_image_base64)
+
+            # 빈 책상 모드(add) + 사용자 클릭 좌표 → SAM2로 책상 윗면 mask → bbox 추출.
+            # 검은 책상 등 DINO만으로 책상 윗면 인식 실패 케이스 보정.
+            _front_desk_bbox_override = None
+            _click_x = getattr(req, "desk_click_x", None)
+            _click_y = getattr(req, "desk_click_y", None)
+            if mode == RemoveMode.add and _click_x is not None and _click_y is not None:
+                try:
+                    from .sam2_processor import get_sam2_processor, b64_to_image as _sam_b2i
+                    _sam = get_sam2_processor()
+                    _px = int(_click_x * current.size[0])
+                    _py = int(_click_y * current.size[1])
+                    print(f"[DeskClick] add mode + click=({_click_x:.3f},{_click_y:.3f}) "
+                          f"→ pixel=({_px},{_py}) → SAM2 segment")
+                    _sam_result = _sam.segment(
+                        image=current, points=[[_px, _py]], point_labels=[1],
+                    )
+                    _desk_mask_pil = _sam_b2i(_sam_result["mask"]).convert("L")
+                    _desk_mask_np  = np.array(_desk_mask_pil)
+                    _ys, _xs = np.where(_desk_mask_np > 127)
+                    if len(_xs) > 0:
+                        _front_desk_bbox_override = (
+                            int(_xs.min()), int(_ys.min()),
+                            int(_xs.max()), int(_ys.max()),
+                        )
+                        # 클릭 mask 디버그 저장
+                        _desk_mask_pil.save(_debug_dir / "front_desk_click_mask.png")
+                        print(f"[DeskClick] SAM2 mask bbox = {_front_desk_bbox_override}")
+                    else:
+                        print("[DeskClick] SAM2 mask empty — fallback to default desk detection")
+                except Exception as _e:
+                    print(f"[DeskClick] SAM2 호출 실패: {_e} — fallback to default")
+
             _all_space_results  = calc_placements_from_available_space(
                 front_image=current,
                 top_view_image=top_image_for_place,
@@ -601,6 +640,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 mode=mode,
                 remover=remover,
                 debug_dir=_debug_dir,
+                front_desk_bbox_override=_front_desk_bbox_override,
             )
 
             _scored_items = [i for i in _all_space_results if i.get("region") is not None]
@@ -867,7 +907,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
             print(f"  [Generate] 처리: {p.category} image_id={p.image_id} region={item['region']}")
             _run_cn(p, *item["region"])
 
-        cn_proc.pipe.to("cpu")
+        # SD pipeline은 GPU에 상주시킴 (init 주석 참조).
+        # 이전 코드: cn_proc.pipe.to("cpu") + empty_cache → 2번째 호출 시 pipe가 CPU에
+        # 남아 SD inference가 CPU에서 hang. 메모리 절약 의도였으나 12GB에 여유 있음.
         torch.cuda.empty_cache()
 
         print(f"[Generate] num_placed={num_placed}")

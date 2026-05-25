@@ -45,13 +45,18 @@ public class AiServerClient {
 
     // POST /recommend-and-generate → job_id 반환.
     // deskWidthMm / deskDepthMm null이면 application.properties default 사용.
+    // modeNullable: add | own_desk | replace | empty_desk (null이면 ai-server default = own_desk)
+    // deskClickX/Y: 빈 책상 모드(add)에서 SAM2 prompt용 클릭 좌표 (0~1 정규화)
     public String submitRecommendAndGenerate(
             String theme,
             int budget,
             String frontImageBase64,
             String topImageBase64Nullable,
             Integer deskWidthMmNullable,
-            Integer deskDepthMmNullable
+            Integer deskDepthMmNullable,
+            String modeNullable,
+            Double deskClickXNullable,
+            Double deskClickYNullable
     ) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("theme",        theme);
@@ -61,6 +66,13 @@ public class AiServerClient {
         body.put("desk_depth_mm", deskDepthMmNullable != null ? deskDepthMmNullable : defaultDeskDepthMm);
         if (topImageBase64Nullable != null && !topImageBase64Nullable.isEmpty()) {
             body.put("top_view_image_base64", topImageBase64Nullable);
+        }
+        if (modeNullable != null && !modeNullable.isEmpty()) {
+            body.put("mode", modeNullable);
+        }
+        if (deskClickXNullable != null && deskClickYNullable != null) {
+            body.put("desk_click_x", deskClickXNullable);
+            body.put("desk_click_y", deskClickYNullable);
         }
 
         HttpHeaders headers = new HttpHeaders();
