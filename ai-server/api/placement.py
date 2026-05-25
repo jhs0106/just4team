@@ -564,35 +564,67 @@ def calc_placements_from_available_space(
 
     # 사용자 클릭 SAM2 mask로 책상 윗면 bbox가 명시되면 그걸 강제 사용 (DINO 무시).
     # 빈 책상 모드(add)에서 검은 책상 등 DINO 인식 실패 케이스 보정용.
+    _bbox_source = "heuristic"
     if front_desk_bbox_override is not None:
         fv_dx1, fv_dy1, fv_dx2, fv_dy2 = front_desk_bbox_override
+        _bbox_source = "sam2_override"
         print(f"[Desk bbox] override (user click + SAM2): "
               f"({fv_dx1},{fv_dy1},{fv_dx2},{fv_dy2})")
     else:
         fv_bbox_desk = _detect_desk_bbox(front_image)
         if fv_bbox_desk:
             fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox_desk
+            _bbox_source = "dino_detected"
         else:
             fv_dx1, fv_dy1 = 0, int(fv_h * 0.45)
             fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.72)
+            _bbox_source = "heuristic"
+
+    # raw bbox 보존 (debug)
+    _bbox_raw = (fv_dx1, fv_dy1, fv_dx2, fv_dy2)
 
     # === 책상 bbox sanity clamps (2026-05-25 floating monitor 버그 대응) ===
-    # 이전: dy2만 0.72 cap, dy1은 DINO 결과 그대로 사용.
-    #   문제: DINO가 책상 위쪽 벽 영역까지 책상으로 detect하면 fv_dy1이 너무 작아져
-    #         모니터/스피커가 책상 back에 anchor돼야 하는데 벽 area에 anchor → 떠보임.
-    # 수정: dy1을 0.45 floor (typical camera-down 책상 사진의 desk back 위치).
-    #   detect 결과가 더 낮으면(즉 더 아래) 그대로 사용 (camera 위치 높을 경우 대응).
-    fv_dy1 = max(fv_dy1, int(fv_h * 0.45))
-    # dy2: 0.72(desk_image2 의자 시작점). 다른 사진에서 chair 위치 다르면 fall-through.
-    fv_dy2 = min(fv_dy2, int(fv_h * 0.72))
-    # dy1 floor가 dy2를 넘어버리는 비정상 케이스: heuristic fallback
-    if fv_dy2 - fv_dy1 < int(fv_h * 0.15):
-        fv_dy1 = int(fv_h * 0.50)
-        fv_dy2 = int(fv_h * 0.72)
-        print(f"[Desk bbox] dh too small after clamp — fallback to heuristic [{fv_dy1}, {fv_dy2}]")
-    print(f"[Desk bbox] fv_dy1={fv_dy1} fv_dy2={fv_dy2} fv_dh={fv_dy2-fv_dy1} (img_h={fv_h})")
+    # 옛 fix: dy1 = max(dy1, 0.45*h), dy2 = min(dy2, 0.72*h)
+    #   문제: desk_image2 기준 보정값이라 다른 구도 사진에선 책상 상판이 0.45 위에 있어도
+    #         강제로 끌어내려서 placement가 책상 다리 영역에 떨어짐.
+    # 신규 정책:
+    #   - sam2_override: clamp 적용 안 함 (사용자가 정확히 클릭한 결과 신뢰)
+    #   - dino_detected: clamp 적용 (DINO over-detect 방어)
+    #   - heuristic: clamp 무의미 (이미 0.45/0.72)
+    _clamp_applied = False
+    if _bbox_source == "dino_detected":
+        _fv_dy1_before = fv_dy1
+        _fv_dy2_before = fv_dy2
+        fv_dy1 = max(fv_dy1, int(fv_h * 0.45))
+        fv_dy2 = min(fv_dy2, int(fv_h * 0.72))
+        if fv_dy2 - fv_dy1 < int(fv_h * 0.15):
+            fv_dy1 = int(fv_h * 0.50)
+            fv_dy2 = int(fv_h * 0.72)
+            print(f"[Desk bbox] dh too small after clamp — fallback to heuristic [{fv_dy1}, {fv_dy2}]")
+        _clamp_applied = (fv_dy1 != _fv_dy1_before) or (fv_dy2 != _fv_dy2_before)
+
+    print(f"[Desk bbox] source={_bbox_source} clamp_applied={_clamp_applied} "
+          f"fv_dy1={fv_dy1} fv_dy2={fv_dy2} fv_dh={fv_dy2-fv_dy1} (img_h={fv_h})")
+
     fv_dw  = max(1, fv_dx2 - fv_dx1)
     fv_dh  = max(1, fv_dy2 - fv_dy1)
+
+    # debug 저장 (placement.py 자체 디버그 dir이 따로 없으면 main.py가 generation_meta.json에서 합침)
+    if debug_dir is not None:
+        _bbox_dbg = {
+            "front_desk_bbox_raw":     list(_bbox_raw),
+            "front_desk_bbox_clamped": [fv_dx1, fv_dy1, fv_dx2, fv_dy2],
+            "front_desk_bbox_source":  _bbox_source,
+            "desk_bbox_clamp_applied": _clamp_applied,
+            "fv_dy1":                  fv_dy1,
+            "fv_dy2":                  fv_dy2,
+            "fv_dh":                   fv_dy2 - fv_dy1,
+            "image_h":                 fv_h,
+            "image_w":                 fv_w,
+        }
+        (debug_dir / "front_desk_bbox_debug.json").write_text(
+            _dj.dumps(_bbox_dbg, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     sorted_products = sorted(
         [p for p in products if normalize_category(p.category) in _CATEGORY_DIMS_MM],
