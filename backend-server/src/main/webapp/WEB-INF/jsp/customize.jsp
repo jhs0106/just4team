@@ -12,7 +12,7 @@
                     <p class="text-muted">Follow the steps below to transform your workspace</p>
                 </div>
 
-                <form id="customizeForm" action="api/customize" method="POST" enctype="multipart/form-data">
+                <form id="customizeForm" action="${pageContext.request.contextPath}/api/customize" method="POST" enctype="multipart/form-data">
                     <div class="card mb-4">
                         <div class="card-body p-4">
                             <div class="d-flex align-items-center mb-3">
@@ -253,11 +253,11 @@
                             <div class="form-group">
                                 <label for="styleSelect" class="form-label">Select Style</label>
                                 <select class="form-select" id="styleSelect" name="style" required>
-                                    <!-- Placeholder option that will be shown initially -->
                                     <option value="" selected disabled>Please choose a style for your desk</option>
-                                    <option value="gamer">🎮 Gamer</option>
-                                    <option value="office">💼 Office</option>
-                                    <option value="minimalist">✨ Minimalist</option>
+                                    <option value="white">화이트</option>
+                                    <option value="black">블랙</option>
+                                    <option value="gaming">게이밍</option>
+                                    <option value="wood">우드</option>
                                 </select>
                             </div>
                         </div>

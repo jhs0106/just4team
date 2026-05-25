@@ -117,3 +117,17 @@ class GenerateResult(BaseModel):
     num_removed:      int           = 0
     num_placed:       int           = 0
     error:            Optional[str] = None
+
+
+class RecommendAndGenerateRequest(BaseModel):
+    # 한 endpoint로 추천 + 생성 통합 요청.
+    # 내부에서 recommendation 서버(:8001) 호출 → setup 받음 → GenerateRequest 변환 → 이미지 생성.
+    theme:                 str           = Field(..., description="white | black | gaming | wood")
+    budget:                int           = Field(..., gt=0, description="예산 (원)")
+    image_base64:          str           = Field(..., description="원본 책상 front-view 이미지 (base64)")
+    desk_width_mm:         Optional[int] = Field(None, description="책상 가로 (mm)")
+    desk_depth_mm:         Optional[int] = Field(None, description="책상 세로 (mm)")
+    top_view_image_base64: Optional[str] = Field(None, description="탑뷰 이미지 (base64)")
+    mode:                  RemoveMode    = Field(RemoveMode.own_desk)
+    generation_mode:       str           = Field("controlnet")
+    removal_strategy:      str           = Field("combined")

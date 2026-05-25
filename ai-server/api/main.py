@@ -56,7 +56,7 @@ from .models import (
     ObjectRemovalRequest, ObjectRemovalResult,
     ProductPlaceRequest, ProductPlaceResult,
     SegmentRequest, SegmentResult,
-    GenerateRequest, GenerateResult,
+    GenerateRequest, GenerateResult, RecommendAndGenerateRequest,
 )
 from .object_removal_processor import get_object_removal_processor
 from .lama_processor import get_lama_processor
@@ -81,7 +81,7 @@ from .composite import (
 from .placement import (
     calc_placements_from_available_space, bbox_iou,
     _match_products_to_detections, _region_from_detection_center,
-    _make_rect_mask,
+    _make_rect_mask, _overlap_threshold,
 )
 
 job_store: dict = {}
@@ -238,6 +238,75 @@ async def run_generate(req: GenerateRequest):
     job_store[job_id] = GenerateResult(job_id=job_id, status=JobStatus.pending)
     asyncio.get_event_loop().run_in_executor(executor, _run_generate, job_id, req)
     return job_store[job_id]
+
+
+# ── Recommend + Generate (추천 서버 호출 → 생성까지 한 번에) ───────────
+# 사용자는 theme + budget + 책상 사진만 보내면 됨. 내부에서:
+#   1. recommendation 서버(:8001) 호출해 setup(5종 제품) 받음
+#   2. recommendation_bridge로 GenerateRequest 변환
+#   3. 기존 /generate 로직으로 이미지 생성
+import os
+import requests as _requests
+
+_RECOMMENDATION_API_URL = os.getenv("RECOMMENDATION_API_URL", "http://127.0.0.1:8001")
+
+
+@app.post("/recommend-and-generate", response_model=GenerateResult)
+async def recommend_and_generate(req: RecommendAndGenerateRequest):
+    from .adapters.recommendation_bridge import setup_to_generate_request
+
+    # 1. 추천 서버 호출
+    try:
+        rec_resp = _requests.get(
+            f"{_RECOMMENDATION_API_URL}/recommend",
+            params={"theme": req.theme, "budget": req.budget},
+            timeout=180,
+        )
+        rec_resp.raise_for_status()
+    except _requests.RequestException as e:
+        raise HTTPException(503, f"추천 서버 호출 실패: {e}")
+
+    setup = rec_resp.json().get("setup")
+    if not setup:
+        raise HTTPException(502, "추천 서버 응답에 setup 없음")
+
+    # 2a. top_view 자동 보충: 없으면 default desk_top_image2.jpg 사용.
+    # 이유: top_view 있어야 placement.py의 ranker/scoring 알고리즘 동작.
+    #   없으면 main.py fallback (_match_products_to_detections + _calc_regions)으로 가서
+    #   우리가 만든 배치 알고리즘이 무시됨. 데모 안정성 위해 default 보충.
+    _top_view_b64 = req.top_view_image_base64
+    if not _top_view_b64:
+        import base64 as _b64
+        _default_tv = Path(__file__).parent.parent / "data" / "test" / "desk_top_image2.jpg"
+        if _default_tv.exists():
+            _top_view_b64 = _b64.b64encode(_default_tv.read_bytes()).decode()
+            print(f"[recommend-and-generate] top_view 미제공 → default {_default_tv.name} 자동 사용 "
+                  "(placement_scoring 활성화)")
+        else:
+            print(f"[recommend-and-generate] top_view 없고 default도 없음 → "
+                  "fallback 배치 사용 (ranker 미적용)")
+
+    # 2b. setup → GenerateRequest 변환 (style_mapper가 theme 자동 인식)
+    try:
+        gen_req = setup_to_generate_request(
+            setup                = setup,
+            color_text           = req.theme,
+            theme_text           = req.theme,
+            desk_image_b64       = req.image_base64,
+            desk_width_mm        = req.desk_width_mm,
+            desk_depth_mm        = req.desk_depth_mm,
+            top_view_image_b64   = _top_view_b64,
+            mode                 = req.mode,
+            generation_mode      = req.generation_mode,
+            removal_strategy     = req.removal_strategy,
+            verify_images        = True,
+            on_missing           = "skip",
+        )
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, f"setup → GenerateRequest 변환 실패: {e}")
+
+    # 3. 기존 /generate 로직 호출
+    return await run_generate(gen_req)
 
 
 def _run_generate(job_id: str, req: GenerateRequest):
@@ -514,10 +583,16 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
             _deduped: list[dict] = []
             for _item in _scored_items:
-                if all(bbox_iou(_item["region"], _prev["region"]) < 0.25 for _prev in _deduped):
+                _cat = normalize_category(_item["product"].category)
+                # dedup도 _OVERLAP_TOLERANCE 따름 (MOUSE↔MOUSEPAD 같은 의도된 겹침 허용)
+                if all(
+                    bbox_iou(_item["region"], _prev["region"])
+                    < _overlap_threshold(_cat, normalize_category(_prev["product"].category))
+                    for _prev in _deduped
+                ):
                     _deduped.append(_item)
                 else:
-                    print(f"[Placement SKIP] internal overlap: {normalize_category(_item['product'].category)} {_item['region']}")
+                    print(f"[Placement SKIP] internal overlap: {_cat} {_item['region']}")
             placement_items = _deduped
 
             _failed_products = [i["product"] for i in _failed_items]
@@ -537,7 +612,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
                         "anchor_rx":           None,
                         "anchor_ry":           None,
                     })
-                    if all(bbox_iou(_fi["region"], _prev["region"]) < 0.25 for _prev in placement_items):
+                    if all(
+                        bbox_iou(_fi["region"], _prev["region"])
+                        < _overlap_threshold(_fi_cat, normalize_category(_prev["product"].category))
+                        for _prev in placement_items
+                    ):
                         placement_items.append(_fi)
                         _added += 1
                     else:

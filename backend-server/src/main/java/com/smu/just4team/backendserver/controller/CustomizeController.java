@@ -1,113 +1,114 @@
 package com.smu.just4team.backendserver.controller;
 
+import com.smu.just4team.backendserver.service.AiServerClient;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Controller;
-import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.support.RedirectAttributes;
+
+import java.util.Base64;
+import java.util.Map;
 
 @Controller
 public class CustomizeController {
 
+    @Autowired
+    private AiServerClient aiServerClient;
+
+    // 사용자 화면 표시 한글 ↔ ai-server theme enum 매핑.
+    // ai-server RecommendAndGenerateRequest.theme: white | black | gaming | wood
+    private static final Map<String, String> STYLE_MAP = Map.ofEntries(
+            Map.entry("화이트", "white"),
+            Map.entry("white",  "white"),
+            Map.entry("블랙",   "black"),
+            Map.entry("black",  "black"),
+            Map.entry("게이밍", "gaming"),
+            Map.entry("gaming", "gaming"),
+            Map.entry("우드",   "wood"),
+            Map.entry("wood",   "wood")
+    );
+
     @GetMapping("/customize")
     public String showForm() {
-
         return "customize";
     }
 
     @PostMapping("/api/customize")
     public String handleForm(
-
-            @RequestParam("width") String width,
-            @RequestParam("depth") String depth,
-            @RequestParam("height") String height,
-            @RequestParam("style") String style,
+            @RequestParam(value = "width",  required = false) String width,
+            @RequestParam(value = "depth",  required = false) String depth,
+            @RequestParam(value = "height", required = false) String height,
+            @RequestParam("style")  String style,
             @RequestParam(value = "prompt", required = false) String prompt,
             @RequestParam("budget") String budget,
 
-            // FILE UPLOADS
-            @RequestParam(value = "frontFile", required = false)
-            MultipartFile frontFile,
+            @RequestParam(value = "frontFile", required = false) MultipartFile frontFile,
+            @RequestParam(value = "topFile",   required = false) MultipartFile topFile,
+            @RequestParam(value = "frontImageData", required = false) String frontImageData,
+            @RequestParam(value = "topImageData",   required = false) String topImageData,
 
-            @RequestParam(value = "topFile", required = false)
-            MultipartFile topFile,
-
-            // CAMERA BASE64
-            @RequestParam(value = "frontImageData", required = false)
-            String frontImageData,
-
-            @RequestParam(value = "topImageData", required = false)
-            String topImageData,
-
-            Model model
-
+            RedirectAttributes redirectAttributes
     ) {
+        try {
+            // 1. front 이미지 base64 확보 (파일 우선, 없으면 카메라 캡처)
+            String frontB64 = extractBase64(frontFile, frontImageData);
+            if (frontB64 == null) {
+                redirectAttributes.addFlashAttribute("error", "정면 책상 사진이 필요합니다.");
+                return "redirect:/customize";
+            }
+            String topB64 = extractBase64(topFile, topImageData);  // null 허용 (ai-server default 사용)
 
-        System.out.println("===== FORM DATA =====");
+            // 2. style → ai-server theme enum 변환
+            String key = style == null ? "" : style.trim().toLowerCase();
+            String theme = STYLE_MAP.get(key);
+            if (theme == null) theme = STYLE_MAP.getOrDefault(style, "white");
 
-        System.out.println("Width: " + width);
-        System.out.println("Depth: " + depth);
-        System.out.println("Height: " + height);
+            // 3. budget 파싱
+            int budgetInt;
+            try {
+                budgetInt = Integer.parseInt(budget.replaceAll("[^0-9]", ""));
+            } catch (Exception e) {
+                redirectAttributes.addFlashAttribute("error", "예산은 숫자로 입력해주세요.");
+                return "redirect:/customize";
+            }
 
-        System.out.println("Style: " + style);
+            // 4. cm → mm 변환 (JSP 입력은 cm)
+            Integer widthMm = parseCmToMm(width);
+            Integer depthMm = parseCmToMm(depth);
 
-        System.out.println("Prompt: " + prompt);
+            // 5. ai-server 호출 → job_id
+            String jobId = aiServerClient.submitRecommendAndGenerate(
+                    theme, budgetInt, frontB64, topB64, widthMm, depthMm
+            );
 
-        System.out.println("Budget: " + budget);
+            return "redirect:/result?jobId=" + jobId;
 
-        System.out.println("Front length: " +
-                (frontImageData != null ? frontImageData.length() : 0));
-
-        System.out.println("Top length: " +
-                (topImageData != null ? topImageData.length() : 0));
-
-        /* =========================
-           FILE UPLOADS
-        ========================= */
-
-        if(frontFile != null && !frontFile.isEmpty()) {
-
-            System.out.println("Front File Upload: "
-                    + frontFile.getOriginalFilename());
+        } catch (Exception e) {
+            redirectAttributes.addFlashAttribute("error",
+                    "AI 서버 호출 실패: " + e.getMessage());
+            return "redirect:/customize";
         }
+    }
 
-        if(topFile != null && !topFile.isEmpty()) {
-
-            System.out.println("Top File Upload: "
-                    + topFile.getOriginalFilename());
+    private String extractBase64(MultipartFile file, String dataUrl) throws Exception {
+        if (file != null && !file.isEmpty()) {
+            return Base64.getEncoder().encodeToString(file.getBytes());
         }
-
-        /* =========================
-           CAMERA IMAGES
-        ========================= */
-
-        if(frontImageData != null &&
-                !frontImageData.isEmpty()) {
-
-            System.out.println("Front Camera Image Received");
+        if (dataUrl != null && !dataUrl.isEmpty()) {
+            // "data:image/png;base64,XXX" prefix 제거
+            int comma = dataUrl.indexOf(',');
+            return comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
         }
+        return null;
+    }
 
-        if(topImageData != null &&
-                !topImageData.isEmpty()) {
-
-            System.out.println("Top Camera Image Received");
+    private Integer parseCmToMm(String cm) {
+        if (cm == null || cm.isBlank()) return null;
+        try {
+            return Integer.parseInt(cm.trim()) * 10;
+        } catch (NumberFormatException e) {
+            return null;
         }
-
-        /* =========================
-           MODEL
-        ========================= */
-
-        model.addAttribute("width", width);
-
-        model.addAttribute("depth", depth);
-
-        model.addAttribute("height", height);
-
-        model.addAttribute("style", style);
-
-        model.addAttribute("prompt", prompt);
-
-        model.addAttribute("budget", budget);
-
-        return "customize";
     }
 }

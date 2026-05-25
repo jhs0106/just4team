@@ -33,6 +33,7 @@ repositories {
 
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
 //    implementation 'org.springframework.boot:spring-boot-starter-web'
 //    implementation 'org.apache.tomcat.embed:tomcat-embed-jasper:11.0.22'
 //    implementation 'org.springframework.ai:spring-ai-starter-model-openai'

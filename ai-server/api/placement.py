@@ -209,21 +209,39 @@ def _front_bbox_for_anchor(
         relation_state["keyboard_y2"] = y2
         relation_state["keyboard_front_y1"] = y1
     elif cat == "MOUSE":
-        # 키보드와 같은 깊이 (책상 면이 같으므로)
-        _kb_y2 = relation_state.get("keyboard_y2")
-        if _kb_y2 is not None:
-            # 키보드 y2 그대로 사용 (이미 offset/cap 적용됨)
-            y2 = _kb_y2
-            y1 = y2 - fv_ph
-            _kb_y1 = relation_state.get("keyboard_front_y1", 0)
-            if y1 < _kb_y1:
-                y1 = _kb_y1
-                y2 = y1 + fv_ph
+        # mousepad_region 있으면 MOUSE를 그 안쪽에 강제 배치 (마우스패드 위에 마우스).
+        # x/y 좌표 모두 mousepad 영역으로 clamp — score/ranker 결과 무시하고 강제.
+        _mp_region = relation_state.get("mousepad_region")
+        if _mp_region is not None:
+            _mp_x1, _mp_y1, _mp_x2, _mp_y2 = _mp_region
+            _mp_w, _mp_h = _mp_x2 - _mp_x1, _mp_y2 - _mp_y1
+            # MOUSE 폭이 mousepad 폭의 40% 넘으면 강제로 줄임 (시각적 비례)
+            if fv_pw > int(_mp_w * 0.40):
+                fv_pw = max(int(_mp_w * 0.40), 50)
+                fv_ph = max(int(fv_pw * _FRONT_HEIGHT_RATIO["MOUSE"]), 40)
+            # x: mousepad 가로 중앙에서 약간 우측 (오른손잡이 가정)
+            _target_cx = _mp_x1 + int(_mp_w * 0.60)
+            x1 = max(_mp_x1, _target_cx - fv_pw // 2)
+            x2 = min(_mp_x2, x1 + fv_pw)
+            # y: mousepad 하단에 마우스 발 닿게
+            y2 = _mp_y2
+            y1 = max(_mp_y1, y2 - fv_ph)
         else:
-            # 키보드 없을 때만 MOUSE 단독 offset 적용
-            _offset = _CONTACT_Y_OFFSET.get("MOUSE", 0)
-            y2 = min(y2 + _offset, int(fv_dy2 - 15))
-            y1 = y2 - fv_ph
+            # 키보드와 같은 깊이 (책상 면이 같으므로)
+            _kb_y2 = relation_state.get("keyboard_y2")
+            if _kb_y2 is not None:
+                # 키보드 y2 그대로 사용 (이미 offset/cap 적용됨)
+                y2 = _kb_y2
+                y1 = y2 - fv_ph
+                _kb_y1 = relation_state.get("keyboard_front_y1", 0)
+                if y1 < _kb_y1:
+                    y1 = _kb_y1
+                    y2 = y1 + fv_ph
+            else:
+                # 키보드도 mousepad도 없을 때만 MOUSE 단독 offset 적용
+                _offset = _CONTACT_Y_OFFSET.get("MOUSE", 0)
+                y2 = min(y2 + _offset, int(fv_dy2 - 15))
+                y1 = y2 - fv_ph
     elif cat == "LIGHTING":
         # 모니터 상단에 부착 — monitor_contact_y에서 모니터 높이만큼 위로 가서 위쪽 5~10px
         _mon_y2 = relation_state.get("monitor_contact_y")
@@ -324,6 +342,12 @@ def score_region_for_product(
     elif cat == "MOUSE":
         pref_rx = min(1.0, relation_state.get("keyboard_rx", 0.50) + 0.20)
         pref_ry = relation_state.get("keyboard_ry", 0.62)
+    elif cat == "MOUSEPAD":
+        # MOUSE는 KEYBOARD 우측에 배치되므로 MOUSEPAD도 그 위치(= MOUSE가 들어올 자리)에
+        # 미리 깔아둠. MOUSEPAD가 placement 순서상 MOUSE보다 먼저 배치되니 MOUSE 위치를
+        # 직접 참조 못 함 → KEYBOARD 위치 기반으로 동일하게 계산.
+        pref_rx = min(1.0, relation_state.get("keyboard_rx", 0.50) + 0.20)
+        pref_ry = relation_state.get("keyboard_ry", 0.72)
     elif cat == "SPEAKER":
         pref_rx = 0.20 if rx <= 0.50 else 0.80
         pref_ry = relation_state.get("monitor_ry", 0.25)
@@ -352,6 +376,9 @@ def score_region_for_product(
                     score -= 0.8
 
     for prev in placed_norm:
+        # MOUSE ↔ MOUSEPAD는 겹치는 게 정상 (마우스가 마우스패드 위에 얹힘)
+        if {cat, prev.get("cat", "")} == {"MOUSE", "MOUSEPAD"}:
+            continue
         d = ((rx - prev["rx"]) ** 2 + (ry - prev["ry"]) ** 2) ** 0.5
         if d < 0.15:
             score -= 2.0
@@ -682,6 +709,9 @@ def calc_placements_from_available_space(
             if cat == "KEYBOARD":
                 relation_state["keyboard_front_x2"] = x2
                 relation_state["keyboard_front_y1"] = y1
+            elif cat == "MOUSEPAD":
+                # MOUSE는 이 영역 안에 강제 배치 (_front_bbox_for_anchor에서 사용)
+                relation_state["mousepad_region"] = (x1, y1, x2, y2)
             placed_norm.append({
                 "rx":  best_cand["rx"], "ry": best_cand["ry"],
                 "rw":  (x2 - x1) / max(fv_dw, 1), "rh": (y2 - y1) / max(fv_dh, 1),

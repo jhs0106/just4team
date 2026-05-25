@@ -20,3 +20,7 @@ logs/
 
 # Claude 내부 파일
 CLAUDE.md
+
+.env
+dump_utf8.sql
+dump (1).sql
