@@ -335,6 +335,53 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
     return job_store[_result.job_id]
 
 
+def extract_desk_top_band(mask_np: np.ndarray) -> tuple | None:
+    # SAM2 mask에서 책상 윗면 띠만 추출 (다리/받침대 제외).
+    # 알고리즘: row별 white pixel 폭의 분포에 Otsu's threshold 적용.
+    #   - 책상 윗면: 폭 매우 넓음 (peak1)
+    #   - 책상 다리: 폭 좁음 (peak2)
+    #   - Otsu가 두 그룹 사이 valley를 데이터에서 자동 도출 → 하드코딩 X
+    # 가장 긴 연속 wide-row run = 책상 윗면 띠.
+    h, w = mask_np.shape
+    bin_mask   = (mask_np > 127).astype(np.uint8)
+    row_widths = bin_mask.sum(axis=1).astype(np.float32)
+    if row_widths.max() == 0:
+        return None
+
+    # row_widths를 0-255 uint8로 정규화 후 Otsu 적용
+    row_widths_norm = (row_widths / row_widths.max() * 255).astype(np.uint8)
+    thresh_val, _ = cv2.threshold(
+        row_widths_norm.reshape(-1, 1), 0, 255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+    )
+    actual_threshold = (thresh_val / 255.0) * row_widths.max()
+    wide_rows = row_widths >= actual_threshold
+
+    # 가장 긴 연속 True run 탐색
+    runs:       list[tuple[int, int]] = []
+    start_idx:  int | None             = None
+    for i, v in enumerate(wide_rows):
+        if v and start_idx is None:
+            start_idx = i
+        elif (not v) and start_idx is not None:
+            runs.append((start_idx, i - 1))
+            start_idx = None
+    if start_idx is not None:
+        runs.append((start_idx, len(wide_rows) - 1))
+    if not runs:
+        return None
+
+    y_top, y_bottom = max(runs, key=lambda r: r[1] - r[0])
+
+    # 띠 내부의 x 범위
+    band_mask = (mask_np[y_top:y_bottom + 1] > 127)
+    xs_in_band = np.where(band_mask.any(axis=0))[0]
+    if len(xs_in_band) == 0:
+        return None
+    x_min, x_max = int(xs_in_band.min()), int(xs_in_band.max())
+    return (x_min, y_top, x_max, y_bottom)
+
+
 def _run_generate(job_id: str, req: GenerateRequest):
     job_store[job_id].status = JobStatus.running
     try:
@@ -617,17 +664,31 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     )
                     _desk_mask_pil = _sam_b2i(_sam_result["mask"]).convert("L")
                     _desk_mask_np  = np.array(_desk_mask_pil)
+                    _desk_mask_pil.save(_debug_dir / "front_desk_click_mask.png")
+
                     _ys, _xs = np.where(_desk_mask_np > 127)
-                    if len(_xs) > 0:
-                        _front_desk_bbox_override = (
-                            int(_xs.min()), int(_ys.min()),
-                            int(_xs.max()), int(_ys.max()),
-                        )
-                        # 클릭 mask 디버그 저장
-                        _desk_mask_pil.save(_debug_dir / "front_desk_click_mask.png")
-                        print(f"[DeskClick] SAM2 mask bbox = {_front_desk_bbox_override}")
-                    else:
+                    if len(_xs) == 0:
                         print("[DeskClick] SAM2 mask empty — fallback to default desk detection")
+                    else:
+                        _full_bbox = (int(_xs.min()), int(_ys.min()),
+                                      int(_xs.max()), int(_ys.max()))
+                        # SAM이 책상 다리까지 한 mask로 잡는 케이스 대응 — Otsu로 책상 윗면 띠만 추출
+                        _band = extract_desk_top_band(_desk_mask_np)
+                        if _band is not None:
+                            _front_desk_bbox_override = _band
+                            # 추출된 band 시각화 (debug)
+                            _band_img = np.zeros_like(_desk_mask_np)
+                            _band_img[_band[1]:_band[3] + 1, _band[0]:_band[2] + 1] = 255
+                            Image.fromarray(_band_img).save(
+                                _debug_dir / "front_desk_top_band.png"
+                            )
+                            print(f"[DeskClick] SAM2 full bbox={_full_bbox} → "
+                                  f"Otsu band={_band} "
+                                  f"(dh: {_full_bbox[3]-_full_bbox[1]} → {_band[3]-_band[1]})")
+                        else:
+                            _front_desk_bbox_override = _full_bbox
+                            print(f"[DeskClick] Otsu band extraction failed → "
+                                  f"fallback to SAM full bbox = {_full_bbox}")
                 except Exception as _e:
                     print(f"[DeskClick] SAM2 호출 실패: {_e} — fallback to default")
 
