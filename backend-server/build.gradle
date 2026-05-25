@@ -39,10 +39,10 @@ dependencies {
 //    implementation 'org.springframework.ai:spring-ai-starter-model-openai'
     implementation 'org.apache.tomcat.embed:tomcat-embed-jasper'
     implementation 'org.springframework.boot:spring-boot-starter-security'
-//    implementation 'jakarta.servlet.jsp.jstl:jakarta.servlet.jsp.jstl-api'
-//    implementation 'org.glassfish.web:jakarta.servlet.jsp.jstl:2.0.0'
-//    implementation 'jakarta.servlet.jsp.jstl:jakarta.servlet.jsp.jstl-api:2.0.0'
-    implementation 'javax.servlet:jstl:1.2'
+    // Spring Boot 4.x / Tomcat 11은 jakarta namespace 사용. 옛 javax.servlet:jstl:1.2 사용 시
+    // ClassNotFoundException: javax.servlet.jsp.tagext.TagLibraryValidator 발생.
+    implementation 'jakarta.servlet.jsp.jstl:jakarta.servlet.jsp.jstl-api:3.0.2'
+    implementation 'org.glassfish.web:jakarta.servlet.jsp.jstl:3.0.1'
 
     compileOnly 'org.projectlombok:lombok'
 //    developmentOnly 'org.springframework.boot:spring-boot-devtools'

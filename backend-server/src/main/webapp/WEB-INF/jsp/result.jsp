@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <%@ page contentType="text/html; charset=UTF-8" pageEncoding="UTF-8"%>
-<%@ taglib prefix="c" uri="http://java.sun.com/jsp/jstl/core" %>
+<%@ taglib prefix="c" uri="jakarta.tags.core" %>
 <jsp:include page="layout/header.jsp" />
 
 
@@ -45,6 +45,15 @@
                     </div>
                 </div>
             </div>
+        </div>
+
+        <!-- 추천된 제품 리스트 (완료 시 표시) -->
+        <div id="productsBlock" style="display:none;">
+            <div class="mb-4 mt-5">
+                <h4 class="fw-bold">Products in This Setup</h4>
+                <p class="text-muted">생성된 책상에 사용된 제품들 — 클릭하면 구매 페이지로 이동합니다</p>
+            </div>
+            <div id="productsList" class="row g-4"></div>
         </div>
 
         <div id="retryBlock" class="text-center mt-5" style="display:none;">
@@ -117,6 +126,7 @@
                     progressPanel.style.display = "none";
                     resultPanel.style.display = "block";
                     retryBlock.style.display = "block";
+                    renderProducts(data.products || []);
                     return;
                 }
                 if (status === "failed" || status === "error") {
@@ -134,6 +144,67 @@
             progressPanel.style.display = "none";
             errorPanel.style.display = "block";
             errorMessage.textContent = msg;
+        }
+
+        function escapeHtml(s) {
+            if (s == null) return "";
+            return String(s)
+                .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+        }
+
+        function fmtPrice(n) {
+            if (n == null) return "";
+            return Number(n).toLocaleString("ko-KR") + "원";
+        }
+
+        // ai-server 카테고리 → 한글 표시명
+        const CAT_KO = {
+            MONITOR: "모니터", KEYBOARD: "키보드", MOUSE: "마우스",
+            MOUSEPAD: "마우스패드", SPEAKER: "스피커", DESK_LAMP: "데스크 램프",
+            DESK_SHELF: "책상 선반", LAPTOP_STAND: "노트북 거치대",
+            DECO: "데코", CLOCK: "시계", LIGHTING: "조명",
+        };
+
+        function renderProducts(products) {
+            const productsBlock = document.getElementById("productsBlock");
+            const list = document.getElementById("productsList");
+            if (!products || products.length === 0) {
+                productsBlock.style.display = "none";
+                return;
+            }
+            list.innerHTML = "";
+            for (const p of products) {
+                const catLabel = escapeHtml(CAT_KO[p.category] || p.category || "");
+                const name     = escapeHtml(p.name || "이름 없음");
+                const imgSrc   = p.image_url ? escapeHtml(p.image_url)
+                                             : "https://placehold.co/400x400/e2e8f0/64748b?text=No+Image";
+                const price    = fmtPrice(p.price);
+                const link     = p.product_url ? escapeHtml(p.product_url) : null;
+
+                const card = document.createElement("div");
+                card.className = "col-md-6 col-lg-3";
+                card.innerHTML =
+                    '<div class="card h-100 product-card">' +
+                        '<img src="' + imgSrc + '" alt="' + name + '" class="card-img-top" ' +
+                             'style="height:180px;object-fit:cover" ' +
+                             'onerror="this.src=\'https://placehold.co/400x400/e2e8f0/64748b?text=No+Image\'">' +
+                        '<div class="card-body">' +
+                            '<span class="badge bg-light text-secondary mb-2">' + catLabel + '</span>' +
+                            '<h6 class="card-title">' + name + '</h6>' +
+                            (price ? '<p class="card-text text-primary fw-bold mb-0">' + price + '</p>' : '') +
+                        '</div>' +
+                        '<div class="card-footer bg-transparent border-0 pb-3">' +
+                            (link
+                                ? '<a href="' + link + '" target="_blank" rel="noopener noreferrer" ' +
+                                  'class="btn btn-outline-primary btn-sm w-100">구매 페이지 보기</a>'
+                                : '<button class="btn btn-outline-secondary btn-sm w-100" disabled>링크 없음</button>'
+                            ) +
+                        '</div>' +
+                    '</div>';
+                list.appendChild(card);
+            }
+            productsBlock.style.display = "block";
         }
 
         poll();

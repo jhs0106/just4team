@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<jsp:include page="layout/header.jsp" />
 <%@ page contentType="text/html; charset=UTF-8" pageEncoding="UTF-8"%>
+<%@ taglib prefix="c" uri="jakarta.tags.core" %>
+<jsp:include page="layout/header.jsp" />
 
 
 <main>
@@ -11,6 +12,13 @@
                     <h2 class="fw-bold">Create Your Perfect Desk</h2>
                     <p class="text-muted">Follow the steps below to transform your workspace</p>
                 </div>
+
+                <c:if test="${not empty error}">
+                    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                        <strong>오류:</strong> <c:out value="${error}" />
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                </c:if>
 
                 <form id="customizeForm" action="${pageContext.request.contextPath}/api/customize" method="POST" enctype="multipart/form-data">
                     <div class="card mb-4">

@@ -106,6 +106,17 @@ class GenerateRequest(BaseModel):
     mode:                  RemoveMode        = Field(RemoveMode.own_desk, description="물체 제거 정책")
     generation_mode:       str               = Field("controlnet", description="생성 모드: controlnet (기본, per-product SD+IP-Adapter+ControlNet+LoRA) | cv_composite (SD 미사용, 합성+그림자만) | placement_only (배치 시각화)")
     removal_strategy:      str               = Field("combined",   description="제거 방식: none | sequential | combined")
+    top_view_source:       Optional[str]     = Field(None, description="top_view 출처: 'user_provided' | 'default_fallback' | 'none' (디버그 메타 기록용)")
+
+
+class RecommendedProduct(BaseModel):
+    # JSP 결과 화면에 표시할 제품 정보. recommendation 서버 setup.items에서 추출.
+    category:    str
+    name:        str
+    image_id:    Optional[int] = None
+    price:       Optional[int] = None
+    image_url:   Optional[str] = None
+    product_url: Optional[str] = None
 
 
 class GenerateResult(BaseModel):
@@ -116,6 +127,7 @@ class GenerateResult(BaseModel):
     result_image:     Optional[str] = None  # Step 3: SD refinement 후
     num_removed:      int           = 0
     num_placed:       int           = 0
+    products:         List[RecommendedProduct] = Field(default_factory=list)
     error:            Optional[str] = None
 
 

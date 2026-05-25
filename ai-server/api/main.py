@@ -275,14 +275,17 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
     #   없으면 main.py fallback (_match_products_to_detections + _calc_regions)으로 가서
     #   우리가 만든 배치 알고리즘이 무시됨. 데모 안정성 위해 default 보충.
     _top_view_b64 = req.top_view_image_base64
+    _top_view_source = "user_provided"
     if not _top_view_b64:
         import base64 as _b64
         _default_tv = Path(__file__).parent.parent / "data" / "test" / "desk_top_image2.jpg"
         if _default_tv.exists():
             _top_view_b64 = _b64.b64encode(_default_tv.read_bytes()).decode()
+            _top_view_source = "default_fallback"
             print(f"[recommend-and-generate] top_view 미제공 → default {_default_tv.name} 자동 사용 "
                   "(placement_scoring 활성화)")
         else:
+            _top_view_source = "none"
             print(f"[recommend-and-generate] top_view 없고 default도 없음 → "
                   "fallback 배치 사용 (ranker 미적용)")
 
@@ -302,11 +305,31 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
             verify_images        = True,
             on_missing           = "skip",
         )
+        gen_req.top_view_source = _top_view_source
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, f"setup → GenerateRequest 변환 실패: {e}")
 
-    # 3. 기존 /generate 로직 호출
-    return await run_generate(gen_req)
+    # 2c. setup → JSP 표시용 제품 정보 추출 (ai-server는 image_id만 쓰지만 JSP는 가격/링크/이미지 필요)
+    from .models import RecommendedProduct
+    from .adapters.recommendation_bridge import _CATEGORY_MAP
+    _products_meta: list[RecommendedProduct] = []
+    for _rec_cat, _item in (setup.get("items") or {}).items():
+        _ai_cat = _CATEGORY_MAP.get(_rec_cat)
+        if _ai_cat is None:
+            continue
+        _products_meta.append(RecommendedProduct(
+            category    = _ai_cat,
+            name        = str(_item.get("title") or _ai_cat),
+            image_id    = int(_item["id"]) if _item.get("id") else None,
+            price       = int(_item["lprice"]) if _item.get("lprice") else None,
+            image_url   = _item.get("image_url"),
+            product_url = _item.get("product_url"),
+        ))
+
+    # 3. 기존 /generate 로직 호출 + job_store에 products 정보 attach
+    _result = await run_generate(gen_req)
+    job_store[_result.job_id].products = _products_meta
+    return job_store[_result.job_id]
 
 
 def _run_generate(job_id: str, req: GenerateRequest):
@@ -405,6 +428,9 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 "lora_path_exists": _lora_ext_dir.exists(),
                 "lora_reason":      None if cn_proc._has_lora else "LoRA load failed (check path/format)",
                 "lora_status":      "active" if cn_proc._has_lora else "skipped",
+                "top_view_source":  getattr(req, "top_view_source", None) or (
+                    "user_provided" if req.top_view_image_base64 else "none"
+                ),
             }, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
