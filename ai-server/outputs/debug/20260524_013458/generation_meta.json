@@ -1,5 +1,0 @@
-{
-  "backbone": "sd1.5-controlnet (harmonization)",
-  "pipeline_mode": "harmonize",
-  "lora_path_exists": true
-}
