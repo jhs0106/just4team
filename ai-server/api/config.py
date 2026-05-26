@@ -280,3 +280,23 @@ _REMOVAL_PROMPT = (
     # 주의: "light bar", "screen bar", "monitor light"는 false-positive 위험으로 제외.
     # LIGHTING 카테고리는 사용자가 입력으로 명시 시에만 생성, 기존 물체 제거 대상 아님.
 )
+
+# === Tabletop bbox 정책 ===
+# 빈 책상 모드에서 front-view tabletop 영역을 잡을 때의 sanity 임계값.
+# top-view anchor를 front-view에 투영할 때 이 영역이 기준이 되므로 검증 필수.
+#
+# 과거 hard clamp(fv_dy1=max(0.45h), fv_dy2=min(0.72h))는 desk_image2 한 장에 맞춘 보정으로,
+# 다른 구도 사진(책상이 화면 더 위/아래에 있거나 더 큰 경우)에서 실제 책상 하단을 잘라먹어
+# placement 좌표계를 망쳤음. 기본 OFF, flag로만 활성화.
+TABLETOP_BBOX_HARD_CLAMP_ENABLED = False
+
+# tabletop 검증 임계값.
+#   너무 얇음: edge band만 잡힌 케이스. fv_dh가 image_h 대비 10% 미만 또는 80px 미만
+#   너무 두꺼움: 책상 전체/다리/바닥까지 포함된 케이스. image_h 대비 45% 초과
+#   너무 아래: y2가 이미지 바닥에 너무 가까우면 다리/바닥 영역 포함 가능성
+#   너무 가로형: fv_dw/fv_dh가 18 초과면 얇은 edge만 잡은 것
+TABLETOP_MIN_HEIGHT_RATIO         = 0.10
+TABLETOP_MIN_HEIGHT_PX            = 80
+TABLETOP_MAX_HEIGHT_RATIO         = 0.45
+TABLETOP_MIN_BOTTOM_MARGIN_RATIO  = 0.03
+TABLETOP_MAX_WIDTH_HEIGHT_RATIO   = 18.0

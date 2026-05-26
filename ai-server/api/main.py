@@ -348,55 +348,60 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
 
 
 def extract_desk_top_band(mask_np: np.ndarray) -> tuple | None:
-    # SAM2 mask에서 책상 윗면 사다리꼴 전체 추출 (다리/받침대 제외).
+    # SAM2 mask에서 책상 윗면 후보 영역 추출.
+    # 최종 sanity 검증(validate_tabletop_bbox)은 호출자에서 수행 — 여기선 후보만 생성.
     #
-    # 책상 윗면 == 사다리꼴: 위쪽 가장자리(짧음) → 아래쪽 가장자리(길음) 점진 증가/감소.
-    # 책상 다리 == 윗면 아래쪽에서 폭이 급격히 감소.
-    # → row별 폭의 derivative(차이)에서 "가장 큰 단일 감소" 위치 = 다리 시작점.
+    # 알고리즘:
+    #   1. derivative-based: row 폭 가장 큰 감소 = 다리 시작 직전 row → 윗면 후보
+    #   2. 후보 band가 mask 전체 bbox 대비 너무 작으면(<25% 또는 <30px) Otsu fallback
+    #   3. Otsu도 작으면 mask full bbox 그대로 사용 (validate_tabletop_bbox가 최종 판단)
     #
-    # 이전 알고리즘(Otsu)은 사다리꼴 옆면(점진 감소 구간)을 다리와 같은 그룹으로 묶어버려
-    # 윗면 위쪽 좁은 띠만 추출되는 문제 있었음. derivative 방식은 점진/급격 변화를 구분.
-    #
-    # 데이터 기반 자동 — 사다리꼴 모양/사진 시점에 따라 자동 적응.
+    # 회귀 fix (2026-05-26): 옛 derivative-only는 사다리꼴 옆면 점진 감소 구간을 다리로
+    #   판단해 윗면 좁은 edge band(67px)만 잡는 경우가 있었음. full bbox fallback으로
+    #   "너무 좁음"을 후보 단계에서 1차 보정 + 호출자 validate가 "너무 두꺼움" 2차 보정.
     bin_mask   = (mask_np > 127).astype(np.uint8)
     row_widths = bin_mask.sum(axis=1).astype(np.float32)
     if row_widths.max() == 0:
         return None
-
     valid = np.where(row_widths > 0)[0]
     if len(valid) < 5:
         return None
-    y_top = int(valid[0])  # 책상 윗면 위쪽 가장자리
+    full_y_top    = int(valid[0])
+    full_y_bottom = int(valid[-1])
+    full_h        = full_y_bottom - full_y_top + 1
 
-    # y_top부터 mask 끝까지 row 폭 변화량 (음수 = 폭 감소)
-    section     = row_widths[y_top:int(valid[-1]) + 1]
-    derivatives = np.diff(section)  # i번째 = section[i+1] - section[i]
+    section          = row_widths[full_y_top:full_y_bottom + 1]
+    derivatives      = np.diff(section)
+    biggest_drop_idx = int(np.argmin(derivatives)) if len(derivatives) > 0 else 0
+    biggest_drop_val = float(derivatives[biggest_drop_idx]) if len(derivatives) > 0 else 0.0
+    avg_width        = float(row_widths.mean())
+    min_band_h       = max(30, int(full_h * 0.25))
 
-    # 가장 큰 단일 감소 위치 = 다리 시작 직전 row
-    biggest_drop_idx = int(np.argmin(derivatives))
-    biggest_drop_val = float(derivatives[biggest_drop_idx])
+    band_y_top, band_y_bottom = full_y_top, full_y_top + biggest_drop_idx
+    band_source = "derivative"
 
-    # 감소가 미미하면 (윗면이 mask 전체) Otsu fallback
-    # 기준: 평균 행 폭의 20% 이상 한 번에 감소 = 다리 경계
-    avg_width = float(row_widths.mean())
-    if -biggest_drop_val < avg_width * 0.2:
-        return _otsu_band_fallback(mask_np, y_top, int(valid[-1]))
+    deriv_band_h = band_y_bottom - band_y_top + 1
+    if -biggest_drop_val < avg_width * 0.2 or deriv_band_h < min_band_h:
+        _ot = _otsu_band_fallback(mask_np, full_y_top, full_y_bottom)
+        if _ot is not None:
+            _oy1, _oy2 = _ot[1], _ot[3]
+            if (_oy2 - _oy1 + 1) >= min_band_h:
+                band_y_top, band_y_bottom = _oy1, _oy2
+                band_source = "otsu_fallback"
+        if (band_y_bottom - band_y_top + 1) < min_band_h:
+            band_y_top, band_y_bottom = full_y_top, full_y_bottom
+            band_source = "full_bbox"
 
-    y_bottom = y_top + biggest_drop_idx
-
-    if y_bottom - y_top < 5:
-        return _otsu_band_fallback(mask_np, y_top, int(valid[-1]))
-
-    band       = mask_np[y_top:y_bottom + 1]
+    band       = mask_np[band_y_top:band_y_bottom + 1]
     xs_in_band = np.where((band > 127).any(axis=0))[0]
     if len(xs_in_band) == 0:
         return None
     x_min, x_max = int(xs_in_band.min()), int(xs_in_band.max())
 
-    print(f"  [DeskBand] derivative-based: y_top={y_top} y_bottom={y_bottom} "
-          f"dh={y_bottom - y_top} drop={biggest_drop_val:.0f}px "
-          f"(avg_width={avg_width:.0f})")
-    return (x_min, y_top, x_max, y_bottom)
+    print(f"  [DeskBand] source={band_source} y_top={band_y_top} y_bottom={band_y_bottom} "
+          f"dh={band_y_bottom - band_y_top + 1} full_dh={full_h} "
+          f"drop={biggest_drop_val:.0f}px avg_width={avg_width:.0f}")
+    return (x_min, band_y_top, x_max, band_y_bottom)
 
 
 def _otsu_band_fallback(mask_np: np.ndarray, y_start: int, y_end: int) -> tuple | None:
@@ -747,7 +752,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
         # SAM2 클릭 mask가 있으면 front_desk_bbox_override로 활용 (검은 책상 등 DINO 약한 케이스 보정).
         print(f"[Generate] desk_width_mm={req.desk_width_mm} desk_depth_mm={req.desk_depth_mm}")
         top_image_for_place = b64_to_image(req.top_view_image_base64)
-        _all_space_results  = calc_placements_from_available_space(
+        _all_space_results, _tabletop_meta = calc_placements_from_available_space(
             front_image=current,
             top_view_image=top_image_for_place,
             products=products,
@@ -758,6 +763,22 @@ def _run_generate(job_id: str, req: GenerateRequest):
             debug_dir=_debug_dir,
             front_desk_bbox_override=_front_desk_bbox_override,
         )
+
+        # tabletop bbox invalid이면 placement 강행 금지 (fallback도 막음).
+        # 이전엔 invalid bbox로 top-view→front-view 투영이 망가져도 그대로 _calc_regions로
+        # 강제 배치 → 결과 이미지에서 제품이 벽/바닥에 그려지는 문제. 명시적으로 fail.
+        if not _tabletop_meta.get("tabletop_valid", True):
+            _reason   = _tabletop_meta.get("tabletop_invalid_reason", "unknown")
+            _attempts = _tabletop_meta.get("tabletop_candidates", [])
+            _summary  = " | ".join(f"{a['source']}:{a['reason']}" for a in _attempts)
+            job_store[job_id].status = JobStatus.failed
+            job_store[job_id].error  = (
+                f"tabletop bbox invalid: {_reason}. "
+                f"책상 상판 영역을 인식하지 못했습니다. 클릭 위치를 책상 상판 중앙으로 다시 시도해주세요. "
+                f"후보 시도: {_summary}"
+            )
+            print(f"[Generate] tabletop invalid → job failed. {_summary}")
+            return
 
         # === dedup + space-fail fallback (분기 공통) ===
         _scored_items = [i for i in _all_space_results if i.get("region") is not None]

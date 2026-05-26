@@ -6,7 +6,12 @@ from pathlib import Path
 
 from PIL import Image
 
-from .config import _CATEGORY_ALIASES
+from .config import (
+    _CATEGORY_ALIASES,
+    TABLETOP_MIN_HEIGHT_RATIO, TABLETOP_MIN_HEIGHT_PX,
+    TABLETOP_MAX_HEIGHT_RATIO, TABLETOP_MIN_BOTTOM_MARGIN_RATIO,
+    TABLETOP_MAX_WIDTH_HEIGHT_RATIO,
+)
 
 PRODUCT_IMAGE_DIR = Path("data/test/processed_images")
 _CATALOG_CSV      = Path("data/test/products.csv")
@@ -22,6 +27,41 @@ def image_to_b64(image: Image.Image) -> str:
     buf = BytesIO()
     image.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def validate_tabletop_bbox(
+    bbox: tuple, image_w: int, image_h: int,
+) -> tuple[bool, str, dict]:
+    # front-view tabletop bbox sanity check.
+    # top-view anchor를 front-view에 투영하는 기준 영역이므로 검증 실패 시 placement 강행 금지.
+    # returns (is_valid, reason, meta_dict).
+    x1, y1, x2, y2 = bbox
+    w = max(0, x2 - x1)
+    h = max(0, y2 - y1)
+    h_ratio = h / max(image_h, 1)
+    w_h     = w / max(h, 1)
+    bottom_margin_ratio = (image_h - y2) / max(image_h, 1)
+
+    meta = {
+        "fv_dh":               h,
+        "fv_dw":               w,
+        "fv_dh_ratio":         round(h_ratio, 4),
+        "fv_dw_dh_ratio":      round(w_h, 3),
+        "bottom_margin_ratio": round(bottom_margin_ratio, 4),
+    }
+
+    if h < TABLETOP_MIN_HEIGHT_PX:
+        return False, f"too_thin_abs:{h}px<{TABLETOP_MIN_HEIGHT_PX}", meta
+    if h_ratio < TABLETOP_MIN_HEIGHT_RATIO:
+        return False, f"too_thin_ratio:{h_ratio:.3f}<{TABLETOP_MIN_HEIGHT_RATIO}", meta
+    if h_ratio > TABLETOP_MAX_HEIGHT_RATIO:
+        return False, f"too_thick_ratio:{h_ratio:.3f}>{TABLETOP_MAX_HEIGHT_RATIO}", meta
+    if bottom_margin_ratio < TABLETOP_MIN_BOTTOM_MARGIN_RATIO:
+        return False, f"too_close_to_bottom:{bottom_margin_ratio:.3f}<{TABLETOP_MIN_BOTTOM_MARGIN_RATIO}", meta
+    if w_h > TABLETOP_MAX_WIDTH_HEIGHT_RATIO:
+        return False, f"too_wide_aspect:{w_h:.2f}>{TABLETOP_MAX_WIDTH_HEIGHT_RATIO}", meta
+
+    return True, "valid", meta
 
 
 def normalize_category(category: str) -> str:

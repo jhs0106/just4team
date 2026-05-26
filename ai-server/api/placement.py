@@ -13,8 +13,9 @@ from .config import (
     _DINO_LABEL_TO_CATEGORY, _RANKER_CAT_ID, _RANKER_SKIP_CATS,
     _FRONT_CATS, _BACK_CATS, _REMOVAL_PROMPT, _CAT_RY_RANGE,
     _PRODUCT_FORM_TIER,
+    TABLETOP_BBOX_HARD_CLAMP_ENABLED,
 )
-from .utils import normalize_category
+from .utils import normalize_category, validate_tabletop_bbox
 from .composite import _detect_desk_bbox, _calc_regions
 
 
@@ -564,79 +565,89 @@ def calc_placements_from_available_space(
 
     if not available_regions:
         print("[AvailSpace] 가용 영역 없음 → fallback")
-        return []
+        return [], {"tabletop_valid": True, "tabletop_invalid_reason": None,
+                    "no_available_regions": True}
 
     ys, xs = np.where(desk_mask_np > 0)
     if len(xs) == 0:
-        return []
+        return [], {"tabletop_valid": True, "tabletop_invalid_reason": None,
+                    "empty_top_desk_mask": True}
     tv_dx1, tv_dy1 = int(xs.min()), int(ys.min())
     tv_dx2, tv_dy2 = int(xs.max()), int(ys.max())
     tv_dw = max(1, tv_dx2 - tv_dx1)
     tv_dh = max(1, tv_dy2 - tv_dy1)
 
-    # 사용자 클릭 SAM2 mask로 책상 윗면 bbox가 명시되면 그걸 강제 사용 (DINO 무시).
-    # 빈 책상 모드(add)에서 검은 책상 등 DINO 인식 실패 케이스 보정용.
-    _bbox_source = "heuristic"
+    # === Tabletop bbox 결정 + validation (1차 commit, 2026-05-26) ===
+    # 후보 우선순위: sam2_override → dino_clamped(flag ON) → dino_raw
+    # 각 후보를 validate_tabletop_bbox로 검증, 첫 valid 사용. 모두 invalid이면 placement 강행 X.
+    #
+    # 회귀 원인:
+    #   1) DINO raw bbox에 0.45/0.72 hard clamp가 책상 하단을 잘라먹어 fv_dh=124 (이미지의 23%)로
+    #      줄여 top-view anchor 투영이 책상 뒤 벽으로 튕김 → 기본 OFF (config flag).
+    #   2) SAM2 override의 derivative-based band가 윗면 위쪽 edge만 67px 잡음 → extract_desk_top_band
+    #      개선(full_bbox fallback) + 여기서 sanity check 한 번 더.
+    #   3) 빈 책상 모드에서 SAM2가 desk body/다리/바닥까지 잡으면 bbox가 너무 두꺼움 → max ratio check.
+    #
+    # heuristic(0.45h~0.72h)은 실제 책상과 무관한 magic bbox이므로 후보에서 제외.
+    _candidates: list[tuple[str, tuple]] = []
     if front_desk_bbox_override is not None:
-        fv_dx1, fv_dy1, fv_dx2, fv_dy2 = front_desk_bbox_override
-        _bbox_source = "sam2_override"
-        print(f"[Desk bbox] override (user click + SAM2): "
-              f"({fv_dx1},{fv_dy1},{fv_dx2},{fv_dy2})")
-    else:
-        fv_bbox_desk = _detect_desk_bbox(front_image)
-        if fv_bbox_desk:
-            fv_dx1, fv_dy1, fv_dx2, fv_dy2 = fv_bbox_desk
-            _bbox_source = "dino_detected"
-        else:
-            fv_dx1, fv_dy1 = 0, int(fv_h * 0.45)
-            fv_dx2, fv_dy2 = fv_w, int(fv_h * 0.72)
-            _bbox_source = "heuristic"
+        _candidates.append(("sam2_override", tuple(front_desk_bbox_override)))
+    _dino_raw = _detect_desk_bbox(front_image)
+    if _dino_raw is not None:
+        _dr = tuple(_dino_raw)
+        if TABLETOP_BBOX_HARD_CLAMP_ENABLED:
+            _dx1, _dy1, _dx2, _dy2 = _dr
+            _dy1c = max(_dy1, int(fv_h * 0.45))
+            _dy2c = min(_dy2, int(fv_h * 0.72))
+            if _dy2c > _dy1c:
+                _candidates.append(("dino_clamped", (_dx1, _dy1c, _dx2, _dy2c)))
+        _candidates.append(("dino_raw", _dr))
 
-    # raw bbox 보존 (debug)
-    _bbox_raw = (fv_dx1, fv_dy1, fv_dx2, fv_dy2)
+    _attempts: list[dict] = []
+    chosen_bbox   = None
+    chosen_source = None
+    chosen_vmeta  = None
+    for _src, _bb in _candidates:
+        _is_valid, _reason, _vmeta = validate_tabletop_bbox(_bb, fv_w, fv_h)
+        _attempts.append({"source": _src, "bbox": list(_bb), "valid": _is_valid,
+                          "reason": _reason, **_vmeta})
+        print(f"[Desk bbox] candidate={_src} bbox={_bb} valid={_is_valid} "
+              f"reason={_reason} fv_dh={_vmeta['fv_dh']} ratio={_vmeta['fv_dh_ratio']}")
+        if _is_valid and chosen_bbox is None:
+            chosen_bbox, chosen_source, chosen_vmeta = _bb, _src, _vmeta
 
-    # === 책상 bbox sanity clamps (2026-05-25 floating monitor 버그 대응) ===
-    # 옛 fix: dy1 = max(dy1, 0.45*h), dy2 = min(dy2, 0.72*h)
-    #   문제: desk_image2 기준 보정값이라 다른 구도 사진에선 책상 상판이 0.45 위에 있어도
-    #         강제로 끌어내려서 placement가 책상 다리 영역에 떨어짐.
-    # 신규 정책:
-    #   - sam2_override: clamp 적용 안 함 (사용자가 정확히 클릭한 결과 신뢰)
-    #   - dino_detected: clamp 적용 (DINO over-detect 방어)
-    #   - heuristic: clamp 무의미 (이미 0.45/0.72)
-    _clamp_applied = False
-    if _bbox_source == "dino_detected":
-        _fv_dy1_before = fv_dy1
-        _fv_dy2_before = fv_dy2
-        fv_dy1 = max(fv_dy1, int(fv_h * 0.45))
-        fv_dy2 = min(fv_dy2, int(fv_h * 0.72))
-        if fv_dy2 - fv_dy1 < int(fv_h * 0.15):
-            fv_dy1 = int(fv_h * 0.50)
-            fv_dy2 = int(fv_h * 0.72)
-            print(f"[Desk bbox] dh too small after clamp — fallback to heuristic [{fv_dy1}, {fv_dy2}]")
-        _clamp_applied = (fv_dy1 != _fv_dy1_before) or (fv_dy2 != _fv_dy2_before)
+    tabletop_meta: dict = {
+        "tabletop_valid":          chosen_bbox is not None,
+        "tabletop_source":         chosen_source,
+        "tabletop_bbox":           list(chosen_bbox) if chosen_bbox else None,
+        "tabletop_invalid_reason": None if chosen_bbox else "all_candidates_invalid",
+        "tabletop_clamp_flag":     TABLETOP_BBOX_HARD_CLAMP_ENABLED,
+        "tabletop_candidates":     _attempts,
+        "image_w":                 fv_w,
+        "image_h":                 fv_h,
+    }
+    if chosen_vmeta is not None:
+        tabletop_meta.update({
+            "tabletop_fv_dh":       chosen_vmeta["fv_dh"],
+            "tabletop_fv_dw":       chosen_vmeta["fv_dw"],
+            "tabletop_fv_dh_ratio": chosen_vmeta["fv_dh_ratio"],
+        })
 
-    print(f"[Desk bbox] source={_bbox_source} clamp_applied={_clamp_applied} "
-          f"fv_dy1={fv_dy1} fv_dy2={fv_dy2} fv_dh={fv_dy2-fv_dy1} (img_h={fv_h})")
-
-    fv_dw  = max(1, fv_dx2 - fv_dx1)
-    fv_dh  = max(1, fv_dy2 - fv_dy1)
-
-    # debug 저장 (placement.py 자체 디버그 dir이 따로 없으면 main.py가 generation_meta.json에서 합침)
     if debug_dir is not None:
-        _bbox_dbg = {
-            "front_desk_bbox_raw":     list(_bbox_raw),
-            "front_desk_bbox_clamped": [fv_dx1, fv_dy1, fv_dx2, fv_dy2],
-            "front_desk_bbox_source":  _bbox_source,
-            "desk_bbox_clamp_applied": _clamp_applied,
-            "fv_dy1":                  fv_dy1,
-            "fv_dy2":                  fv_dy2,
-            "fv_dh":                   fv_dy2 - fv_dy1,
-            "image_h":                 fv_h,
-            "image_w":                 fv_w,
-        }
         (debug_dir / "front_desk_bbox_debug.json").write_text(
-            _dj.dumps(_bbox_dbg, indent=2, ensure_ascii=False), encoding="utf-8"
+            _dj.dumps(tabletop_meta, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+
+    if chosen_bbox is None:
+        print(f"[Desk bbox] ALL INVALID → placement skip. attempts={len(_attempts)} "
+              f"reasons={[a['reason'] for a in _attempts]}")
+        return [], tabletop_meta
+
+    fv_dx1, fv_dy1, fv_dx2, fv_dy2 = chosen_bbox
+    fv_dw = max(1, fv_dx2 - fv_dx1)
+    fv_dh = max(1, fv_dy2 - fv_dy1)
+    print(f"[Desk bbox] chosen source={chosen_source} bbox=({fv_dx1},{fv_dy1},{fv_dx2},{fv_dy2}) "
+          f"fv_dh={fv_dh} ratio={fv_dh/max(fv_h,1):.3f} clamp_flag={TABLETOP_BBOX_HARD_CLAMP_ENABLED}")
 
     sorted_products = sorted(
         [p for p in products if normalize_category(p.category) in _CATEGORY_DIMS_MM],
@@ -805,4 +816,4 @@ def calc_placements_from_available_space(
         except Exception as _e:
             print(f"[AvailSpace] top-view overlay 저장 실패: {_e}")
 
-    return placements
+    return placements, tabletop_meta
