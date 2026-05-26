@@ -28,6 +28,10 @@ data/raw/processed_images/
 data/raw/processed_images.zip
 data/raw/*.csv
 data/embeddings/
+src/data/raw/processed_images/
+src/data/raw/processed_images.zip
+src/data/raw/*.csv
+src/data/embeddings/
 *.npy
 *.zip
 

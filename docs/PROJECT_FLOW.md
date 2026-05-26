@@ -15,7 +15,7 @@ Docker DB 실행: docker compose up -d
     ↓
 DB 복원: docker exec -i desk-postgres psql -U postgres postgres < dump.sql
     ↓
-python main.py recommend
+python src/main.py recommend
 ```
 
 ### 실행 체크리스트
@@ -26,7 +26,7 @@ python main.py recommend
 [ ] .env 파일 작성 (.env.example 참고)
 [ ] docker compose up -d
 [ ] docker exec -i desk-postgres psql -U postgres postgres < dump.sql
-[ ] python main.py recommend
+[ ] python src/main.py recommend
 ```
 
 ---
@@ -42,11 +42,11 @@ CSV 내보내기 → Colab 업로드
     ↓
 Colab: Jina CLIP v2 이미지·텍스트 임베딩 생성
     ↓
-npy 3종 다운로드 → data/embeddings/ 배치
+npy 3종 다운로드 → src/data/embeddings/ 배치
     ↓
-python scripts/import_embeddings.py (DB 적재)
+python src/scripts/import_embeddings.py (DB 적재)
     ↓
-python main.py recommend
+python src/main.py recommend
     ↓
 docker exec desk-postgres pg_dump -U postgres postgres > dump.sql (팀원 공유용)
 ```
@@ -67,8 +67,8 @@ docker exec desk-postgres pg_dump -U postgres postgres > dump.sql (팀원 공유
 ## Step 2. CSV 내보내기
 
 ```bash
-python scripts/export_for_csv.py
-# → data/raw/products.csv 생성 (id, image_url, category, title)
+python src/scripts/export_for_csv.py
+# → deskterior/data/raw/products.csv 생성 (id, image_url, category, title)
 ```
 
 이 CSV를 Colab에 업로드해 임베딩 생성에 사용합니다.
@@ -92,10 +92,10 @@ python scripts/export_for_csv.py
 
 ## Step 4. 임베딩 DB 적재
 
-생성된 npy 3개를 `data/embeddings/`에 배치한 뒤:
+생성된 npy 3개를 `src/data/embeddings/`에 배치한 뒤:
 
 ```bash
-python scripts/import_embeddings.py
+python src/scripts/import_embeddings.py
 ```
 
 - `product_ids.npy`로 어느 row에 저장할지 결정
@@ -110,7 +110,7 @@ python scripts/import_embeddings.py
 상품 사이즈 정보(`metadata` JSONB 컬럼)를 파싱합니다.
 
 ```bash
-python scripts/update_metadata.py
+python src/scripts/update_metadata.py
 ```
 
 - 모니터 인치, 키보드 배열(텐키리스 등), 마우스 무선 여부 등을 상품명에서 파싱
@@ -121,7 +121,7 @@ python scripts/update_metadata.py
 ## Step 6. 추천 실행
 
 ```bash
-python main.py recommend
+python src/main.py recommend
 ```
 
 테마(white/black/gaming/wood)와 예산을 입력하면 TOP 3 데스크 셋업 번들이 출력됩니다.
@@ -147,6 +147,6 @@ docker exec desk-postgres pg_dump -U postgres postgres > dump.sql
 | `deskterior/retrieval/searcher.py` | Jina CLIP v2 임베딩 + pgvector 검색 |
 | `deskterior/recommender/engine.py` | Beam Search + ThemeEvidence 추천 알고리즘 |
 | `deskterior/recommender/config.py` | 테마 프리셋, 카테고리, threshold 설정 |
-| `scripts/import_embeddings.py` | npy → DB 적재 |
-| `scripts/export_for_csv.py` | DB → CSV 내보내기 |
-| `scripts/update_metadata.py` | 사이즈 메타데이터 파싱 업데이트 |
+| `src/scripts/import_embeddings.py` | npy → DB 적재 |
+| `src/scripts/export_for_csv.py` | DB → CSV 내보내기 |
+| `src/scripts/update_metadata.py` | 사이즈 메타데이터 파싱 업데이트 |

@@ -65,10 +65,10 @@ CATEGORY_KEYWORDS = {
     "LIGHTING":     ["라이트바", "스크린바", "모니터 조명", "데스크 램프", "lighting bar"],
     "SPEAKER":      ["스피커", "speaker", "사운드바", "pc 스피커"],
     "CLOCK":        ["시계", "탁상시계", "벽시계", "알람시계", "clock"],
-    "DESK_LAMP":    ["스탠드", "독서등", "스탠드 조명", "desk lamp", "테이블 램프"],
-    "DECO":         ["인테리어 소품", "오브제", "장식품", "데코", "소품", "캔들", "화분"],
     "HEADSET_STAND": ["헤드셋 거치대", "헤드폰 거치대", "헤드셋 스탠드", "헤드폰 스탠드",
                       "headset stand", "headphone stand"],
+    "DESK_LAMP":    ["스탠드", "독서등", "스탠드 조명", "desk lamp", "테이블 램프"],
+    "DECO":         ["인테리어 소품", "오브제", "장식품", "데코", "소품", "캔들", "화분"],
     "HEADSET":      ["헤드셋", "헤드폰", "headset", "headphone", "게이밍 헤드셋", "무선 헤드셋"],
 }
 

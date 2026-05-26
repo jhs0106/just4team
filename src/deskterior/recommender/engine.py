@@ -815,7 +815,7 @@ def _print_product_line(sp: ScoredProduct) -> None:
     cat_label = CATEGORY_LABELS.get(p.category, p.category)
     url_note  = f"\n      URL: {p.product_url}" if p.product_url else ""
 
-    img_path = os.path.join("data", "raw", "processed_images", f"{p.id}.png")
+    img_path = os.path.join("src", "data", "raw", "processed_images", f"{p.id}.png")
     img_note = f"\n      이미지: {img_path}" if os.path.exists(img_path) else ""
 
     size_str  = _format_size(p.metadata, p.category)

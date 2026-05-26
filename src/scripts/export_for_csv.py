@@ -12,8 +12,8 @@ with conn.cursor() as cur:
     rows = cur.fetchall()
 conn.close()
 
-os.makedirs(os.path.join("data", "raw"), exist_ok=True)
-output = os.path.join("data", "raw", "products.csv")
+os.makedirs(os.path.join("src", "data", "raw"), exist_ok=True)
+output = os.path.join("src", "data", "raw", "products.csv")
 with open(output, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
     writer.writerow(["id", "image_url", "category", "title"])

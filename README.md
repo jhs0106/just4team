@@ -102,11 +102,8 @@ python main.py
 
 | 명령어 | 설명 |
 |---|---|
-| `python main.py recommend` | 테마 + 예산 기반 셋업 번들 추천 (신규 엔진) |
-| `python main.py search` | 단일 상품 벡터 검색 |
-| `python main.py` | 인터랙티브 메뉴 (검색 / 추천) |
-| `python main.py collect` | 네이버 쇼핑 상품 수집 (데이터 구축 시) |
-| `python main.py vectorize` | 레거시 KoCLIP 벡터화 |
+| `python main.py` | 테마 + 예산 기반 셋업 번들 추천 |
+| `python main.py recommend` | 동일 |
 
 ---
 
@@ -116,39 +113,42 @@ python main.py
 desk_project/
 ├── deskterior/
 │   ├── cli/
-│   │   ├── recommend.py        # 테마+예산 추천 CLI (신규 엔진 진입점)
-│   │   ├── interactive.py      # 인터랙티브 메뉴
-│   │   ├── search.py           # 단일 상품 검색 CLI
-│   │   ├── pipeline.py         # 데이터 수집/벡터화 파이프라인 CLI
-│   │   └── cli.py              # CLI 공통 헬퍼
+│   │   └── recommend.py        # 추천 CLI 진입점
 │   ├── recommender/
 │   │   ├── engine.py           # Beam Search + ThemeEvidence 추천 알고리즘
 │   │   └── config.py           # 테마 프리셋, 카테고리, 임계값 설정
-│   ├── pipeline/
-│   │   ├── collector.py        # 네이버 쇼핑 API 수집기
-│   │   └── vectorizer.py       # 레거시 KoCLIP 벡터화
 │   ├── retrieval/
-│   │   └── searcher.py         # Jina CLIP v2 임베딩 + pgvector 검색
+│   │   └── searcher.py         # Jina CLIP v2 텍스트 임베딩 생성
 │   ├── database/
-│   │   └── manager.py          # PostgreSQL 연결, UPSERT, 임베딩 업데이트
-│   ├── core/
-│   │   ├── config.py           # 환경설정 (.env 로드)
-│   │   └── scoring.py          # z-score, minmax 등 점수 유틸
-│   └── legacy/
-│       └── old_recommender.py  # 레거시 추천 엔진 (색감·테마·용도 기반)
+│   │   └── manager.py          # PostgreSQL 연결, UPSERT, 사이즈 파싱
+│   └── core/
+│       └── config.py           # 환경설정 (.env 로드), 카테고리 설정
 ├── scripts/
-│   ├── import_embeddings.py    # npy 임베딩 → DB 적재
-│   ├── export_for_csv.py       # DB → CSV 내보내기
+│   ├── import_embeddings.py    # npy 임베딩 → DB 적재 (데이터 구축 시)
+│   ├── export_for_csv.py       # DB → CSV 내보내기 (Colab 업로드용)
 │   ├── update_metadata.py      # 상품 사이즈 메타데이터 파싱 업데이트
 │   └── update_speaker_metadata.py  # 스피커 사이즈 추정값 업데이트
 ├── tests/                      # 유닛테스트
 ├── notebooks/                  # Colab 임베딩/배경제거 노트북
 ├── docs/                       # 상세 문서
-├── main.py                     # 전체 진입점
+├── main.py                     # 진입점 (recommend만)
 ├── docker-compose.yml          # PostgreSQL + pgvector 컨테이너 설정
 ├── .env.example                # 환경변수 템플릿
 └── requirements.txt
 ```
+
+### 제거된 파일 (구버전)
+
+| 파일 | 제거 이유 |
+|---|---|
+| `deskterior/legacy/old_recommender.py` | 구버전 추천 엔진 (색감·테마·용도 입력 방식) |
+| `deskterior/pipeline/collector.py` | 네이버 API 수집기 — 추천 기능과 무관 |
+| `deskterior/pipeline/vectorizer.py` | 레거시 KoCLIP 벡터화 — Jina CLIP v2로 대체됨 |
+| `deskterior/cli/interactive.py` | 구버전 추천 엔진 인터랙티브 메뉴 |
+| `deskterior/cli/search.py` | 단일 상품 검색 CLI |
+| `deskterior/cli/pipeline.py` | 수집/벡터화 파이프라인 CLI |
+| `deskterior/cli/cli.py` | 구버전 CLI 공통 헬퍼 |
+| `deskterior/core/scoring.py` | z-score/minmax 유틸 — 구버전 검색에서만 사용 |
 
 ---
 
@@ -166,9 +166,9 @@ desk_project/
 
 ## 데이터 직접 구축 (데이터 제공자용)
 
-팀원이 아닌 데이터 구축 담당자는 아래 순서로 진행합니다.
+> 상품 데이터가 이미 있는 경우 이 과정은 불필요합니다.
 
-1. 상품 수집: `python main.py collect`
+1. 네이버 쇼핑 API로 상품 수집 (별도 스크립트 직접 실행)
 2. CSV 내보내기: `python scripts/export_for_csv.py`
 3. Colab에서 Jina CLIP v2 임베딩 생성 (`notebooks/Jina_CLIP_v2_test.ipynb`)
 4. npy 3종(`product_ids.npy`, `image_embeds.npy`, `text_embeds.npy`)을 `data/embeddings/`에 배치
