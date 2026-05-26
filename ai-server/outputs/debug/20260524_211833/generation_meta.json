@@ -1,6 +1,0 @@
-{
-  "backbone": "sd1.5-controlnet+ip-adapter+lora",
-  "pipeline_mode": "controlnet",
-  "has_lora": false,
-  "lora_path_exists": true
-}
