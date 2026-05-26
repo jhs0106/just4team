@@ -1,0 +1,23 @@
+{
+  "category": "MONITOR",
+  "image_id": 300,
+  "width_mm": 600,
+  "depth_mm": 200,
+  "height_mm": null,
+  "target_bbox_width_px": 420,
+  "target_bbox_height_px": 252,
+  "product_original_width_px": 492,
+  "product_original_height_px": 492,
+  "product_tight_crop_width_px": 492,
+  "product_tight_crop_height_px": 341,
+  "actual_composite_width_px": 364,
+  "actual_composite_height_px": 251,
+  "actual_sd_width_px": 252,
+  "actual_sd_height_px": 175,
+  "sd_input_size": "512x312",
+  "context_crop_size": "740x449",
+  "scale_to_bbox": 0.5132,
+  "category_max_scale": 2.5,
+  "mask_type": "silhouette",
+  "final_paste_mask_type": "silhouette"
+}

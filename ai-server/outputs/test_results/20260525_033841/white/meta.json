@@ -1,0 +1,41 @@
+{
+  "style": "white",
+  "budget": 500000,
+  "categories": [
+    "MONITOR",
+    "KEYBOARD",
+    "MOUSE",
+    "SPEAKER",
+    "DESK_LAMP"
+  ],
+  "desk_image": "ai-server\\data\\test\\desk_image2.jpg",
+  "top_view_image": "ai-server\\data\\test\\desk_top_image2.jpg",
+  "desk_width_mm": 1200,
+  "desk_depth_mm": 600,
+  "selected_products": [
+    {
+      "category": "MONITOR",
+      "image_id": 222,
+      "title": "LG 24인치( 60.4cm) 게이밍 모니터 24G411A 144Hz",
+      "mock_price": 350000
+    },
+    {
+      "category": "KEYBOARD",
+      "image_id": 383,
+      "title": "애플 매직 키보드 화이트, 기본 모델",
+      "mock_price": 80000
+    },
+    {
+      "category": "MOUSE",
+      "image_id": 595,
+      "title": "로지텍 코리아 Pebble2 M350S 페블 블루투스 무선 마우스 도브 화이트",
+      "mock_price": 50000
+    }
+  ],
+  "total_price": 480000,
+  "elapsed_s": 281.3,
+  "num_removed": 29,
+  "num_placed": 3,
+  "seed": 42,
+  "job_id": "b12ce20a-5005-4ee8-b6d5-618f7cfbbb26"
+}

@@ -1,0 +1,40 @@
+{
+  "form_tier": "upright",
+  "warp_applied": false,
+  "ip_adapter_scale": 0.3,
+  "ip_adapter_scale_original": 0.4,
+  "inpaint_strength": 0.65,
+  "sd_init_image": "composite_sd_with_shadow",
+  "blend_inner_weight": 0.93,
+  "blend_edge_weight": 0.3,
+  "risk_shape_risk": "risky",
+  "risk_aspect_ratio": 1.275,
+  "risk_alpha_fill_ratio": 0.7926,
+  "risk_bottom_contact_w_ratio": 1.0,
+  "risk_has_clear_contact_base": true,
+  "risk_is_flat_like": false,
+  "risk_adaptive_strategy": "upright+risky",
+  "risk_reasons": [
+    "contact_w_ratio=1.00>0.70(no_stand?)"
+  ],
+  "warp_tilt_deg": null,
+  "depth_shading_max": 0.18,
+  "alpha_bottom_norm": 0.9906,
+  "alpha_bottom_y_in_fit": 171,
+  "placement_contact_y_sd": 282,
+  "applied_contact_shift": 2,
+  "contact_base_bbox_sd": [
+    147,
+    232,
+    364,
+    282
+  ],
+  "contact_y_sd": 282,
+  "shadow_offset": [
+    0,
+    0
+  ],
+  "shadow_blur": 9,
+  "shadow_opacity": 0.55,
+  "mask_type": "silhouette+contact_shadow+floor"
+}

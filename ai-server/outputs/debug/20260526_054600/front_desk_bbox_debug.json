@@ -1,0 +1,21 @@
+{
+  "front_desk_bbox_raw": [
+    139,
+    361,
+    404,
+    395
+  ],
+  "front_desk_bbox_clamped": [
+    139,
+    361,
+    404,
+    395
+  ],
+  "front_desk_bbox_source": "sam2_override",
+  "desk_bbox_clamp_applied": false,
+  "fv_dy1": 361,
+  "fv_dy2": 395,
+  "fv_dh": 34,
+  "image_h": 640,
+  "image_w": 480
+}

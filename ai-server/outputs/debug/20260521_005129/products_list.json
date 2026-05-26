@@ -1,0 +1,128 @@
+[
+  {
+    "category": "MONITOR",
+    "image_id": 306,
+    "region": [
+      328,
+      51,
+      748,
+      303
+    ],
+    "width_px": 420,
+    "height_px": 252,
+    "placement_source": "available_space_scoring",
+    "fallback_reason": null,
+    "candidate_count": 49,
+    "overlap_reject_count": 0,
+    "low_score_reject_count": 28,
+    "score": 0.97,
+    "available_region_id": 1,
+    "anchor_rx": 0.501,
+    "anchor_ry": 0.215
+  },
+  {
+    "category": "DESK_SHELF",
+    "image_id": 1042,
+    "region": [
+      102,
+      217,
+      428,
+      282
+    ],
+    "width_px": 326,
+    "height_px": 65,
+    "placement_source": "available_space_scoring",
+    "fallback_reason": null,
+    "candidate_count": 49,
+    "overlap_reject_count": 0,
+    "low_score_reject_count": 5,
+    "score": 0.428,
+    "available_region_id": 1,
+    "anchor_rx": 0.215,
+    "anchor_ry": 0.215
+  },
+  {
+    "category": "KEYBOARD",
+    "image_id": 343,
+    "region": [
+      358,
+      251,
+      718,
+      323
+    ],
+    "width_px": 360,
+    "height_px": 72,
+    "placement_source": "available_space_scoring",
+    "fallback_reason": null,
+    "candidate_count": 49,
+    "overlap_reject_count": 0,
+    "low_score_reject_count": 21,
+    "score": 0.951,
+    "available_region_id": 1,
+    "anchor_rx": 0.501,
+    "anchor_ry": 0.644
+  },
+  {
+    "category": "MOUSE",
+    "image_id": 713,
+    "region": [
+      787,
+      291,
+      834,
+      326
+    ],
+    "width_px": 47,
+    "height_px": 35,
+    "placement_source": "available_space_scoring",
+    "fallback_reason": null,
+    "candidate_count": 49,
+    "overlap_reject_count": 0,
+    "low_score_reject_count": 16,
+    "score": 0.828,
+    "available_region_id": 1,
+    "anchor_rx": 0.787,
+    "anchor_ry": 0.644
+  },
+  {
+    "category": "DESK_LAMP",
+    "image_id": 1881,
+    "region": [
+      854,
+      176,
+      944,
+      306
+    ],
+    "width_px": 90,
+    "height_px": 130,
+    "placement_source": "available_space_scoring",
+    "fallback_reason": null,
+    "candidate_count": 14,
+    "overlap_reject_count": 35,
+    "low_score_reject_count": 8,
+    "score": 0.0,
+    "available_region_id": 1,
+    "anchor_rx": 0.93,
+    "anchor_ry": 0.072
+  },
+  {
+    "category": "DECO",
+    "image_id": 2005,
+    "region": [
+      787,
+      252,
+      834,
+      297
+    ],
+    "width_px": 47,
+    "height_px": 45,
+    "placement_source": "available_space_scoring",
+    "fallback_reason": null,
+    "candidate_count": 45,
+    "overlap_reject_count": 4,
+    "low_score_reject_count": 27,
+    "score": 0.925,
+    "available_region_id": 1,
+    "anchor_rx": 0.787,
+    "anchor_ry": 0.358
+  }
+]

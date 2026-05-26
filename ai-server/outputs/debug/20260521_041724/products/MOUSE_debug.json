@@ -1,0 +1,23 @@
+{
+  "category": "MOUSE",
+  "image_id": 644,
+  "width_mm": null,
+  "depth_mm": null,
+  "height_mm": null,
+  "target_bbox_width_px": 60,
+  "target_bbox_height_px": 45,
+  "product_original_width_px": 830,
+  "product_original_height_px": 830,
+  "product_tight_crop_width_px": 830,
+  "product_tight_crop_height_px": 591,
+  "actual_composite_width_px": 60,
+  "actual_composite_height_px": 42,
+  "actual_sd_width_px": 256,
+  "actual_sd_height_px": 182,
+  "sd_input_size": "512x448",
+  "context_crop_size": "120x105",
+  "scale_to_bbox": 0.3084,
+  "category_max_scale": 3.0,
+  "mask_type": "silhouette",
+  "final_paste_mask_type": "silhouette"
+}

@@ -1,0 +1,17 @@
+{
+  "alpha_bottom_norm": 0.9772,
+  "alpha_bottom_y_in_fit": 69,
+  "placement_contact_y_sd": 199,
+  "applied_contact_shift": 2,
+  "contact_y": 365,
+  "contact_x1": 417,
+  "contact_x2": 510,
+  "contact_shadow_opacity": 0.5,
+  "contact_shadow_blur": 11,
+  "cast_shadow_opacity": 0.14,
+  "cast_shadow_blur": 25,
+  "cast_shadow_offset": [
+    35,
+    4
+  ]
+}

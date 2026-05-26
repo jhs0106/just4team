@@ -1,0 +1,39 @@
+{
+  "style": "white",
+  "budget": 500000,
+  "categories": [
+    "MONITOR",
+    "KEYBOARD",
+    "MOUSE",
+    "SPEAKER",
+    "DESK_LAMP"
+  ],
+  "desk_width_mm": 1400,
+  "desk_depth_mm": 700,
+  "selected_products": [
+    {
+      "category": "MONITOR",
+      "image_id": 230,
+      "title": "삼성전자 32인치(80.0cm) 뷰피니티 S7 고해상도 UHD 모니터 화이트 S32D701 LS32D701EAKXKR",
+      "mock_price": 350000
+    },
+    {
+      "category": "KEYBOARD",
+      "image_id": 383,
+      "title": "애플 매직 키보드 화이트, 기본 모델",
+      "mock_price": 80000
+    },
+    {
+      "category": "MOUSE",
+      "image_id": 536,
+      "title": "ATK VXE R1 SE+ 유무선 블루투스 잠자리 게이밍 마우스 국내정품 화이트",
+      "mock_price": 50000
+    }
+  ],
+  "total_price": 480000,
+  "elapsed_s": 47.5,
+  "num_removed": 19,
+  "num_placed": 3,
+  "seed": 42,
+  "job_id": "7c2a6a86-b346-4580-ad81-1d1de6631554"
+}

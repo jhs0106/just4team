@@ -1,0 +1,62 @@
+[
+  {
+    "category": "MONITOR",
+    "image_id": 304,
+    "region": [
+      433,
+      131,
+      642,
+      273
+    ]
+  },
+  {
+    "category": "SPEAKER",
+    "image_id": 1568,
+    "region": [
+      317,
+      256,
+      347,
+      289
+    ]
+  },
+  {
+    "category": "DESK_LAMP",
+    "image_id": 1910,
+    "region": [
+      841,
+      238,
+      868,
+      283
+    ]
+  },
+  {
+    "category": "DECO",
+    "image_id": 2065,
+    "region": [
+      880,
+      267,
+      907,
+      291
+    ]
+  },
+  {
+    "category": "KEYBOARD",
+    "image_id": 434,
+    "region": [
+      449,
+      279,
+      644,
+      321
+    ]
+  },
+  {
+    "category": "MOUSE",
+    "image_id": 560,
+    "region": [
+      746,
+      297,
+      776,
+      319
+    ]
+  }
+]

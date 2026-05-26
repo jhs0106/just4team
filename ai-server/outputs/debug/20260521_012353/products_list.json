@@ -1,0 +1,173 @@
+[
+  {
+    "category": "MONITOR",
+    "image_id": 291,
+    "region": [
+      328,
+      51,
+      748,
+      303
+    ],
+    "width_px": 420,
+    "height_px": 252,
+    "placement_source": "available_space_scoring",
+    "selected_reason": "high_score",
+    "fallback_reason": null,
+    "candidate_count": 49,
+    "overlap_reject_count": 0,
+    "low_score_reject_count": 28,
+    "score": 0.97,
+    "available_region_id": 1,
+    "anchor_rx": 0.501,
+    "anchor_ry": 0.215
+  },
+  {
+    "category": "DESK_SHELF",
+    "image_id": 1134,
+    "region": [
+      378,
+      232,
+      698,
+      296
+    ],
+    "width_px": 320,
+    "height_px": 64,
+    "placement_source": "available_space_scoring",
+    "selected_reason": "positive_score",
+    "fallback_reason": null,
+    "candidate_count": 49,
+    "overlap_reject_count": 0,
+    "low_score_reject_count": 5,
+    "score": 0.428,
+    "available_region_id": 1,
+    "anchor_rx": 0.215,
+    "anchor_ry": 0.215
+  },
+  {
+    "category": "MOUSE",
+    "image_id": 597,
+    "region": [
+      651,
+      291,
+      698,
+      326
+    ],
+    "width_px": 47,
+    "height_px": 35,
+    "placement_source": "available_space_scoring",
+    "selected_reason": "high_score",
+    "fallback_reason": null,
+    "candidate_count": 49,
+    "overlap_reject_count": 0,
+    "low_score_reject_count": 11,
+    "score": 0.877,
+    "available_region_id": 1,
+    "anchor_rx": 0.644,
+    "anchor_ry": 0.644
+  },
+  {
+    "category": "SPEAKER",
+    "image_id": 1430,
+    "region": [
+      780,
+      222,
+      840,
+      282
+    ],
+    "width_px": 60,
+    "height_px": 60,
+    "placement_source": "available_space_scoring",
+    "selected_reason": "high_score",
+    "fallback_reason": null,
+    "candidate_count": 36,
+    "overlap_reject_count": 13,
+    "low_score_reject_count": 6,
+    "score": 0.973,
+    "available_region_id": 1,
+    "anchor_rx": 0.787,
+    "anchor_ry": 0.215
+  },
+  {
+    "category": "SPEAKER",
+    "image_id": 1472,
+    "region": [
+      235,
+      249,
+      295,
+      311
+    ],
+    "width_px": 60,
+    "height_px": 62,
+    "placement_source": "available_space_scoring",
+    "selected_reason": "positive_score",
+    "fallback_reason": null,
+    "candidate_count": 30,
+    "overlap_reject_count": 19,
+    "low_score_reject_count": 6,
+    "score": 0.427,
+    "available_region_id": 1,
+    "anchor_rx": 0.215,
+    "anchor_ry": 0.501
+  },
+  {
+    "category": "DESK_LAMP",
+    "image_id": 1881,
+    "region": [
+      130,
+      176,
+      220,
+      306
+    ],
+    "width_px": 90,
+    "height_px": 130,
+    "placement_source": "available_space_scoring",
+    "selected_reason": "positive_score",
+    "fallback_reason": null,
+    "candidate_count": 14,
+    "overlap_reject_count": 35,
+    "low_score_reject_count": 3,
+    "score": 0.033,
+    "available_region_id": 1,
+    "anchor_rx": 0.072,
+    "anchor_ry": 0.072
+  },
+  {
+    "category": "DECO",
+    "image_id": 2152,
+    "region": [
+      921,
+      266,
+      971,
+      311
+    ],
+    "width_px": 50,
+    "height_px": 45,
+    "placement_source": "available_space_scoring",
+    "selected_reason": "high_score",
+    "fallback_reason": null,
+    "candidate_count": 31,
+    "overlap_reject_count": 18,
+    "low_score_reject_count": 22,
+    "score": 0.531,
+    "available_region_id": 1,
+    "anchor_rx": 0.93,
+    "anchor_ry": 0.501
+  },
+  {
+    "category": "KEYBOARD",
+    "image_id": 382,
+    "region": null,
+    "width_px": null,
+    "height_px": null,
+    "placement_source": "unplaced",
+    "selected_reason": null,
+    "fallback_reason": "no_non_overlapping_candidate",
+    "candidate_count": 0,
+    "overlap_reject_count": 49,
+    "low_score_reject_count": 0,
+    "score": null,
+    "available_region_id": null,
+    "anchor_rx": null,
+    "anchor_ry": null
+  }
+]

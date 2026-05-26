@@ -1,0 +1,25 @@
+{
+  "contact_y": 282,
+  "contact_x1": 163,
+  "contact_x2": 218,
+  "contact_base_bbox": [
+    163,
+    277,
+    218,
+    287
+  ],
+  "contact_shadow_opacity": 0.58,
+  "contact_shadow_blur": 9,
+  "cast_shadow_opacity": 0.14,
+  "cast_shadow_blur": 23,
+  "cast_shadow_offset": [
+    24,
+    13
+  ],
+  "cast_shadow_bbox": [
+    163,
+    281,
+    265,
+    309
+  ]
+}

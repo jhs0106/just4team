@@ -1,0 +1,13 @@
+{
+  "contact_y": 1955,
+  "contact_x1": 3023,
+  "contact_x2": 3026,
+  "contact_shadow_opacity": 0.55,
+  "contact_shadow_blur": 9,
+  "cast_shadow_opacity": 0.15,
+  "cast_shadow_blur": 21,
+  "cast_shadow_offset": [
+    34,
+    13
+  ]
+}

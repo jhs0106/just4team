@@ -1,0 +1,16 @@
+{
+  "alpha_bottom_norm": 0.9979,
+  "alpha_bottom_y_in_fit": 192,
+  "placement_contact_y_sd": 320,
+  "applied_contact_shift": 1,
+  "contact_y": 346,
+  "contact_x1": 806,
+  "contact_x2": 815,
+  "shadow_strength": 0.42,
+  "shadow_bbox": [
+    806,
+    327,
+    815,
+    365
+  ]
+}

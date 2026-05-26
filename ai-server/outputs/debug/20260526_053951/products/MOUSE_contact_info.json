@@ -1,0 +1,61 @@
+{
+  "form_tier": "flat",
+  "warp_applied": true,
+  "ip_adapter_scale": 0.55,
+  "ip_adapter_scale_original": 0.55,
+  "inpaint_strength": 0.65,
+  "sd_init_image": "composite_sd_with_shadow",
+  "blend_inner_weight": 0.65,
+  "blend_edge_weight": 0.25,
+  "risk_shape_risk": "safe",
+  "risk_aspect_ratio": 0.548,
+  "risk_alpha_fill_ratio": 0.8432,
+  "risk_bottom_contact_w_ratio": 0.049,
+  "risk_has_clear_contact_base": true,
+  "risk_is_flat_like": false,
+  "risk_adaptive_strategy": "flat+safe",
+  "risk_reasons": [],
+  "warp_tilt_deg": 45.0,
+  "depth_shading_max": 0.12,
+  "alpha_bottom_norm": 0.9982,
+  "alpha_bottom_y_in_fit": 152,
+  "placement_contact_y_sd": 280,
+  "applied_contact_shift": 1,
+  "contact_base_bbox_sd": [
+    252,
+    275,
+    259,
+    281
+  ],
+  "contact_y_sd": 281,
+  "shadow_offset": [
+    0,
+    0
+  ],
+  "shadow_blur": 5,
+  "shadow_opacity": 0.4,
+  "mask_type": "silhouette+contact_shadow+floor",
+  "contact_y": 614,
+  "contact_x1": 1030,
+  "contact_x2": 1034,
+  "contact_base_bbox": [
+    1030,
+    609,
+    1034,
+    619
+  ],
+  "contact_shadow_opacity": 0.55,
+  "contact_shadow_blur": 9,
+  "cast_shadow_opacity": 0.15,
+  "cast_shadow_blur": 21,
+  "cast_shadow_offset": [
+    8,
+    2
+  ],
+  "cast_shadow_bbox": [
+    990,
+    602,
+    1090,
+    630
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "backbone": "sd1.5-controlnet+ip-adapter+lora",
+  "pipeline_mode": "cv_composite",
+  "has_lora": true,
+  "lora_path_exists": true
+}
