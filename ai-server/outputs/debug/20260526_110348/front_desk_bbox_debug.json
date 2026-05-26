@@ -1,0 +1,51 @@
+{
+  "tabletop_valid": true,
+  "tabletop_source": "sam2_override",
+  "tabletop_bbox": [
+    149,
+    226,
+    869,
+    593
+  ],
+  "tabletop_invalid_reason": null,
+  "tabletop_clamp_flag": false,
+  "tabletop_candidates": [
+    {
+      "source": "sam2_override",
+      "bbox": [
+        149,
+        226,
+        869,
+        593
+      ],
+      "valid": true,
+      "reason": "valid",
+      "fv_dh": 367,
+      "fv_dw": 720,
+      "fv_dh_ratio": 0.4302,
+      "fv_dw_dh_ratio": 1.962,
+      "bottom_margin_ratio": 0.3048
+    },
+    {
+      "source": "dino_raw",
+      "bbox": [
+        185,
+        280,
+        1087,
+        745
+      ],
+      "valid": false,
+      "reason": "too_thick_ratio:0.545>0.45",
+      "fv_dh": 465,
+      "fv_dw": 902,
+      "fv_dh_ratio": 0.5451,
+      "fv_dw_dh_ratio": 1.94,
+      "bottom_margin_ratio": 0.1266
+    }
+  ],
+  "image_w": 1280,
+  "image_h": 853,
+  "tabletop_fv_dh": 367,
+  "tabletop_fv_dw": 720,
+  "tabletop_fv_dh_ratio": 0.4302
+}

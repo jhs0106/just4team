@@ -1,0 +1,27 @@
+{
+  "tabletop_valid": false,
+  "tabletop_source": null,
+  "tabletop_bbox": null,
+  "tabletop_invalid_reason": "all_candidates_invalid",
+  "tabletop_clamp_flag": false,
+  "tabletop_candidates": [
+    {
+      "source": "dino_raw",
+      "bbox": [
+        61,
+        259,
+        1016,
+        529
+      ],
+      "valid": false,
+      "reason": "too_thick_ratio:0.507>0.45",
+      "fv_dh": 270,
+      "fv_dw": 955,
+      "fv_dh_ratio": 0.5066,
+      "fv_dw_dh_ratio": 3.537,
+      "bottom_margin_ratio": 0.0075
+    }
+  ],
+  "image_w": 1016,
+  "image_h": 533
+}

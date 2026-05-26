@@ -764,21 +764,25 @@ def _run_generate(job_id: str, req: GenerateRequest):
             front_desk_bbox_override=_front_desk_bbox_override,
         )
 
-        # tabletop bbox invalid이면 placement 강행 금지 (fallback도 막음).
-        # 이전엔 invalid bbox로 top-view→front-view 투영이 망가져도 그대로 _calc_regions로
-        # 강제 배치 → 결과 이미지에서 제품이 벽/바닥에 그려지는 문제. 명시적으로 fail.
+        # tabletop bbox invalid 처리는 빈 책상 모드(RemoveMode.add) 한정.
+        # 일반 모드(remove/preserve)는 옛 fallback 경로(_calc_regions)로 진행 — 1차 fix는
+        # 빈 책상 모드에서 SAM2/DINO가 책상 상판을 잘못 잡는 케이스만 다룬 것이라,
+        # 일반 모드에 strict invalid 적용 시 정상 사진도 fail되는 회귀 발생.
         if not _tabletop_meta.get("tabletop_valid", True):
             _reason   = _tabletop_meta.get("tabletop_invalid_reason", "unknown")
             _attempts = _tabletop_meta.get("tabletop_candidates", [])
             _summary  = " | ".join(f"{a['source']}:{a['reason']}" for a in _attempts)
-            job_store[job_id].status = JobStatus.failed
-            job_store[job_id].error  = (
-                f"tabletop bbox invalid: {_reason}. "
-                f"책상 상판 영역을 인식하지 못했습니다. 클릭 위치를 책상 상판 중앙으로 다시 시도해주세요. "
-                f"후보 시도: {_summary}"
-            )
-            print(f"[Generate] tabletop invalid → job failed. {_summary}")
-            return
+            if mode == RemoveMode.add:
+                job_store[job_id].status = JobStatus.failed
+                job_store[job_id].error  = (
+                    f"tabletop bbox invalid: {_reason}. "
+                    f"책상 상판 영역을 인식하지 못했습니다. 클릭 위치를 책상 상판 중앙으로 다시 시도해주세요. "
+                    f"후보 시도: {_summary}"
+                )
+                print(f"[Generate] tabletop invalid (add mode) → job failed. {_summary}")
+                return
+            else:
+                print(f"[Generate] tabletop invalid (mode={mode.value}) — 일반 모드는 fallback 진행. {_summary}")
 
         # === dedup + space-fail fallback (분기 공통) ===
         _scored_items = [i for i in _all_space_results if i.get("region") is not None]
