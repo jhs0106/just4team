@@ -97,7 +97,9 @@ _CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
     "KEYBOARD":  (1.2, 99.0),
     "MOUSE":     (0.5, 2.0),
     "MONITOR":   (0.9, 3.5),
-    "SPEAKER":   (0.3, 2.5),
+    # SPEAKER: DB가 전부 사운드바형(가로로 긴 ar 3~5). (0.3, 2.5)면 사운드바가 CV fallback에
+    # 떨어져 SD 안 거침. (0.3, 6.0)으로 완화 — 사운드바도 ControlNet+IP-Adapter 통과.
+    "SPEAKER":   (0.3, 6.0),
     "DESK_LAMP": (0.2, 3.0),
     "LIGHTING":  (5.0, 30.0),
 }
