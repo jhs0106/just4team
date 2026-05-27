@@ -14,6 +14,7 @@ from .config import (
     _FRONT_CATS, _BACK_CATS, _REMOVAL_PROMPT, _CAT_RY_RANGE,
     _PRODUCT_FORM_TIER,
     TABLETOP_BBOX_HARD_CLAMP_ENABLED,
+    RANKER_WEIGHT,
 )
 from .utils import normalize_category, validate_tabletop_bbox
 from .composite import _detect_desk_bbox, _calc_regions
@@ -349,24 +350,25 @@ def score_region_for_product(
     rw: float | None = None,
     rh: float | None = None,
 ) -> tuple[float, dict]:
+    # pref_ry는 카테고리별 _PREFERRED_POS에서 가져와 통일. 카테고리간 의존은 rx에만 적용.
+    # 옛 코드는 ry까지 별도 magic (0.62/0.72)을 박아 _PREFERRED_POS가 사실상 무시됐음.
+    _pref = _PREFERRED_POS.get(cat, {"rx": 0.50, "ry": 0.50})
     if cat == "KEYBOARD" and "monitor_rx" in relation_state:
         pref_rx = relation_state["monitor_rx"]
-        pref_ry = 0.62
+        pref_ry = _pref["ry"]
     elif cat == "MOUSE":
         pref_rx = min(1.0, relation_state.get("keyboard_rx", 0.50) + 0.20)
-        pref_ry = relation_state.get("keyboard_ry", 0.62)
+        pref_ry = relation_state.get("keyboard_ry", _pref["ry"])
     elif cat == "MOUSEPAD":
-        # MOUSE는 KEYBOARD 우측에 배치되므로 MOUSEPAD도 그 위치(= MOUSE가 들어올 자리)에
-        # 미리 깔아둠. MOUSEPAD가 placement 순서상 MOUSE보다 먼저 배치되니 MOUSE 위치를
-        # 직접 참조 못 함 → KEYBOARD 위치 기반으로 동일하게 계산.
+        # MOUSEPAD가 placement 순서상 MOUSE보다 먼저 배치되니 MOUSE 위치를 직접 참조 못 함
+        # → KEYBOARD 위치 기반으로 동일하게 계산.
         pref_rx = min(1.0, relation_state.get("keyboard_rx", 0.50) + 0.20)
-        pref_ry = relation_state.get("keyboard_ry", 0.72)
+        pref_ry = relation_state.get("keyboard_ry", _pref["ry"])
     elif cat == "SPEAKER":
         pref_rx = 0.20 if rx <= 0.50 else 0.80
-        pref_ry = relation_state.get("monitor_ry", 0.25)
+        pref_ry = relation_state.get("monitor_ry", _pref["ry"])
     else:
-        pos = _PREFERRED_POS.get(cat, {"rx": 0.50, "ry": 0.50})
-        pref_rx, pref_ry = pos["rx"], pos["ry"]
+        pref_rx, pref_ry = _pref["rx"], _pref["ry"]
 
     dist  = ((rx - pref_rx) ** 2 + (ry - pref_ry) ** 2) ** 0.5
     score = max(0.0, 1.0 - dist * 2.0)
@@ -419,8 +421,8 @@ def score_region_for_product(
                 _feat         = _make_ranker_feature(cat, rx, ry, rw, rh, relation_state, placed_norm)
                 _prob         = _ranker["model"].predict_proba([_feat])[0][1]
                 learned_score = round((_prob - 0.5) * 3.0, 4)
-                score         = rule_score * 0.7 + learned_score * 0.3
-                ranker_used   = True
+                score         = rule_score * (1.0 - RANKER_WEIGHT) + learned_score * RANKER_WEIGHT
+                ranker_used   = (RANKER_WEIGHT > 0.0)
             except Exception:
                 ranker_skipped_reason = "error"
 

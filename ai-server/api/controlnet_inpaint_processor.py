@@ -571,10 +571,14 @@ class ControlNetInpaintProcessor:
         if _risk["risk_reasons"]:
             print(f"  [risk] {cat} reasons: {_risk['risk_reasons']}")
 
-        # 3-tier 카테고리 분류에 따른 처리:
-        #   flat (KEYBOARD/MOUSEPAD): perspective warp 적용
-        #   semi_flat (MOUSE/LAPTOP_STAND): warp 미적용, upright prompt 미적용
+        # 3-tier 카테고리 분류:
+        #   flat (KEYBOARD/MOUSEPAD): perspective warp 적용 — 정면 시점에 맞게 압축. 제품 사진은
+        #     위에서 본 마케팅 컷이 많아서 정면에 그대로 paste하면 "위에서 본 키보드를 정면에 붙인"
+        #     비현실적 결과. warp이 시점 정합을 만들어줌.
+        #   semi_flat (MOUSE/LAPTOP_STAND): warp 미적용
         #   upright (MONITOR/SPEAKER/DESK_LAMP 등): warp 절대 금지, upright prompt 추가
+        # TODO: _CAT_TILT_DEG는 hardcoded magic. 향후 책상 detection의 fv_dh/desk_depth로
+        #       depression 자동 추정 도입.
         _form_tier   = _PRODUCT_FORM_TIER.get(cat, "semi_flat")
         _is_flat     = (_form_tier == "flat")
         _is_upright  = (_form_tier == "upright")

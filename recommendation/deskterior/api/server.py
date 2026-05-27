@@ -127,6 +127,11 @@ def recommend(req: RecommendRequest) -> dict:
             )
             print(f"[/recommend ERROR] {msg}\n{tb_str}", flush=True)
             raise HTTPException(400, msg)
+        # xattn 비활성화 patch 후 image encoder가 NaN을 만드는 경우(xformers 호환 wheel 없는 환경
+        # 한계) text-only로 폴백 — 추천 자체는 계속 진행.
+        if user_image_emb is not None and any(v != v for v in user_image_emb):
+            print("[/recommend] image embedding NaN 감지 — text-only fallback", flush=True)
+            user_image_emb = None
 
     # 3. DB 연결 확인
     try:

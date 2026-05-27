@@ -67,11 +67,11 @@ _CV_CAT_MAX_SCALE: dict[str, float] = {
 _PREFERRED_POS = {
     "MONITOR":      {"rx": 0.50, "ry": 0.20},
     "DESK_SHELF":   {"rx": 0.50, "ry": 0.20},
-    # KEYBOARD/MOUSE/MOUSEPAD: ry 0.62 → 0.72로 상향. 옛 코드의 CONTACT_Y_OFFSET 32px
-    # (책상 앞 가장자리 접지 효과)을 ry 자체에 반영. 안 그러면 키보드가 책상 중간에 떠 있음.
-    "KEYBOARD":     {"rx": 0.50, "ry": 0.72},
-    "MOUSEPAD":     {"rx": 0.50, "ry": 0.72},
-    "MOUSE":        {"rx": 0.70, "ry": 0.72},
+    # KEYBOARD/MOUSE/MOUSEPAD: ry 0.55. 책상 detection이 윗면 + 다리까지 잡는 경우
+    # ry 0.72는 책상 밖(다리 사이)으로 떨어짐. 0.55는 책상 윗면 중앙-앞쪽이라 안정적.
+    "KEYBOARD":     {"rx": 0.50, "ry": 0.55},
+    "MOUSEPAD":     {"rx": 0.50, "ry": 0.55},
+    "MOUSE":        {"rx": 0.70, "ry": 0.55},
     "SPEAKER":      {"rx": 0.25, "ry": 0.25},
     "DESK_LAMP":    {"rx": 0.12, "ry": 0.30},
     "DECO":         {"rx": 0.75, "ry": 0.35},
@@ -92,7 +92,9 @@ _MIN_FRONT_SIZE = {
 }
 
 _CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
-    "KEYBOARD":  (2.0, 99.0),
+    # KEYBOARD: DB 마케팅 컷이 위에서 본 사선(ar≈1.3~1.8)도 많아 (2.0, 99.0)이면 거의 항상
+    # CV fallback에 떨어져 SD/ControlNet/IP-Adapter 통과 안 됨. (1.2, 99.0)으로 완화.
+    "KEYBOARD":  (1.2, 99.0),
     "MOUSE":     (0.5, 2.0),
     "MONITOR":   (0.9, 3.5),
     "SPEAKER":   (0.3, 2.5),
@@ -113,11 +115,11 @@ _CAT_RY_RANGE: dict[str, tuple[float, float]] = {
     "LAPTOP_STAND": (0.30, 0.55),   # 책상 중간
     "DECO":         (0.20, 0.55),   # 자유로움
     "CLOCK":        (0.18, 0.45),   # 자유로움
-    # KEYBOARD/MOUSE/MOUSEPAD: 0.55~0.78 → 0.62~0.85로 상향. 사용자 책상 사진에서
-    # 키보드는 보통 책상 앞 가장자리에 매우 가까이 놓임. 옛 (5/23) 결과와 정합.
-    "KEYBOARD":     (0.62, 0.85),
-    "MOUSE":        (0.62, 0.85),
-    "MOUSEPAD":     (0.62, 0.85),
+    # KEYBOARD/MOUSE/MOUSEPAD: 책상 detection이 윗면+다리까지 잡으면 ry 0.62~0.85는
+    # 책상 밖(다리 사이)으로 떨어짐. 0.35~0.70으로 보수적 — 책상 중앙~앞쪽 안전 범위.
+    "KEYBOARD":     (0.35, 0.70),
+    "MOUSE":        (0.35, 0.70),
+    "MOUSEPAD":     (0.35, 0.70),
 }
 
 _CONTACT_Y_OFFSET = {
@@ -297,6 +299,15 @@ TABLETOP_BBOX_HARD_CLAMP_ENABLED = False
 #   너무 가로형: fv_dw/fv_dh가 18 초과면 얇은 edge만 잡은 것
 TABLETOP_MIN_HEIGHT_RATIO         = 0.10
 TABLETOP_MIN_HEIGHT_PX            = 80
-TABLETOP_MAX_HEIGHT_RATIO         = 0.45
+# 0.45 → 0.65: desk_image2.jpg 한 장 기준 fit. 사용자 책상이 두꺼우면(다리까지 포함)
+# 0.45를 자주 초과해 sam2_override로 폴백 발생. 0.65는 더 관대.
+TABLETOP_MAX_HEIGHT_RATIO         = 0.65
 TABLETOP_MIN_BOTTOM_MARGIN_RATIO  = 0.03
 TABLETOP_MAX_WIDTH_HEIGHT_RATIO   = 18.0
+
+# LightGBM ranker가 final_score에 기여하는 비중.
+# layout_ranker.pkl이 특정 책상(desk_image2.jpg) 기반 합성 데이터로 학습된 흔적 — 모든
+# 사진에서 ry=0.64를 매번 best로 추천하는 패턴. 일반 책상에 대한 generic 동작을 위해
+# 0.0으로 비활성화 (rule_score만 사용). ranker 재학습 후엔 0.3 정도로 복귀 가능.
+# final_score = rule_score × (1 - W) + learned_score × W
+RANKER_WEIGHT = 0.0
