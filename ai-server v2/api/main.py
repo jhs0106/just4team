@@ -244,7 +244,7 @@ async def run_generate(req: GenerateRequest):
 # 사용자는 theme + budget + 책상 사진만 보내면 됨. 내부에서:
 #   1. recommendation 서버(:8001) 호출해 setup(5종 제품) 받음
 #   2. recommendation_bridge로 GenerateRequest 변환
-#   3. 기존 /generate 로직으로 이미지 생성
+#   3. 추천 제품 + persona prompt로 NanoBanana API 이미지 생성
 import os
 import requests as _requests
 
@@ -354,10 +354,10 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
             image_id    = int(_item["id"]) if _item.get("id") else None,
             price       = int(_item["lprice"]) if _item.get("lprice") else None,
             image_url   = _item.get("image_url"),
-            product_url = _item.get("product_url"),
+            product_url = _item.get("product_url") or _item.get("link"),
         ))
 
-        # 3. NanoBanana 생성 호출 + job_store에 products 정보 attach
+    # 3. NanoBanana 생성 호출 + job_store에 products 정보 attach
     job_id = str(uuid.uuid4())
     job_store[job_id] = GenerateResult(
         job_id=job_id,
