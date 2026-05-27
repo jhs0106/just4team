@@ -148,15 +148,14 @@ just4team/
 │   │   │   └── service/AiServerClient.java            submitRecommendAndGenerate, fetchJobStatusRaw
 │   │   ├── resources/
 │   │   │   ├── application.properties                 server.port, ai.server.base-url, SSL keystore 경로
-│   │   │   ├── keystore.p12                           HTTPS 자체 서명 (tracked)
-│   │   │   └── static/
-│   │   └── webapp/WEB-INF/jsp/
-│   │       ├── home.jsp, index.jsp, customize.jsp, result.jsp
-│   │       └── layout/
-│   ├── build.gradle, settings.gradle, gradlew.bat
-│   └── bootstrap-5.3.8-dist/                  Bootstrap 정적 자원
-│
-└── desk_db.dump                        PostgreSQL pg_dump 백업
+    │   │   ├── keystore.p12                           HTTPS 자체 서명 (tracked)
+    │   │   └── static/
+    │   └── webapp/WEB-INF/jsp/
+    │       ├── home.jsp, index.jsp, customize.jsp, result.jsp
+    │       └── layout/
+    ├── build.gradle, settings.gradle, gradlew.bat
+    └── bootstrap-5.3.8-dist/                  Bootstrap 정적 자원
+
 ```
 
 ---
@@ -264,13 +263,13 @@ RoleAwareCompatibility: `ROLE_PAIR_WEIGHTS` 가중 평균
 │ Stage 1: Object Removal                                     │
 │ object_removal_processor.py                                 │
 │                                                             │
-│ 1.1 DINO 검출 — _REMOVAL_PROMPT 텍스트 매칭                  │
+│ 1.1 DINO 검출 — _REMOVAL_PROMPT 텍스트 매칭                 │
 │     "laptop. monitor. keyboard. mouse. mousepad. ..."       │
-│ 1.2 SAM-2 세그멘테이션 — bbox → 정확한 mask                  │
-│ 1.3 max_area_ratio 필터 (0.40) — 책상 자체 잡힘 방지          │
-│ 1.4 LaMa inpainting — mask 영역 채움                         │
+│ 1.2 SAM-2 세그멘테이션 — bbox → 정확한 mask                 │
+│ 1.3 max_area_ratio 필터 (0.40) — 책상 자체 잡힘 방지        │
+│ 1.4 LaMa inpainting — mask 영역 채움                        │
 │                                                             │
-│ 출력: cleaned_front (배치 가능한 빈 책상)                    │
+│ 출력: cleaned_front (배치 가능한 빈 책상)                   │
 └─────────────────────────────────────────────────────────────┘
         ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -278,78 +277,78 @@ RoleAwareCompatibility: `ROLE_PAIR_WEIGHTS` 가중 평균
 │ placement.calc_placements_from_available_space              │
 │                                                             │
 │ 2.1 top-view 공간 분석 (space_analysis)                     │
-│   · DINO로 top-view 점유 영역 검출 → occupied_mask           │
-│   · SAM-2로 책상 영역 segmentation → desk_mask               │
-│   · mode 따라 remove_mask 결정 (add: 유지 / own_desk: 전부)  │
+│   · DINO로 top-view 점유 영역 검출 → occupied_mask          │
+│   · SAM-2로 책상 영역 segmentation → desk_mask              │
+│   · mode 따라 remove_mask 결정 (add: 유지 / own_desk: 전부) │
 │   · available_mask = desk_mask − keep_occupied              │
-│   · connectedComponentsWithStats로 가용 region 분할          │
+│   · connectedComponentsWithStats로 가용 region 분할         │
 │                                                             │
-│ 2.2 후보 위치 샘플링                                         │
-│   · 각 가용 region 안에 7×7 grid 후보점                      │
-│   · ry pre-filter: _CAT_RY_RANGE 밖 후보 즉시 제외           │
+│ 2.2 후보 위치 샘플링                                        │
+│   · 각 가용 region 안에 7×7 grid 후보점                     │
+│   · ry pre-filter: _CAT_RY_RANGE 밖 후보 즉시 제외          │
 │                                                             │
 │ 2.3 점수 계산 (score_region_for_product)                    │
-│   rule_score: 카테고리 선호 위치까지 거리 + 페널티 (영역      │
-│               위반, 근접, 가장자리)                          │
-│   learned_score: LightGBM ranker (22 feature)                │
-│               MONITOR/MOUSEPAD/LIGHTING은 학습 샘플 부족 →    │
-│               rule_score만 사용                              │
+│   rule_score: 카테고리 선호 위치까지 거리 + 페널티 (영역    │
+│               위반, 근접, 가장자리)                         │
+│   learned_score: LightGBM ranker (22 feature)               │
+│               MONITOR/MOUSEPAD/LIGHTING은 학습 샘플 부족 →  │
+│               rule_score만 사용                             │
 │   final_score = rule × 0.7 + learned × 0.3                  │
 │                                                             │
-│ 2.4 최고점 → front-view bbox 변환                            │
+│ 2.4 최고점 → front-view bbox 변환                           │
 │   _front_bbox_for_anchor:                                   │
 │   · ry를 _CAT_RY_RANGE로 clamp                              │
-│   · ps = 0.60 + 0.40 × ry (perspective scale, 가까울수록 큼) │
+│   · ps = 0.60 + 0.40 × ry (perspective scale, 가까울수록 큼)│
 │   · px_per_mm = fv_dw / desk_width_mm                       │
 │   · fv_pw = w_mm × px_per_mm × ps                           │
 │   · fv_ph = d_mm × px_per_mm × ps                           │
-│   · 카테고리별 cap (KEYBOARD/MONITOR/MOUSE 등) 적용           │
-│   · 카테고리간 관계 강제 (relation_state):                   │
+│   · 카테고리별 cap (KEYBOARD/MONITOR/MOUSE 등) 적용         │
+│   · 카테고리간 관계 강제 (relation_state):                  │
 │       monitor_rx → keyboard 가로 정렬                       │
 │       keyboard_y2 → mouse 같은 y                            │
 │       mousepad_region → mouse 안쪽 강제 배치                │
-│   · KEYBOARD 강제 후보: scoring 실패 시 monitor 아래 강제    │
+│   · KEYBOARD 강제 후보: scoring 실패 시 monitor 아래 강제   │
 │                                                             │
 │ 출력: placement_items = [{product, region(x1,y1,x2,y2),     │
 │                          score, score_meta, ...}]           │
 └─────────────────────────────────────────────────────────────┘
         ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 3: Per-product SD Generation                          │
-│ controlnet_inpaint_processor.generate_product               │
+┌──────────────────────────────────────────────────────────────┐
+│ Stage 3: Per-product SD Generation                           │
+│ controlnet_inpaint_processor.generate_product                │
 │ (placement 순서대로 카테고리당 1회 SD 호출)                  │
-│                                                             │
-│ 3.1 Context crop (bbox + padding)                           │
+│                                                              │
+│ 3.1 Context crop (bbox + padding)                            │
 │ 3.2 SD 호환 해상도 resize (긴 변 512, 8의 배수)              │
 │ 3.3 perspective_warp (flat 카테고리) — _CAT_TILT_DEG         │
-│     MOUSEPAD 20°, KEYBOARD 30°, MOUSE 45°, LAPTOP_STAND 50° │
+│     MOUSEPAD 20°, KEYBOARD 30°, MOUSE 45°, LAPTOP_STAND 50°  │
 │ 3.4 CV pre-composite — 제품을 cleaned crop 위에 합성         │
-│     (canny edge + 3-zone blend 입력)                        │
-│ 3.5 ControlNet 입력 생성                                    │
-│   · depth_sd: DPT-Large(cleaned crop)                       │
-│   · canny_sd: Canny(composite_sd) ← 제품 외곽선             │
-│ 3.6 IP-Adapter 입력: 제품 이미지 letterbox 512×512            │
+│     (canny edge + 3-zone blend 입력)                         │
+│ 3.5 ControlNet 입력 생성                                     │
+│   · depth_sd: DPT-Large(cleaned crop)                        │
+│   · canny_sd: Canny(composite_sd) ← 제품 외곽선              │
+│ 3.6 IP-Adapter 입력: 제품 이미지 letterbox 512×512           │
 │ 3.7 silhouette mask: 제품 alpha → inpaint 영역               │
-│ 3.8 SD ControlNet Inpaint 호출 (1 pass)                     │
-│   · image=cleaned crop, mask=silhouette                     │
-│   · control=[depth, canny], ip_adapter=product              │
-│   · prompt="{cat_desc}, {style} style, ..."                 │
-│   · LoRA=JU_DeskStyle (scale 0.65)                          │
+│ 3.8 SD ControlNet Inpaint 호출 (1 pass)                      │
+│   · image=cleaned crop, mask=silhouette                      │
+│   · control=[depth, canny], ip_adapter=product               │
+│   · prompt="{cat_desc}, {style} style, ..."                  │
+│   · LoRA=JU_DeskStyle (scale 0.65)                           │
 │   · IP scale: MONITOR 0.40 / MOUSE/MOUSEPAD 0.60 /           │
 │               SPEAKER 0.40 / DEFAULT 0.55 / DESK_LAMP 0.40 / │
-│               DESK_SHELF 0.30 / brightness<40: 0.0          │
-│ 3.9 3-zone blend (composite ↔ SD output)                    │
-│   · inner 65% composite / 35% SD                            │
-│   · edge 25% composite / 75% SD                             │
-│   · bg 0% composite / 100% SD                               │
+│               DESK_SHELF 0.30 / brightness<40: 0.0           │
+│ 3.9 3-zone blend (composite ↔ SD output)                     │
+│   · inner 65% composite / 35% SD                             │
+│   · edge 25% composite / 75% SD                              │
+│   · bg 0% composite / 100% SD                                │
 │ 3.10 paste-back: SD 결과 → 원본 해상도 LANCZOS resize → paste│
-│ 3.11 _add_shadows (composite.py)                            │
-│   · contact shadow (제품 base 접지)                         │
+│ 3.11 _add_shadows (composite.py)                             │
+│   · contact shadow (제품 base 접지)                          │
 │   · cast shadow (상단 좌측 광원 가정, 우측 아래 그림자)      │
-│                                                             │
+│                                                              │
 │ KEYBOARD aspect mismatch (자연 비율 < 2.0) → CV fallback     │
-│ (SD 안 거치고 단순 paste)                                   │
-└─────────────────────────────────────────────────────────────┘
+│ (SD 안 거치고 단순 paste)                                    │
+└──────────────────────────────────────────────────────────────┘
         ↓
 출력 result_image (모든 제품 배치된 책상 사진)
 ```
