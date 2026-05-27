@@ -49,7 +49,6 @@
                 </ul>
                 <%@ page contentType="text/html; charset=UTF-8" pageEncoding="UTF-8" %>
                 <% request.setCharacterEncoding("UTF-8"); %>
-                <c:import url="/Header.jsp" charEncoding="UTF-8"/>
             </div>
         </div>
     </nav>

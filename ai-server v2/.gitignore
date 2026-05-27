@@ -1,44 +1,27 @@
+# 가상환경
+venv/
+3.8/
+
+# Python 캐시
 __pycache__/
 *.pyc
-/Dockerfile
-Dockerfile
-/outputs_hf_dino2
-/outputs_real_sam2
-outputs_hf_dino2
-outputs_real_sam2
-weights/
-external/
+*.pyo
+*.pyd
+
+# LoRA 학습 원본 데이터 (대용량)
+data/style_lora/raw/
+data/style_lora/processed/
 outputs/
-inputs/
-*.pt
-*.pth
-*.safetensors
 
-#정리위함 중복 있을 수 있음 
-# model weights / checkpoints
-weights/
-*.pt
-*.pth
-*.ckpt
-*.safetensors
-*.onnx
+# 로그
+logs/
 
-# external cloned repos
-external/
+# 환경변수
+.env
 
-# runtime data
-inputs/
-outputs/
-outputs*/
-*.png
-*.jpg
-*.jpeg
-*.webp
+# Claude 내부 파일
+CLAUDE.md
 
-# python
-__pycache__/
-*.pyc
-.pytest_cache/
-
-# docker/cache
-.cache/
+.env
+dump_utf8.sql
+dump (1).sql
