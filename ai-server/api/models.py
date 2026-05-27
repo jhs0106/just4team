@@ -109,6 +109,7 @@ class GenerateRequest(BaseModel):
     top_view_source:       Optional[str]     = Field(None, description="top_view 출처: 'user_provided' | 'default_fallback' | 'none' (디버그 메타 기록용)")
     desk_click_x:          Optional[float]   = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add)에서 사용자가 클릭한 책상 윗면 x 좌표 (front-view 기준, 0~1 정규화)")
     desk_click_y:          Optional[float]   = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add)에서 사용자가 클릭한 책상 윗면 y 좌표 (front-view 기준, 0~1 정규화)")
+    desk_corners:          Optional[List[List[float]]] = Field(None, description="사용자가 클릭한 책상 윗면 4모서리 TL,TR,BR,BL (front-view, 0~1 정규화). 제공 시 4점 perspective 배치 사용")
 
 
 class RecommendedProduct(BaseModel):
@@ -148,3 +149,4 @@ class RecommendAndGenerateRequest(BaseModel):
     removal_strategy:      str           = Field("combined")
     desk_click_x:          Optional[float] = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add) 시 SAM2 prompt용 클릭 x (0~1)")
     desk_click_y:          Optional[float] = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add) 시 SAM2 prompt용 클릭 y (0~1)")
+    desk_corners:          Optional[List[List[float]]] = Field(None, description="책상 윗면 4모서리 TL,TR,BR,BL (front-view, 0~1 정규화)")

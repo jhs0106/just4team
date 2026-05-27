@@ -42,9 +42,9 @@ _CATEGORY_DIMS_MM = {
 _PLACEMENT_ORDER = {
     "MONITOR":      10,
     "LIGHTING":     12,
+    "MOUSEPAD":     13,
     "KEYBOARD":     15,
     "DESK_SHELF":   20,
-    "MOUSEPAD":     40,
     "MOUSE":        50,
     "SPEAKER":      60,
     "DESK_LAMP":    70,

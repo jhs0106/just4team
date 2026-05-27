@@ -45,6 +45,7 @@ public class CustomizeController {
             @RequestParam(value = "deskMode", required = false, defaultValue = "own_desk") String deskMode,
             @RequestParam(value = "deskClickX", required = false) String deskClickXStr,
             @RequestParam(value = "deskClickY", required = false) String deskClickYStr,
+            @RequestParam(value = "deskCorners", required = false) String deskCornersStr,
 
             @RequestParam(value = "frontFile", required = false) MultipartFile frontFile,
             @RequestParam(value = "topFile",   required = false) MultipartFile topFile,
@@ -112,9 +113,12 @@ public class CustomizeController {
                 } catch (NumberFormatException ignore) {}
             }
 
+            // 6b. 빈 책상 모드면 책상 윗면 4점 JSON 전달 (4점 perspective 배치용)
+            String deskCornersForCall = "add".equals(mode) ? deskCornersStr : null;
+
             // 7. ai-server 호출 → job_id
             String jobId = aiServerClient.submitRecommendAndGenerate(
-                    theme, budgetInt, frontB64, topB64, widthMm, depthMm, mode, clickX, clickY
+                    theme, budgetInt, frontB64, topB64, widthMm, depthMm, mode, clickX, clickY, deskCornersForCall
             );
 
             return "redirect:/result?jobId=" + jobId;
