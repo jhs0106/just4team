@@ -1,0 +1,9 @@
+external/
+weights/
+outputs/
+outputs*/
+inputs/
+__pycache__/
+*.pyc
+.git/
+.gitignore
