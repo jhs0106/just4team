@@ -11,6 +11,7 @@ __pycache__/
 # LoRA 학습 원본 데이터 (대용량)
 data/style_lora/raw/
 data/style_lora/processed/
+outputs/
 
 # 로그
 logs/
