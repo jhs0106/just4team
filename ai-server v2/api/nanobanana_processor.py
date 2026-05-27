@@ -1,0 +1,196 @@
+import os
+import base64
+import requests
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+class NanoBananaProcessor:
+    def __init__(self):
+        self.api_url = os.getenv("NANOBANANA_API_URL", "")
+        self.api_key = os.getenv("NANOBANANA_API_KEY", "")
+        self.timeout = int(os.getenv("NANOBANANA_TIMEOUT", "180"))
+
+        if not self.api_url:
+            raise RuntimeError("NANOBANANA_API_URL 환경변수가 설정되지 않았습니다.")
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        return headers
+
+    def _read_product_image_base64(self, image_id: Any) -> Optional[str]:
+        if image_id is None:
+            return None
+
+        candidates = [
+            Path("data/test/processed_images") / f"{image_id}.png",
+            Path("ai-server/data/test/processed_images") / f"{image_id}.png",
+            ]
+
+        for path in candidates:
+            if path.exists():
+                with open(path, "rb") as f:
+                    return base64.b64encode(f.read()).decode("utf-8")
+
+        return None
+
+    def build_prompt(
+            self,
+            theme: str,
+            mode: str,
+            products: List[Dict[str, Any]],
+            space_constraints: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        product_lines = []
+
+        for idx, product in enumerate(products, start=1):
+            name = product.get("name") or "recommended product"
+            category = product.get("category") or ""
+            brand = product.get("brand") or ""
+            price = product.get("price") or ""
+
+            line = f"{idx}. {name}"
+            if category:
+                line += f" / category: {category}"
+            if brand:
+                line += f" / brand: {brand}"
+            if price:
+                line += f" / price: {price}"
+
+            product_lines.append(line)
+
+        product_text = "\n".join(product_lines) if product_lines else "No product information."
+
+        space_text = "No explicit available-space constraints."
+        if space_constraints:
+            space_text = str(space_constraints)
+
+        return f"""
+You are a professional deskterior designer.
+
+Create a realistic deskterior simulation using the user's original desk photo and the recommended products.
+
+Deskterior style theme:
+{theme}
+
+User desk mode:
+{mode}
+
+Recommended products:
+{product_text}
+
+Available-space information:
+{space_text}
+
+Important generation rules:
+- Preserve the original desk, camera angle, perspective, and room structure.
+- Keep the image looking like a real photograph.
+- Use the recommended products as the main items to add.
+- Place the products naturally on the desk.
+- Do not overcrowd the desk.
+- Keep product scale realistic.
+- Do not place products floating in the air.
+- Do not completely change the user's room or desk.
+- If there is not enough space for all products, prioritize the most suitable products.
+- The final result should look like a realistic deskterior photo based on the user's actual desk.
+""".strip()
+
+    def build_products_payload(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        payload_products = []
+
+        for product in products:
+            image_id = product.get("image_id") or product.get("id")
+
+            payload_products.append({
+                "id": image_id,
+                "name": product.get("name"),
+                "category": product.get("category"),
+                "price": product.get("price"),
+                "brand": product.get("brand"),
+                "image_url": product.get("image_url"),
+                "product_url": product.get("product_url"),
+                "image_base64": self._read_product_image_base64(image_id),
+            })
+
+        return payload_products
+
+    def generate(
+            self,
+            image_base64: str,
+            theme: str,
+            mode: str,
+            products: List[Dict[str, Any]],
+            space_constraints: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        prompt = self.build_prompt(
+            theme=theme,
+            mode=mode,
+            products=products,
+            space_constraints=space_constraints,
+        )
+
+        products_payload = self.build_products_payload(products)
+
+        payload = {
+            "prompt": prompt,
+            "input_image_base64": image_base64,
+            "products": products_payload,
+            "theme": theme,
+            "mode": mode,
+            "preserve_original": True,
+            "task": "deskterior_generation",
+        }
+
+        response = requests.post(
+            self.api_url,
+            json=payload,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+
+        if response.status_code >= 400:
+            raise RuntimeError(f"NanoBanana API error {response.status_code}: {response.text}")
+
+        data = response.json()
+
+        result_image_base64 = (
+                data.get("result_image_base64")
+                or data.get("image_base64")
+                or data.get("generated_image_base64")
+        )
+
+        if not result_image_base64 and isinstance(data.get("data"), dict):
+            result_image_base64 = (
+                    data["data"].get("result_image_base64")
+                    or data["data"].get("image_base64")
+                    or data["data"].get("generated_image_base64")
+            )
+
+        if not result_image_base64:
+            raise RuntimeError(
+                f"NanoBanana 응답에서 생성 이미지 base64를 찾지 못했습니다. keys={list(data.keys())}"
+            )
+
+        return {
+            "result_image_base64": result_image_base64,
+            "prompt": prompt,
+            "raw_response": data,
+        }
+
+
+_nanobanana_processor: Optional[NanoBananaProcessor] = None
+
+
+def get_nanobanana_processor() -> NanoBananaProcessor:
+    global _nanobanana_processor
+
+    if _nanobanana_processor is None:
+        _nanobanana_processor = NanoBananaProcessor()
+
+    return _nanobanana_processor
