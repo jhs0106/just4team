@@ -148,14 +148,15 @@ just4team/
 │   │   │   └── service/AiServerClient.java            submitRecommendAndGenerate, fetchJobStatusRaw
 │   │   ├── resources/
 │   │   │   ├── application.properties                 server.port, ai.server.base-url, SSL keystore 경로
-    │   │   ├── keystore.p12                           HTTPS 자체 서명 (tracked)
-    │   │   └── static/
-    │   └── webapp/WEB-INF/jsp/
-    │       ├── home.jsp, index.jsp, customize.jsp, result.jsp
-    │       └── layout/
-    ├── build.gradle, settings.gradle, gradlew.bat
-    └── bootstrap-5.3.8-dist/                  Bootstrap 정적 자원
-
+│   │   │   ├── keystore.p12                           HTTPS 자체 서명 (tracked)
+│   │   │   └── static/
+│   │   └── webapp/WEB-INF/jsp/
+│   │       ├── home.jsp, index.jsp, customize.jsp, result.jsp
+│   │       └── layout/
+│   ├── build.gradle, settings.gradle, gradlew.bat
+│   └── bootstrap-5.3.8-dist/                  Bootstrap 정적 자원
+│
+└── desk_db.dump                        PostgreSQL pg_dump 백업
 ```
 
 ---
