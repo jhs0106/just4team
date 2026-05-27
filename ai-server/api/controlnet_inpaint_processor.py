@@ -154,10 +154,12 @@ def analyze_product_image_risk(product_rgba: Image.Image, category: str) -> dict
     # form_tier × shape_risk → adaptive parameters
     form_tier = _PRODUCT_FORM_TIER.get(cat, "semi_flat")
     if form_tier == "upright":
+        # SD 정면 재생성 우선. 옛 inner 0.88~0.95(제품컷 보존)는 사선 마케팅컷을 그대로 유지하는 주범.
+        # LoRA 로드 후 SD 생성 품질 확보 → inner 낮춰 SD 결과(front-view 재생성)를 반영.
         _table = {
-            "safe":      (0.88, 0.40, 0.42),
-            "risky":     (0.93, 0.30, 0.30),
-            "high_risk": (0.95, 0.25, 0.25),
+            "safe":      (0.55, 0.35, 0.55),
+            "risky":     (0.62, 0.32, 0.50),
+            "high_risk": (0.70, 0.28, 0.45),
         }
     elif form_tier == "flat":
         _table = {

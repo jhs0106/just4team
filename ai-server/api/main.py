@@ -337,6 +337,8 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
         # 빈 책상 모드용 클릭 좌표 전달 (SAM2 prompt로 사용)
         gen_req.desk_click_x = req.desk_click_x
         gen_req.desk_click_y = req.desk_click_y
+        # 사용자 클릭 책상 윗면 4점 전달 (front 4점 perspective 배치)
+        gen_req.desk_corners = req.desk_corners
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, f"setup → GenerateRequest 변환 실패: {e}")
 
@@ -767,6 +769,13 @@ def _run_generate(job_id: str, req: GenerateRequest):
         # top-view는 main.py 진입 단계에서 필수 검증됨 → 여기 도달 시 항상 존재.
         # SAM2 클릭 mask가 있으면 front_desk_bbox_override로 활용 (검은 책상 등 DINO 약한 케이스 보정).
         print(f"[Generate] desk_width_mm={req.desk_width_mm} desk_depth_mm={req.desk_depth_mm}")
+        # 사용자 클릭 책상 윗면 4점(정규화 0~1) → front 픽셀. 있으면 placement가 4점 perspective 사용.
+        _desk_corners_px = None
+        _dc_norm = getattr(req, "desk_corners", None)
+        if _dc_norm and len(_dc_norm) == 4:
+            _cw, _ch = current.size
+            _desk_corners_px = [[float(x) * _cw, float(y) * _ch] for x, y in _dc_norm]
+            print(f"[DeskCorners] 사용자 4점 → 픽셀 {_desk_corners_px}")
         top_image_for_place = b64_to_image(req.top_view_image_base64)
         _all_space_results, _tabletop_meta = calc_placements_from_available_space(
             front_image=current,
@@ -778,6 +787,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
             remover=remover,
             debug_dir=_debug_dir,
             front_desk_bbox_override=_front_desk_bbox_override,
+            desk_corners=_desk_corners_px,
         )
 
         # tabletop bbox invalid 처리는 빈 책상 모드(RemoveMode.add) 한정.

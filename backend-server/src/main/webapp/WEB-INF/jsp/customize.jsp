@@ -52,6 +52,18 @@
                         display: none;
                         box-shadow: 0 0 8px rgba(255, 59, 59, 0.6);
                     }
+                    .desk-corner-marker {
+                        position: absolute;
+                        width: 22px; height: 22px;
+                        border: 2px solid #2563eb;
+                        border-radius: 50%;
+                        background: rgba(37, 99, 235, 0.55);
+                        color: #fff; font-size: 12px; font-weight: bold;
+                        text-align: center; line-height: 18px;
+                        transform: translate(-50%, -50%);
+                        pointer-events: none;
+                        box-shadow: 0 0 6px rgba(37, 99, 235, 0.6);
+                    }
                     .desk-click-hint {
                         background: #fff3cd;
                         border: 1px solid #ffc107;
@@ -129,9 +141,15 @@
                                     👆 책상 윗면의 가운데를 한 번 클릭해주세요. AI가 책상 영역을 정확히 인식하도록 도와줍니다.
                                 </div>
 
-                                <!-- 빈 책상 모드용 클릭 좌표 (0~1 정규화) -->
+                                <!-- 빈 책상 모드용: 책상 윗면 4모서리 (TL,TR,BR,BL 0~1 정규화 JSON) -->
+                                <input type="hidden" id="deskCorners" name="deskCorners" value="">
                                 <input type="hidden" id="deskClickX" name="deskClickX" value="">
                                 <input type="hidden" id="deskClickY" name="deskClickY" value="">
+                                <button type="button" id="deskCornersReset"
+                                        class="btn btn-sm btn-outline-secondary mt-1"
+                                        style="display:none" onclick="clearDeskCorners()">
+                                    책상 모서리 다시 찍기
+                                </button>
 
                                 <!-- FILE INPUT -->
                                 <input type="file"
@@ -464,39 +482,57 @@ function isEmptyDeskMode() {
 }
 
 function updateClickUI() {
-    const preview = document.getElementById("previewFront");
-    const hint    = document.getElementById("deskClickHint");
-    if (isEmptyDeskMode()) {
-        preview.classList.add("click-enabled");
-        hint.style.display = "block";
+    // 모든 모드에서 책상 윗면 4점 클릭 제공 (제품 있는 책상 포함)
+    document.getElementById("previewFront").classList.add("click-enabled");
+    updateCornerHint();
+}
+
+let deskCornerPts = [];
+const CORNER_LABELS = ["좌측 뒤", "우측 뒤", "우측 앞", "좌측 앞"];
+
+function clearDeskCorners() {
+    deskCornerPts = [];
+    document.getElementById("deskCorners").value = "";
+    document.querySelectorAll(".desk-corner-marker").forEach(m => m.remove());
+    document.getElementById("deskCornersReset").style.display = "none";
+    updateCornerHint();
+}
+
+function updateCornerHint() {
+    const hint = document.getElementById("deskClickHint");
+    hint.style.display = "block";
+    const n = deskCornerPts.length;
+    if (n < 4) {
+        hint.innerHTML = "👆 책상 <b>윗면</b> 네 모서리를 <b>좌측뒤 → 우측뒤 → 우측앞 → 좌측앞</b> 순서로 클릭하세요. "
+                       + "(" + n + "/4, 다음: " + CORNER_LABELS[n] + ")";
     } else {
-        preview.classList.remove("click-enabled");
-        hint.style.display = "none";
-        clearDeskClick();
+        hint.innerHTML = "✅ 책상 윗면 4점 완료. 다시 찍으려면 아래 버튼을 누르세요.";
     }
 }
 
-function clearDeskClick() {
-    document.getElementById("deskClickMarker").style.display = "none";
-    document.getElementById("deskClickX").value = "";
-    document.getElementById("deskClickY").value = "";
-}
-
 function handleDeskClick(ev) {
-    if (!isEmptyDeskMode()) return;
+    if (deskCornerPts.length >= 4) return;
     const img = ev.currentTarget;
     const rect = img.getBoundingClientRect();
     const x_norm = (ev.clientX - rect.left) / rect.width;
     const y_norm = (ev.clientY - rect.top)  / rect.height;
     if (x_norm < 0 || x_norm > 1 || y_norm < 0 || y_norm > 1) return;
 
-    document.getElementById("deskClickX").value = x_norm.toFixed(4);
-    document.getElementById("deskClickY").value = y_norm.toFixed(4);
+    deskCornerPts.push([parseFloat(x_norm.toFixed(4)), parseFloat(y_norm.toFixed(4))]);
 
-    const marker = document.getElementById("deskClickMarker");
-    marker.style.left = (x_norm * 100) + "%";
-    marker.style.top  = (y_norm * 100) + "%";
-    marker.style.display = "block";
+    const wrap = document.querySelector(".desk-click-wrapper");
+    const m = document.createElement("div");
+    m.className = "desk-corner-marker";
+    m.style.left = (x_norm * 100) + "%";
+    m.style.top  = (y_norm * 100) + "%";
+    m.textContent = deskCornerPts.length;
+    wrap.appendChild(m);
+
+    document.getElementById("deskCornersReset").style.display = "inline-block";
+    if (deskCornerPts.length === 4) {
+        document.getElementById("deskCorners").value = JSON.stringify(deskCornerPts);
+    }
+    updateCornerHint();
 }
 
 // 모드 라디오 변경 시 클릭 UI on/off
@@ -523,13 +559,10 @@ document.addEventListener("DOMContentLoaded", () => {
             document.getElementById("previewTop").scrollIntoView({behavior: "smooth"});
             return;
         }
-        if (isEmptyDeskMode()) {
-            const cx = document.getElementById("deskClickX").value;
-            if (!cx) {
-                ev.preventDefault();
-                alert("빈 책상 모드에서는 책상 윗면을 한 번 클릭해주세요.");
-                document.getElementById("previewFront").scrollIntoView({behavior: "smooth"});
-            }
+        if (deskCornerPts.length < 4) {
+            ev.preventDefault();
+            alert("책상 윗면 네 모서리를 모두 클릭해주세요. (현재 " + deskCornerPts.length + "/4)");
+            document.getElementById("previewFront").scrollIntoView({behavior: "smooth"});
         }
     });
 });
