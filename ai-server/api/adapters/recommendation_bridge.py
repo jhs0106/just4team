@@ -35,7 +35,7 @@ _CATEGORY_MAP: dict[str, str | None] = {
 
 def _extract_size(item: dict) -> tuple[int | None, int | None]:
     # recommendation DB의 metadata JSONB에 width_mm/depth_mm가 있으면 추출,
-    # 없으면 (None, None) — AI 서버의 enrich_products_from_csv가 카탈로그 기본값으로 폴백
+    # 없으면 (None, None) — AI 서버의 enrich_products_from_db가 동일 DB의 products 테이블에서 폴백
     metadata = item.get("metadata") or {}
     if isinstance(metadata, str):
         import json

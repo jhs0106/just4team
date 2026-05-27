@@ -97,13 +97,36 @@ def search_products_by_vector(
     category: str,
     query_embedding: list[float],
     limit: int = CANDIDATE_LIMIT,
+    max_width_mm: int | None = None,
+    max_depth_mm: int | None = None,
 ) -> list[Product]:
+    # max_width_mm / max_depth_mm가 주어지면 metadata 사이즈 필터 추가.
+    # metadata에 width_mm/depth_mm 없는 제품은 보수적으로 통과 (모르면 허용).
+    # depth는 height_mm로도 fallback (vertical 카테고리).
     conn = get_db_connection()
     products: list[Product] = []
     try:
         qvec = np.array(query_embedding, dtype=np.float32)
         vec_str = "[" + ",".join(f"{v:.8f}" for v in qvec.tolist()) + "]"
-        sql = """
+
+        size_where = ""
+        size_params: list = []
+        if max_width_mm is not None:
+            size_where += (
+                " AND ((metadata->>'width_mm') IS NULL "
+                "      OR (metadata->>'width_mm')::int <= %s)"
+            )
+            size_params.append(int(max_width_mm))
+        if max_depth_mm is not None:
+            size_where += (
+                " AND ((metadata->>'depth_mm') IS NULL "
+                "      OR (metadata->>'depth_mm')::int <= %s) "
+                " AND ((metadata->>'height_mm') IS NULL "
+                "      OR (metadata->>'height_mm')::int <= %s)"
+            )
+            size_params.extend([int(max_depth_mm), int(max_depth_mm)])
+
+        sql = f"""
             SELECT
                 id, title, category, lprice, image, link,
                 ARRAY[]::text[] AS color_tags,
@@ -118,14 +141,16 @@ def search_products_by_vector(
               AND lprice IS NOT NULL
               AND lprice > 0
               AND embedding_img IS NOT NULL
+              {size_where}
             ORDER BY (
                 0.60 * (embedding_img <=> %s::vector)
               + COALESCE(0.40 * (embedding_txt <=> %s::vector), 0.20)
             ) ASC
             LIMIT %s
         """
+        params = [vec_str, vec_str, category, *size_params, vec_str, vec_str, limit]
         with conn.cursor() as cur:
-            cur.execute(sql, (vec_str, vec_str, category, vec_str, vec_str, limit))
+            cur.execute(sql, params)
             rows = cur.fetchall()
 
         for row in rows:
@@ -177,6 +202,8 @@ def retrieve_candidates(
     category: str,
     user_image_embedding: list[float] | None = None,
     limit: int = CANDIDATE_LIMIT,
+    max_width_mm: int | None = None,
+    max_depth_mm: int | None = None,
 ) -> list[Product]:
     # 카테고리 텍스트 쿼리 임베딩 + (옵션) 사용자 책상 정면 사진 임베딩 가중 평균
     query_text = THEME_CATEGORY_QUERIES[theme][category]
@@ -190,7 +217,10 @@ def retrieve_candidates(
     else:
         query_embedding = text_emb.tolist()
 
-    return search_products_by_vector(category, query_embedding, limit)
+    return search_products_by_vector(
+        category, query_embedding, limit,
+        max_width_mm=max_width_mm, max_depth_mm=max_depth_mm,
+    )
 
 
 # ============================================================

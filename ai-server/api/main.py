@@ -71,7 +71,7 @@ from .config import (
 )
 from .utils import (
     b64_to_image, image_to_b64,
-    normalize_category, find_product_image, enrich_products_from_csv,
+    normalize_category, find_product_image, enrich_products_from_db,
 )
 from .composite import (
     prepare_product_image_for_composite, composite_product_simple,
@@ -255,14 +255,30 @@ _RECOMMENDATION_API_URL = os.getenv("RECOMMENDATION_API_URL", "http://127.0.0.1:
 async def recommend_and_generate(req: RecommendAndGenerateRequest):
     from .adapters.recommendation_bridge import setup_to_generate_request
 
-    # 1. 추천 서버 호출 — 사용자 정면 사진을 함께 전달해 사진 임베딩 기반 검색
+    # 1. top-view 분석으로 카테고리별 max size 사전 계산 — 가용 공간에 맞는 제품만 추천되게
+    space_constraints: dict = {}
+    if req.top_view_image_base64 and req.desk_width_mm and req.desk_depth_mm:
+        try:
+            from .placement import analyze_top_view_only, compute_size_constraints_from_space
+            tv_img = b64_to_image(req.top_view_image_base64)
+            _space_info = analyze_top_view_only(
+                tv_img, req.desk_width_mm, req.desk_depth_mm, mode=req.mode,
+            )
+            if _space_info:
+                space_constraints = compute_size_constraints_from_space(_space_info)
+                print(f"[Recommend] space_constraints={space_constraints}")
+        except Exception as e:
+            print(f"[Recommend] space_constraints 계산 실패: {e} — 제약 없이 추천 진행")
+
+    # 2. 추천 서버 호출 — 정면 사진 + 가용 공간 제약 전달
     try:
         rec_resp = _requests.post(
             f"{_RECOMMENDATION_API_URL}/recommend",
             json={
-                "theme":        req.theme,
-                "budget":       req.budget,
-                "image_base64": req.image_base64,
+                "theme":             req.theme,
+                "budget":            req.budget,
+                "image_base64":      req.image_base64,
+                "space_constraints": space_constraints,
             },
             timeout=180,
         )
@@ -547,7 +563,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
             }, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        products = enrich_products_from_csv(req.products)
+        products = enrich_products_from_db(req.products)
         print(f"[Generate] products={len(products)}")
         for _p in products:
             print(f"  product: category={_p.category}, image_id={_p.image_id}, "

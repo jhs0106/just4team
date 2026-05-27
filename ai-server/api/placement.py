@@ -817,3 +817,96 @@ def calc_placements_from_available_space(
             print(f"[AvailSpace] top-view overlay 저장 실패: {_e}")
 
     return placements, tabletop_meta
+
+
+def analyze_top_view_only(
+    top_view_image: Image.Image,
+    desk_width_mm: int,
+    desk_depth_mm: int,
+    mode=None,
+    remover=None,
+) -> dict | None:
+    # calc_placements_from_available_space의 분석 단계만 추출.
+    # 추천 단계에 size 제약 전달용. (placement 호출 시점에 다시 분석되므로 결과는 일회성)
+    from .models import RemoveMode
+    from .space_analysis import (
+        analyze_space, make_full_desk_mask, keep_largest_component,
+    )
+    from .mask_utils import postprocess_occupied_mask
+    from .object_removal_processor import get_object_removal_processor
+
+    if mode is None:
+        mode = RemoveMode.own_desk
+    if remover is None:
+        remover = get_object_removal_processor()
+
+    tv_w, tv_h = top_view_image.size
+
+    top_det = remover.detect_with_prompt(
+        image=top_view_image, prompt=_REMOVAL_PROMPT, max_area_ratio=0.40,
+    )
+    occupied_np = _build_occupied_mask_from_detection(top_det, tv_w, tv_h)
+    occupied_np = postprocess_occupied_mask(occupied_np)
+
+    desk_mask_np = remover.detect_desk_mask(top_view_image)
+    if desk_mask_np is None:
+        desk_mask_np = make_full_desk_mask((tv_h, tv_w))
+    else:
+        desk_mask_np = keep_largest_component(desk_mask_np)
+
+    desk_width_cm = desk_width_mm / 10
+    desk_depth_cm = desk_depth_mm / 10
+    remove_mask = None if mode == RemoveMode.add else occupied_np
+
+    space_info = analyze_space(
+        occupied_mask=occupied_np,
+        desk_width_cm=desk_width_cm,
+        desk_depth_cm=desk_depth_cm,
+        desk_mask=desk_mask_np,
+        remove_mask=remove_mask,
+    )
+
+    ys, xs = np.where(desk_mask_np > 0)
+    if len(xs) == 0:
+        return None
+    tv_dx1, tv_dy1 = int(xs.min()), int(ys.min())
+    tv_dx2, tv_dy2 = int(xs.max()), int(ys.max())
+    space_info["desk_bbox_tv"] = (tv_dx1, tv_dy1, tv_dx2, tv_dy2)
+    return space_info
+
+
+def compute_size_constraints_from_space(space_info: dict) -> dict[str, list[int]]:
+    # 각 카테고리의 _CAT_RY_RANGE 안에서 최대 가용 (width_mm, depth_mm) 계산.
+    # recommendation에 보내서 후보 검색 시 사이즈 필터로 사용.
+    available_regions = space_info.get("available_regions", [])
+    cm_per_px = space_info.get("cm_per_px", {"x": 0.1, "y": 0.1})
+    desk_bbox_tv = space_info.get("desk_bbox_tv")
+    if not desk_bbox_tv:
+        return {}
+
+    tv_dx1, tv_dy1, tv_dx2, tv_dy2 = desk_bbox_tv
+    tv_dh = max(1, tv_dy2 - tv_dy1)
+    mm_per_px_x = cm_per_px["x"] * 10
+    mm_per_px_y = cm_per_px["y"] * 10
+
+    constraints: dict[str, list[int]] = {}
+    for cat, (ry_min, ry_max) in _CAT_RY_RANGE.items():
+        y_start = tv_dy1 + int(ry_min * tv_dh)
+        y_end = tv_dy1 + int(ry_max * tv_dh)
+        max_w_mm = 0
+        max_d_mm = 0
+        for region in available_regions:
+            x1, y1, x2, y2 = region["bbox"]
+            inter_y1 = max(y1, y_start)
+            inter_y2 = min(y2, y_end)
+            if inter_y2 <= inter_y1:
+                continue
+            w_mm = int((x2 - x1) * mm_per_px_x)
+            d_mm = int((inter_y2 - inter_y1) * mm_per_px_y)
+            if w_mm > max_w_mm:
+                max_w_mm = w_mm
+            if d_mm > max_d_mm:
+                max_d_mm = d_mm
+        if max_w_mm > 0 and max_d_mm > 0:
+            constraints[cat] = [max_w_mm, max_d_mm]
+    return constraints

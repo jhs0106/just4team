@@ -27,6 +27,10 @@ class RecommendRequest(BaseModel):
         None,
         description="사용자 책상 정면 사진 base64 (옵션). 주어지면 사진 임베딩을 카테고리 쿼리와 가중 평균해 검색.",
     )
+    space_constraints: dict[str, list[int]] | None = Field(
+        None,
+        description="카테고리별 가용 공간 max (width_mm, depth_mm). ai-server가 top-view 분석 후 계산해 전달. 후보 검색 시 사이즈 필터로 사용.",
+    )
 
 
 app = FastAPI(title="Deskterior Recommendation API", version="0.1.0")
@@ -131,11 +135,17 @@ def recommend(req: RecommendRequest) -> dict:
     except Exception as e:
         raise HTTPException(500, f"DB 연결 실패: {e}")
 
-    # 4. 카테고리별 후보 검색
+    # 4. 카테고리별 후보 검색 — space_constraints가 있으면 size 필터 적용
     all_categories = MANDATORY_CATEGORIES + OPTIONAL_CATEGORIES
     raw_by_category: dict[str, list[ScoredProduct]] = {}
     for category in all_categories:
-        products = retrieve_candidates(req.theme, category, user_image_embedding=user_image_emb)
+        _size_cap = (req.space_constraints or {}).get(category)
+        products = retrieve_candidates(
+            req.theme, category,
+            user_image_embedding=user_image_emb,
+            max_width_mm=_size_cap[0] if _size_cap else None,
+            max_depth_mm=_size_cap[1] if _size_cap else None,
+        )
         scored: list[ScoredProduct] = []
         for p in products:
             te = compute_theme_evidence(p, req.theme)

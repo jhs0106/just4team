@@ -227,12 +227,6 @@
                                                                placeholder="Depth (cm) *" required min="1">
                                                     </div>
 
-                                                    <div class="col-12">
-                                                        <button type="button" class="btn btn-primary px-4">
-                                                            Apply Dimensions
-                                                        </button>
-                                                    </div>
-
                                                 </div>
 
                                             </div>

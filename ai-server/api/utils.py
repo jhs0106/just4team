@@ -1,10 +1,17 @@
-import ast
-import csv
 import base64
+import json
+import os
 from io import BytesIO
 from pathlib import Path
 
+import psycopg2
 from PIL import Image
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 from .config import (
     _CATEGORY_ALIASES,
@@ -14,9 +21,20 @@ from .config import (
 )
 
 PRODUCT_IMAGE_DIR = Path("data/test/processed_images")
-_CATALOG_CSV      = Path("data/test/products.csv")
 
 _product_catalog: dict = {}
+
+
+def _get_db_connection():
+    # .env의 DB_* 변수로 PostgreSQL 연결. recommendation과 동일 DB (products 테이블 공유).
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        connect_timeout=5,
+    )
 
 
 def b64_to_image(b64: str) -> Image.Image:
@@ -88,45 +106,37 @@ def _to_int_or_none(v):
 
 
 def load_product_catalog() -> dict:
+    # DB의 products 테이블 lazy load → image_id → {category, title, width_mm, depth_mm} dict
     global _product_catalog
     if _product_catalog:
         return _product_catalog
     try:
-        with open(_CATALOG_CSV, encoding="utf-8", newline="") as f:
-            for row in csv.DictReader(f):
-                try:
-                    image_id = _to_int_or_none(row.get("id") or row.get("image_id"))
-                    if image_id is None:
-                        continue
-                    meta = {}
-                    if row.get("metadata"):
-                        try:
-                            meta = ast.literal_eval(row["metadata"])
-                        except Exception:
-                            meta = {}
-                    width_mm = (
-                        _to_int_or_none(row.get("width_mm"))
-                        or _to_int_or_none(meta.get("width_mm"))
-                    )
-                    depth_mm = (
-                        _to_int_or_none(row.get("depth_mm"))
-                        or _to_int_or_none(meta.get("depth_mm"))
-                    )
-                    _product_catalog[image_id] = {
-                        "category": normalize_category(row.get("category", "")),
-                        "title":    row.get("title") or row.get("name") or "",
-                        "width_mm": width_mm,
-                        "depth_mm": depth_mm,
-                    }
-                except Exception:
-                    continue
-        print(f"[Catalog] {len(_product_catalog)}개 제품 로드")
-    except FileNotFoundError:
-        print(f"[Catalog] {_CATALOG_CSV} 없음 — fallback 치수 사용")
+        conn = _get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, title, category, metadata FROM products WHERE id IS NOT NULL")
+            for pid, title, category, metadata in cur.fetchall():
+                meta = metadata or {}
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {}
+                width_mm = _to_int_or_none(meta.get("width_mm"))
+                depth_mm = _to_int_or_none(meta.get("depth_mm")) or _to_int_or_none(meta.get("height_mm"))
+                _product_catalog[int(pid)] = {
+                    "category": normalize_category(category or ""),
+                    "title":    title or "",
+                    "width_mm": width_mm,
+                    "depth_mm": depth_mm,
+                }
+        conn.close()
+        print(f"[Catalog] {len(_product_catalog)}개 제품 로드 (DB)")
+    except Exception as e:
+        print(f"[Catalog] DB 로드 실패: {e} — fallback 치수 사용")
     return _product_catalog
 
 
-def enrich_products_from_csv(products: list) -> list:
+def enrich_products_from_db(products: list) -> list:
     catalog = load_product_catalog()
     enriched = []
     for p in products:
