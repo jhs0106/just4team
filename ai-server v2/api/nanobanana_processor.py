@@ -30,7 +30,8 @@ class NanoBananaProcessor:
 
         candidates = [
             Path("data/test/processed_images") / f"{image_id}.png",
-            Path("ai-server/data/test/processed_images") / f"{image_id}.png",
+            Path("ai-server v2/data/test/processed_images") / f"{image_id}.png",
+            Path(__file__).resolve().parents[1] / "data/test/processed_images" / f"{image_id}.png",
             ]
 
         for path in candidates:
