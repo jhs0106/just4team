@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: deskterior-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - deskterior_data:/var/lib/postgresql/data
+    networks:
+      - deskterior
+
+  recommendation:
+    build: ./recommendation
+    container_name: deskterior-recommendation
+    restart: unless-stopped
+    command: ["uvicorn", "deskterior.api.server:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--reload-dir", "/app/deskterior"]
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./recommendation/.env
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - WATCHFILES_FORCE_POLLING=true
+    volumes:
+      - "C:/Users/JMS/.cache/huggingface:/root/.cache/huggingface"
+      - "./recommendation/deskterior:/app/deskterior"
+    depends_on:
+      - postgres
+    networks:
+      - deskterior
+
+  ai-server:
+    build: "./ai-server v2"
+    container_name: deskterior-ai-v2
+    restart: unless-stopped
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/api"]
+    ports:
+      - "8000:8000"
+    env_file:
+      - "./ai-server v2/.env"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - DB_HOST=postgres
+      - RECOMMENDATION_API_URL=http://recommendation:8001
+      - WATCHFILES_FORCE_POLLING=true
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
+      - "./ai-server v2/outputs:/app/outputs"
+      - "./ai-server v2/data:/app/data"
+      - "./ai-server v2/api:/app/api"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - postgres
+      - recommendation
+    networks:
+      - deskterior
+
+networks:
+  deskterior:
+    driver: bridge
+
+volumes:
+  deskterior_data:
+    external: true
+  huggingface_cache:

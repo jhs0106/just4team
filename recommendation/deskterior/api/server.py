@@ -151,6 +151,14 @@ def recommend(req: RecommendRequest) -> dict:
             max_width_mm=_size_cap[0] if _size_cap else None,
             max_depth_mm=_size_cap[1] if _size_cap else None,
         )
+        # size 제약으로 후보가 비면 그 카테고리만 제약 없이 재검색 (best-effort).
+        # 필수 카테고리가 제약 때문에 0개가 되어 전체 추천이 404 나는 것을 방지.
+        if not products and _size_cap:
+            print(f"[size filter] {category}: 제약 {_size_cap}로 후보 0개 → 제약 없이 재검색")
+            products = retrieve_candidates(
+                req.theme, category,
+                user_image_embedding=user_image_emb,
+            )
         scored: list[ScoredProduct] = []
         for p in products:
             te = compute_theme_evidence(p, req.theme)

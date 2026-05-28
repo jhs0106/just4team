@@ -132,6 +132,7 @@ class GenerateResult(BaseModel):
     num_placed:       int           = 0
     products:         List[RecommendedProduct] = Field(default_factory=list)
     error:            Optional[str] = None
+    debug:            Optional[dict] = None  # 생성기/프롬프트/space_constraints 등 디버그 메타
 
 
 class RecommendAndGenerateRequest(BaseModel):

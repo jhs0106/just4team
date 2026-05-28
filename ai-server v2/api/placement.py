@@ -898,7 +898,10 @@ def compute_size_constraints_from_space(space_info: dict) -> dict[str, list[int]
         max_w_mm = 0
         max_d_mm = 0
         for region in available_regions:
-            x1, y1, x2, y2 = region["bbox"]
+            # analyze_space의 region은 bbox_px={x,y,width,height} 형식 (4-튜플 아님)
+            bb = region["bbox_px"]
+            x1, y1 = bb["x"], bb["y"]
+            x2, y2 = bb["x"] + bb["width"], bb["y"] + bb["height"]
             inter_y1 = max(y1, y_start)
             inter_y2 = min(y2, y_end)
             if inter_y2 <= inter_y1:

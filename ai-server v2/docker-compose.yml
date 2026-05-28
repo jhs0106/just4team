@@ -1,14 +1,14 @@
 services:
   ai-server:
     build: .
-    container_name: deskterior-ai
+    container_name: deskterior-ai-v2
     ports:
       - "8000:8000"
     volumes:
       # HuggingFace 모델 캐시 — 최초 1회만 다운로드, 이후 재사용
       - huggingface_cache:/root/.cache/huggingface
-      # LoRA 가중치 — 호스트와 컨테이너 공유
-      - ./outputs/models:/app/outputs/models
+      # LoRA 가중치 + 디버그 산출물(outputs/debug) 호스트와 공유
+      - ./outputs:/app/outputs
       # 테스트 데이터/상품 이미지
       - ./data:/app/data
       # api 코드 — git pull 후 restart만으로 반영 (rebuild 불필요)
@@ -20,9 +20,14 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0
+      - DB_HOST=host.docker.internal
     restart: unless-stopped
 
 volumes:

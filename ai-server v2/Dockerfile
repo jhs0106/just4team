@@ -15,6 +15,10 @@ COPY requirements.txt .
 RUN grep -vE "^(torch==|torchvision==|pywin32==)" requirements.txt > /tmp/req.txt && \
     pip install --no-cache-dir -r /tmp/req.txt
 
+# requirements.txt 누락분: psycopg2(DB 연결) — binary 휠로 libpq 빌드 의존성 불필요
+# watchfiles: uvicorn --reload 백엔드 (api/ 마운트 변경 감지용)
+RUN pip install --no-cache-dir psycopg2-binary==2.9.10 watchfiles
+
 # 소스 코드 복사 (데이터/모델은 볼륨으로 마운트되므로 제외됨)
 COPY . .
 
