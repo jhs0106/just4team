@@ -83,7 +83,7 @@
                                     <input type="radio" class="btn-check" name="deskMode" id="deskModeEmpty"
                                            value="add" autocomplete="off">
                                     <label class="btn btn-outline-primary w-100 py-3" for="deskModeEmpty">
-                                        <div class="fw-bold mb-1">🪑 비어있는 책상</div>
+                                        <div class="fw-bold mb-1">비어있는 책상</div>
                                         <small class="text-muted">기존 물체 없이 바로 제품 배치</small>
                                     </label>
                                 </div>
@@ -91,7 +91,7 @@
                                     <input type="radio" class="btn-check" name="deskMode" id="deskModeOccupied"
                                            value="own_desk" autocomplete="off" checked>
                                     <label class="btn btn-outline-primary w-100 py-3" for="deskModeOccupied">
-                                        <div class="fw-bold mb-1">🧹 제품들이 놓여있는 책상</div>
+                                        <div class="fw-bold mb-1">제품들이 놓여있는 책상</div>
                                         <small class="text-muted">기존 물체 자동 제거 후 새로 배치</small>
                                     </label>
                                 </div>
@@ -160,10 +160,10 @@
                                            style="display:none;">
                                     </video>
 
-                                    <img src="img/front-guide.png"
-                                         id="frontGuide"
-                                         class="guide-overlay"
-                                         style="display:none;">
+                                    <div id="frontGuide" class="guide-overlay" style="display:none;">
+                                        <div class="guide-frame"></div>
+                                        <div class="guide-text">책상 정면을 프레임 안에 꽉 차게 맞춰주세요</div>
+                                    </div>
 
                                 </div>
 
@@ -283,10 +283,10 @@
                                     </video>
 
                                     <!-- GUIDE PNG -->
-                                    <img src="img/top-guide.png"
-                                         id="topGuide"
-                                         class="guide-overlay"
-                                         style="display:none;">
+                                    <div id="topGuide" class="guide-overlay" style="display:none;">
+                                        <div class="guide-frame"></div>
+                                        <div class="guide-text">책상 바로 위에서 수직으로 내려다보며 촬영하세요</div>
+                                    </div>
 
                                 </div>
 
@@ -391,7 +391,7 @@
    공통 헬퍼 — 이미지 리사이즈 (최대 변 1280px) + JPEG 변환
    카메라 캡처 또는 파일 업로드 시 ai-server 부담 + 네트워크 페이로드 줄임
 ========================= */
-const MAX_IMAGE_DIM = 1280;
+const MAX_IMAGE_DIM = 1600;
 const JPEG_QUALITY = 0.85;
 
 function resizeDataUrl(dataUrl, maxDim) {
@@ -546,13 +546,19 @@ async function startFrontCamera(){
 
         frontStream = await navigator.mediaDevices.getUserMedia({
             video:{
-                facingMode:"environment"
+                facingMode:"environment",
+                width:  { ideal: 1920 },
+                height: { ideal: 1080 }
             }
         });
 
         const video = document.getElementById("cameraFront");
 
         video.srcObject = frontStream;
+
+        video.addEventListener("loadedmetadata", () => {
+            console.log("[camera] front stream:", video.videoWidth + "×" + video.videoHeight);
+        }, { once: true });
 
         video.style.display = "block";
 
@@ -616,13 +622,19 @@ async function startTopCamera(){
 
         topStream = await navigator.mediaDevices.getUserMedia({
             video:{
-                facingMode:"environment"
+                facingMode:"environment",
+                width:  { ideal: 1920 },
+                height: { ideal: 1080 }
             }
         });
 
         const video = document.getElementById("cameraTop");
 
         video.srcObject = topStream;
+
+        video.addEventListener("loadedmetadata", () => {
+            console.log("[camera] top stream:", video.videoWidth + "×" + video.videoHeight);
+        }, { once: true });
 
         video.style.display = "block";
 

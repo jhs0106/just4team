@@ -95,7 +95,7 @@
                                     <input type="radio" class="btn-check" name="deskMode" id="deskModeEmpty"
                                            value="add" autocomplete="off">
                                     <label class="btn btn-outline-primary w-100 py-3" for="deskModeEmpty">
-                                        <div class="fw-bold mb-1">🪑 비어있는 책상</div>
+                                        <div class="fw-bold mb-1">비어있는 책상</div>
                                         <small class="text-muted">기존 물체 없이 바로 제품 배치</small>
                                     </label>
                                 </div>
@@ -103,7 +103,7 @@
                                     <input type="radio" class="btn-check" name="deskMode" id="deskModeOccupied"
                                            value="own_desk" autocomplete="off" checked>
                                     <label class="btn btn-outline-primary w-100 py-3" for="deskModeOccupied">
-                                        <div class="fw-bold mb-1">🧹 제품들이 놓여있는 책상</div>
+                                        <div class="fw-bold mb-1">제품들이 놓여있는 책상</div>
                                         <small class="text-muted">기존 물체 자동 제거 후 새로 배치</small>
                                     </label>
                                 </div>

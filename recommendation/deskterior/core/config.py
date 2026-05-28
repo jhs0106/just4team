@@ -14,8 +14,8 @@ NAVER_SHOP_URL = "https://openapi.naver.com/v1/search/shop.json"
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", "5432")),
     "dbname": os.getenv("POSTGRES_DB", "postgres"),
     "user": os.getenv("POSTGRES_USER", "postgres"),
     "password": os.getenv("POSTGRES_PASSWORD"),
