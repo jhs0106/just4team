@@ -51,7 +51,8 @@ public class AiServerClient {
             int deskDepthMm,
             String modeNullable,
             Double deskClickXNullable,
-            Double deskClickYNullable
+            Double deskClickYNullable,
+            String deskCornersJsonNullable
     ) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("theme",                 theme);
@@ -66,6 +67,12 @@ public class AiServerClient {
         if (deskClickXNullable != null && deskClickYNullable != null) {
             body.put("desk_click_x", deskClickXNullable);
             body.put("desk_click_y", deskClickYNullable);
+        }
+        if (deskCornersJsonNullable != null && !deskCornersJsonNullable.isBlank()) {
+            // JSP가 보낸 "[[x,y],...]" (0~1 정규화 4점) → desk_corners 배열로 전달
+            try {
+                body.put("desk_corners", mapper.readValue(deskCornersJsonNullable, java.util.List.class));
+            } catch (Exception ignore) {}
         }
 
         HttpHeaders headers = new HttpHeaders();

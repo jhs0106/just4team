@@ -3,13 +3,12 @@
 <%@ taglib prefix="c" uri="jakarta.tags.core" %>
 <jsp:include page="layout/header.jsp" />
 
-
 <main>
     <div class="container py-5">
         <div class="row justify-content-center">
             <div class="col-lg-8">
                 <div class="text-center mb-5">
-                    <h2 class="fw-bold">Create Your Perfect Desk</h2>
+                    <h2 class="fw-bold">Create Your Desk Setup</h2>
                     <p class="text-muted">Follow the steps below to transform your workspace</p>
                 </div>
 
@@ -19,9 +18,9 @@
                         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                     </div>
                 </c:if>
-
+                
                 <style>
-                    /* 미리보기 이미지 화면 폭/높이 cap — PC 큰 모니터에서 사진이 폼을 뚫고 나가는 거 방지 */
+                    /*미리보기 이미지 화면 폭/높이 cap — PC 큰 모니터에서 사진이 폼을 뚫고 나가는 거 방지*/
                     .preview-image {
                         max-width: 100% !important;
                         max-height: 320px !important;
@@ -51,6 +50,18 @@
                         pointer-events: none;
                         display: none;
                         box-shadow: 0 0 8px rgba(255, 59, 59, 0.6);
+                    }
+                    /* 책상 윗면 4점(모서리) 마커 — 번호 표시 */
+                    .desk-corner-marker {
+                        position: absolute;
+                        width: 22px; height: 22px;
+                        border: 2px solid #2563eb;
+                        border-radius: 50%;
+                        background: rgba(37, 99, 235, 0.55);
+                        color: #fff; font-size: 12px; font-weight: bold;
+                        text-align: center; line-height: 18px;
+                        transform: translate(-50%, -50%);
+                        pointer-events: none;
                     }
                     .desk-click-hint {
                         background: #fff3cd;
@@ -133,6 +144,14 @@
                                 <input type="hidden" id="deskClickX" name="deskClickX" value="">
                                 <input type="hidden" id="deskClickY" name="deskClickY" value="">
 
+                                <!-- 책상 윗면 4모서리 (TL,TR,BR,BL 0~1 정규화 JSON) — corner homography 배치용 -->
+                                <input type="hidden" id="deskCorners" name="deskCorners" value="">
+                                <button type="button" id="deskCornersReset"
+                                        class="btn btn-sm btn-outline-secondary mt-1"
+                                        style="display:none" onclick="clearDeskCorners()">
+                                    책상 모서리 다시 찍기
+                                </button>
+
                                 <!-- FILE INPUT -->
                                 <input type="file"
                                        id="fileFront"
@@ -145,26 +164,21 @@
                                     <button type="button"
                                             class="btn btn-secondary"
                                             onclick="document.getElementById('fileFront').click()">
-
                                         Upload Image
-
                                     </button>
 
                                 <!-- CAMERA AREA -->
                                 <div class="camera-container mb-3">
-
                                     <video id="cameraFront"
                                            autoplay
                                            playsinline
                                            class="camera-video"
                                            style="display:none;">
                                     </video>
-
                                     <div id="frontGuide" class="guide-overlay" style="display:none;">
                                         <div class="guide-frame"></div>
                                         <div class="guide-text">책상 정면을 프레임 안에 꽉 차게 맞춰주세요</div>
                                     </div>
-
                                 </div>
 
                                 <!-- CANVAS -->
@@ -182,57 +196,41 @@
                                     <button type="button"
                                             class="btn btn-primary"
                                             onclick="startFrontCamera()">
-
                                         Open Camera
-
                                     </button>
 
                                     <!-- 2 -->
                                     <button type="button"
                                             class="btn btn-success"
                                             onclick="takeFrontPhoto()">
-
                                         Take Photo
-
                                     </button>
 
                                     <!-- 3 -->
                                     <button type="button"
                                             class="btn btn-danger"
                                             onclick="closeFrontCamera()">
-
                                         Close Camera
-
                                     </button>
                                 </div>
 
                                 <section class="py-4 bg-light">
                                     <div class="container">
-
                                         <div class="row justify-content-center">
-
                                             <div class="col-md-8 text-center">
-
                                                 <h4 class="mb-3">Enter your desk dimensions</h4>
-
                                                 <div class="row g-3">
-
                                                     <div class="col-md-6">
                                                         <input type="number" class="form-control" name="width"
                                                                placeholder="Width (cm) *" required min="1">
                                                     </div>
-
                                                     <div class="col-md-6">
                                                         <input type="number" class="form-control" name="depth"
                                                                placeholder="Depth (cm) *" required min="1">
                                                     </div>
-
                                                 </div>
-
                                             </div>
-
                                         </div>
-
                                     </div>
                                 </section>
                             </div>
@@ -244,16 +242,13 @@
                                 <img src="img/2imagen.jpeg"
                                      class="img-fluid rounded-3 mb-3"
                                      style="max-height: 200px;">
-
                                 <small class="text-muted d-block mb-3">
                                     이미지에 보이는 것처럼 책상의 위에서 아래까지 사진을 찍어 주세요.
                                 </small>
-
                                 <!-- PREVIEW -->
                                 <img id="previewTop"
                                      class="preview-image mb-3"
                                      src="https://placehold.co/400x250/e2e8f0/64748b?text=Top+Photo">
-
                                 <!-- FILE INPUT -->
                                 <input type="file"
                                        id="fileTop"
@@ -261,14 +256,11 @@
                                        accept="image/*"
                                        style="display:none"
                                        onchange="previewTopFile(this)">
-
                                 <!-- Upload -->
                                     <button type="button"
                                             class="btn btn-secondary"
                                             onclick="document.getElementById('fileTop').click()">
-
                                         Upload Image
-
                                     </button>
 
                                 <!-- CAMERA AREA -->
@@ -287,7 +279,6 @@
                                         <div class="guide-frame"></div>
                                         <div class="guide-text">책상 바로 위에서 수직으로 내려다보며 촬영하세요</div>
                                     </div>
-
                                 </div>
 
                                 <!-- CANVAS -->
@@ -305,27 +296,21 @@
                                     <button type="button"
                                             class="btn btn-primary"
                                             onclick="startTopCamera()">
-
                                         Open Camera
-
                                     </button>
 
                                     <!-- 2 -->
                                     <button type="button"
                                             class="btn btn-success"
                                             onclick="takeTopPhoto()">
-
                                         Take Photo
-
                                     </button>
 
                                     <!-- 3 -->
                                     <button type="button"
                                             class="btn btn-danger"
                                             onclick="closeTopCamera()">
-
                                         Close Camera
-
                                     </button>
                                 </div>
                             </div>
@@ -357,20 +342,16 @@
                     <!-- Budget Input -->
                     <div class="card mb-4">
                         <div class="card-body p-4">
-
                             <div class="d-flex align-items-center mb-4">
                                 <div class="step-icon me-3" style="width: 40px; height: 40px; font-size: 1rem;">3</div>
                                 <h5 class="mb-0">Enter Your Budget</h5>
                             </div>
-
                             <div class="mb-3">
                                 <label for="budget" class="form-label">Budget (in WON)</label>
                                 <input type="number" class="form-control" id="budget" name="budget" placeholder="Enter your budget" required>
                             </div>
-
                         </div>
                     </div>
-
 
                     <div class="text-center">
                         <button type="submit" class="btn btn-primary btn-lg px-5" id="submitBtn">
@@ -388,8 +369,8 @@
 
 <script>
 /* =========================
-   공통 헬퍼 — 이미지 리사이즈 (최대 변 1280px) + JPEG 변환
-   카메라 캡처 또는 파일 업로드 시 ai-server 부담 + 네트워크 페이로드 줄임
+   이미지 리사이즈 (최대 변 1280px) + JPEG 변환
+   카메라 캡처 또는 파일 업로드 시 server 부담+네트워크 페이로드 줄임
 ========================= */
 const MAX_IMAGE_DIM = 1600;
 const JPEG_QUALITY = 0.85;
@@ -464,39 +445,60 @@ function isEmptyDeskMode() {
 }
 
 function updateClickUI() {
-    const preview = document.getElementById("previewFront");
-    const hint    = document.getElementById("deskClickHint");
-    if (isEmptyDeskMode()) {
-        preview.classList.add("click-enabled");
-        hint.style.display = "block";
+    // 모든 모드에서 책상 윗면 4점 클릭 제공 (제품 있는 책상 포함)
+    document.getElementById("previewFront").classList.add("click-enabled");
+    updateCornerHint();
+}
+
+let deskCornerPts = [];
+const CORNER_LABELS = ["좌측 뒤", "우측 뒤", "우측 앞", "좌측 앞"];
+
+// 호환용: 새 사진 선택/촬영 시 호출되던 clearDeskClick → 4점 리셋으로 위임
+function clearDeskClick() { clearDeskCorners(); }
+
+function clearDeskCorners() {
+    deskCornerPts = [];
+    document.getElementById("deskCorners").value = "";
+    document.querySelectorAll(".desk-corner-marker").forEach(m => m.remove());
+    document.getElementById("deskCornersReset").style.display = "none";
+    updateCornerHint();
+}
+
+function updateCornerHint() {
+    const hint = document.getElementById("deskClickHint");
+    hint.style.display = "block";
+    const n = deskCornerPts.length;
+    if (n < 4) {
+        hint.innerHTML = "👆 책상 <b>윗면</b> 네 모서리를 <b>좌측뒤 → 우측뒤 → 우측앞 → 좌측앞</b> 순서로 클릭하세요. "
+                       + "(" + n + "/4, 다음: " + CORNER_LABELS[n] + ")";
     } else {
-        preview.classList.remove("click-enabled");
-        hint.style.display = "none";
-        clearDeskClick();
+        hint.innerHTML = "✅ 책상 윗면 4점 완료. 다시 찍으려면 아래 버튼을 누르세요.";
     }
 }
 
-function clearDeskClick() {
-    document.getElementById("deskClickMarker").style.display = "none";
-    document.getElementById("deskClickX").value = "";
-    document.getElementById("deskClickY").value = "";
-}
-
 function handleDeskClick(ev) {
-    if (!isEmptyDeskMode()) return;
+    if (deskCornerPts.length >= 4) return;
     const img = ev.currentTarget;
     const rect = img.getBoundingClientRect();
     const x_norm = (ev.clientX - rect.left) / rect.width;
     const y_norm = (ev.clientY - rect.top)  / rect.height;
     if (x_norm < 0 || x_norm > 1 || y_norm < 0 || y_norm > 1) return;
 
-    document.getElementById("deskClickX").value = x_norm.toFixed(4);
-    document.getElementById("deskClickY").value = y_norm.toFixed(4);
+    deskCornerPts.push([parseFloat(x_norm.toFixed(4)), parseFloat(y_norm.toFixed(4))]);
 
-    const marker = document.getElementById("deskClickMarker");
-    marker.style.left = (x_norm * 100) + "%";
-    marker.style.top  = (y_norm * 100) + "%";
-    marker.style.display = "block";
+    const wrap = document.querySelector(".desk-click-wrapper");
+    const m = document.createElement("div");
+    m.className = "desk-corner-marker";
+    m.style.left = (x_norm * 100) + "%";
+    m.style.top  = (y_norm * 100) + "%";
+    m.textContent = deskCornerPts.length;
+    wrap.appendChild(m);
+
+    document.getElementById("deskCornersReset").style.display = "inline-block";
+    if (deskCornerPts.length === 4) {
+        document.getElementById("deskCorners").value = JSON.stringify(deskCornerPts);
+    }
+    updateCornerHint();
 }
 
 // 모드 라디오 변경 시 클릭 UI on/off
@@ -523,27 +525,19 @@ document.addEventListener("DOMContentLoaded", () => {
             document.getElementById("previewTop").scrollIntoView({behavior: "smooth"});
             return;
         }
-        if (isEmptyDeskMode()) {
-            const cx = document.getElementById("deskClickX").value;
-            if (!cx) {
-                ev.preventDefault();
-                alert("빈 책상 모드에서는 책상 윗면을 한 번 클릭해주세요.");
-                document.getElementById("previewFront").scrollIntoView({behavior: "smooth"});
-            }
+        if (deskCornerPts.length < 4) {
+            ev.preventDefault();
+            alert("책상 윗면 네 모서리를 모두 클릭해주세요. (현재 " + deskCornerPts.length + "/4)");
+            document.getElementById("previewFront").scrollIntoView({behavior: "smooth"});
         }
     });
 });
 
 let frontStream = null;
 
-/* =========================
-   OPEN CAMERA
-========================= */
-
+//OPEN CAMERA
 async function startFrontCamera(){
-
     try{
-
         frontStream = await navigator.mediaDevices.getUserMedia({
             video:{
                 facingMode:"environment",
@@ -551,60 +545,37 @@ async function startFrontCamera(){
                 height: { ideal: 1080 }
             }
         });
-
         const video = document.getElementById("cameraFront");
-
         video.srcObject = frontStream;
-
         video.addEventListener("loadedmetadata", () => {
             console.log("[camera] front stream:", video.videoWidth + "×" + video.videoHeight);
         }, { once: true });
-
         video.style.display = "block";
-
         document.getElementById("frontGuide").style.display = "block";
-
         await video.play();
-
     }catch(error){
-
         alert("Camera Error: " + error);
-
         console.log(error);
     }
 }
 
-/* =========================
-   TAKE PHOTO
-========================= */
-
+//TAKE PHOTO
 function takeFrontPhoto(){
     capturePhoto("cameraFront", "canvasFront", "previewFront", "frontImageData", closeFrontCamera);
     clearDeskClick();  // 새 사진 → 클릭 좌표 초기화
 }
 
-/* =========================
-   CLOSE CAMERA
-========================= */
-
+//CLOSE CAMERA
 function closeFrontCamera(){
-
     if(frontStream){
-
         frontStream.getTracks().forEach(track => track.stop());
-
         frontStream = null;
     }
-
     document.getElementById("cameraFront").style.display = "none";
-
     document.getElementById("frontGuide").style.display = "none";
 }
 
-/* =========================
-   FILE PREVIEW
-========================= */
-
+//FILE PREVIEW
 function previewFrontFile(_input){
     handleFileSelected("fileFront", "previewFront", "frontImageData");
     clearDeskClick();  // 새 사진 → 클릭 좌표 초기화
@@ -612,14 +583,9 @@ function previewFrontFile(_input){
 
 let topStream = null;
 
-/* =========================
-   OPEN TOP CAMERA
-========================= */
-
+//OPEN TOP CAMERA
 async function startTopCamera(){
-
     try{
-
         topStream = await navigator.mediaDevices.getUserMedia({
             video:{
                 facingMode:"environment",
@@ -627,59 +593,36 @@ async function startTopCamera(){
                 height: { ideal: 1080 }
             }
         });
-
         const video = document.getElementById("cameraTop");
-
         video.srcObject = topStream;
-
         video.addEventListener("loadedmetadata", () => {
             console.log("[camera] top stream:", video.videoWidth + "×" + video.videoHeight);
         }, { once: true });
-
         video.style.display = "block";
-
         document.getElementById("topGuide").style.display = "block";
-
         await video.play();
-
     }catch(error){
-
         alert("Camera Error: " + error);
-
         console.log(error);
     }
 }
 
-/* =========================
-   TAKE TOP PHOTO
-========================= */
-
+//TAKE TOP PHOTO
 function takeTopPhoto(){
     capturePhoto("cameraTop", "canvasTop", "previewTop", "topImageData", closeTopCamera);
 }
 
-/* =========================
-   CLOSE TOP CAMERA
-========================= */
-
+//CLOSE TOP CAMERA
 function closeTopCamera(){
-
     if(topStream){
-
         topStream.getTracks().forEach(track => track.stop());
-
         topStream = null;
     }
-
     document.getElementById("cameraTop").style.display = "none";
-
     document.getElementById("topGuide").style.display = "none";
 }
 
-/* =========================
-   TOP FILE PREVIEW
-========================= */
-
+//TOP FILE PREVIEW
 function previewTopFile(_input){
     handleFileSelected("fileTop", "previewTop", "topImageData");
 }

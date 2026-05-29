@@ -1,13 +1,3 @@
-"""
-배치 학습 결과 시각화 — 논문용 그래프 생성
-출력: outputs/paper_figures/
-  1. placement_scatter.png    — 카테고리별 positive/negative rx·ry 분포
-  2. score_heatmap_<cat>.png  — 카테고리별 배치 점수 히트맵 (rule-based)
-  3. feature_importance.png   — LightGBM feature importance (모델 로드 가능시)
-  4. preferred_vs_actual.png  — 선호 위치 vs 실제 데이터 분포 비교
-
-실행: python visualize_placement_learning.py [--cats KEYBOARD MOUSE ...] [--no-model]
-"""
 import argparse
 import json
 import math
@@ -69,7 +59,7 @@ LABEL_KR = {
 }
 
 
-# ── 데이터 로드 ───────────────────────────────────────────────────────────────
+#데이터 로드
 def load_dataset(cats: list[str]) -> dict:
     rows = {}
     for cat in cats:
@@ -97,7 +87,7 @@ def load_dataset(cats: list[str]) -> dict:
     return rows
 
 
-# ── 1. 카테고리별 Positive / Negative 분포 scatter ────────────────────────────
+#1. 카테고리별 Positive / Negative 분포 scatter
 def fig_placement_scatter(data: dict, cats: list[str]):
     n    = len(cats)
     cols = 4
@@ -155,7 +145,7 @@ def fig_placement_scatter(data: dict, cats: list[str]):
     print(f"[saved] {out}")
 
 
-# ── 2. 배치 점수 히트맵 (rule-based score 시각화) ────────────────────────────
+#2. 배치 점수 히트맵 (rule-based score 시각화)
 def _rule_score(cat: str, rx: float, ry: float) -> float:
     pref_rx, pref_ry = _PREFERRED_POS.get(cat, (0.5, 0.5))
     dist  = ((rx - pref_rx)**2 + (ry - pref_ry)**2) ** 0.5
@@ -243,7 +233,7 @@ def fig_score_heatmap(cats: list[str], model=None, feature_names: list | None = 
     print(f"[saved] {out}")
 
 
-# ── 3. Feature Importance ────────────────────────────────────────────────────
+#3. Feature Importance
 def fig_feature_importance(ranker: dict):
     try:
         model = ranker["model"]
@@ -266,7 +256,7 @@ def fig_feature_importance(ranker: dict):
         print(f"[feature_importance] 스킵: {e}")
 
 
-# ── 4. 선호 위치 vs 실제 positive 무게중심 비교 ────────────────────────────────
+#4. 선호 위치 vs 실제 positive 비교
 def fig_preferred_vs_actual(data: dict, cats: list[str]):
     fig, ax = plt.subplots(figsize=(7, 6))
     ax.set_facecolor("#f0f4f8")
@@ -274,14 +264,14 @@ def fig_preferred_vs_actual(data: dict, cats: list[str]):
     ax.invert_yaxis()
     ax.set_xlabel("rx (좌 → 우)", fontsize=11)
     ax.set_ylabel("ry (뒤 → 앞)", fontsize=11)
-    ax.set_title("선호 위치 vs 실제 Positive 무게중심", fontsize=13, fontweight="bold")
+    ax.set_title("선호 위치 vs 실제 Positive", fontsize=13, fontweight="bold")
     ax.grid(True, alpha=0.25)
     ax.axvline(0.5, color="gray", lw=0.5, ls="--", alpha=0.6)
     ax.axhline(0.5, color="gray", lw=0.5, ls="--", alpha=0.6)
 
     for cat in cats:
         color = CAT_COLORS.get(cat, "black")
-        d     = data.get(cat)
+        d = data.get(cat)
         if d is None:
             continue
 
@@ -291,7 +281,7 @@ def fig_preferred_vs_actual(data: dict, cats: list[str]):
             ax.plot(px, py, marker="D", markersize=9, color=color,
                     markeredgecolor="black", markeredgewidth=0.8, alpha=0.9, zorder=4)
 
-        # 실제 positive 무게중심
+        # 실제 positive
         if len(d["pos_rx"]) > 0:
             cx, cy = float(np.mean(d["pos_rx"])), float(np.mean(d["pos_ry"]))
             ax.plot(cx, cy, marker="o", markersize=9, color=color,
@@ -309,7 +299,7 @@ def fig_preferred_vs_actual(data: dict, cats: list[str]):
         plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="gray",
                    markeredgecolor="black", markersize=9, label="선호 위치 (rule)"),
         plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="gray",
-                   markeredgecolor="white", markersize=9, label="실제 positive 무게중심"),
+                   markeredgecolor="white", markersize=9, label="실제 positive"),
     ]
     ax.legend(handles=handles, loc="upper right", fontsize=9)
     fig.tight_layout()
@@ -319,7 +309,7 @@ def fig_preferred_vs_actual(data: dict, cats: list[str]):
     print(f"[saved] {out}")
 
 
-# ── 5. 카테고리별 Positive 밀도 KDE 맵 ──────────────────────────────────────
+#5. 카테고리별 Positive 밀도 KDE 맵
 def fig_kde_density(data: dict, cats: list[str]):
     try:
         from scipy.stats import gaussian_kde
@@ -375,7 +365,7 @@ def fig_kde_density(data: dict, cats: list[str]):
     print(f"[saved] {out}")
 
 
-# ── main ─────────────────────────────────────────────────────────────────────
+# main
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cats", nargs="+", default=PAPER_CATS, help="시각화할 카테고리 목록")
