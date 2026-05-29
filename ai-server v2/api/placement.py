@@ -915,3 +915,144 @@ def compute_size_constraints_from_space(space_info: dict) -> dict[str, list[int]
         if max_w_mm > 0 and max_d_mm > 0:
             constraints[cat] = [max_w_mm, max_d_mm]
     return constraints
+
+
+# ── Corner-driven planar homography 배치 (사용자 4점 클릭 기반) ─────────────────
+# 비v2 ai-server에서 이식. desk_corners(TL,TR,BR,BL, front px)로 책상 평면 homography를
+# 계산해 각 제품의 front-view bbox를 산출. recommend_and_generate가 desk_corners를 받으면
+# 이 경로를 사용 (heuristic top-view 분석 대신).
+
+def _front_bbox_from_corners(
+    cat: str, rx: float, ry: float, w_mm: int, d_mm: int | None,
+    desk_corners,                  # 4x2 TL,TR,BR,BL (front px) — 사용자 클릭 책상 윗면
+    desk_width_mm: int | None, desk_depth_mm: int | None,
+    relation_state: dict,
+) -> tuple[int, int, int, int] | None:
+    # 사용자 클릭 4점으로 책상평면(0~1) → front 픽셀 perspective 매핑.
+    # flat은 footprint를 책상면에 깔고, upright는 footprint 앞모서리 접지 + 위로 높이.
+    ry_min, ry_max = _CAT_RY_RANGE.get(cat, (0.10, 0.85))
+    ry_c = max(ry_min, min(ry_max, ry))
+    rx_adj = rx
+    if cat in ("KEYBOARD", "DESK_SHELF", "LIGHTING") and "monitor_rx" in relation_state:
+        rx_adj = relation_state["monitor_rx"]
+
+    corners = np.asarray(desk_corners, dtype=np.float32)
+    norm = np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
+    M = cv2.getPerspectiveTransform(norm, corners)
+
+    _dim = _CATEGORY_DIMS_MM.get(cat, (100, 100))
+    dw_mm = max(1, int(desk_width_mm)) if desk_width_mm else 1
+    dd_mm = max(1, int(desk_depth_mm)) if desk_depth_mm else max(1, int(dw_mm * 0.55))
+    rw = min(0.95, (w_mm or _dim[0]) / dw_mm)
+    rd = min(0.60, (d_mm or _dim[1]) / dd_mm)
+
+    # footprint 4점 (앞 ry_c, 뒤 ry_c-rd) → front
+    yb, yt = ry_c, max(0.0, ry_c - rd)
+    xl, xr = max(0.0, rx_adj - rw / 2), min(1.0, rx_adj + rw / 2)
+    fp  = np.float32([[xl, yt], [xr, yt], [xr, yb], [xl, yb]]).reshape(-1, 1, 2)
+    fpf = cv2.perspectiveTransform(fp, M).reshape(-1, 2)
+
+    tier = _PRODUCT_FORM_TIER.get(cat, "upright")
+    if tier == "flat":
+        x1, x2 = float(fpf[:, 0].min()), float(fpf[:, 0].max())
+        y1, y2 = float(fpf[:, 1].min()), float(fpf[:, 1].max())
+    else:
+        bl, br = fpf[3], fpf[2]
+        foot_w = max(1.0, abs(br[0] - bl[0]))
+        h_px   = foot_w * _FRONT_HEIGHT_RATIO.get(cat, 0.60)
+        x1, x2 = float(min(bl[0], br[0])), float(max(bl[0], br[0]))
+        y2     = float(max(bl[1], br[1]))
+        y1     = y2 - h_px
+
+    if cat == "MONITOR":
+        relation_state["monitor_contact_y"] = y2
+    elif cat == "KEYBOARD":
+        _mon_y2 = relation_state.get("monitor_contact_y", 0)
+        if y1 < _mon_y2 + 10:
+            _shift = (_mon_y2 + 10) - y1
+            y1 += _shift
+            y2 += _shift
+        relation_state["keyboard_y2"] = y2
+
+    mw, mh = _MIN_FRONT_SIZE.get(cat, (40, 20))
+    if x2 - x1 < mw:
+        cx = (x1 + x2) / 2
+        x1, x2 = cx - mw / 2, cx + mw / 2
+    if y2 - y1 < mh:
+        y1 = y2 - mh
+
+    x1, y1, x2, y2 = max(0, int(x1)), max(0, int(y1)), int(x2), int(y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def compute_relational_layout(products, desk_corners, desk_width_mm, desk_depth_mm):
+    # 정석 구도 관계 체인. 위치를 제품 크기·책상에서 계산 (top-view 분석 미사용).
+    # 모니터 중앙뒤 → 키보드 모니터앞 → 마우스 키보드오른쪽 → 마우스패드 둘감쌈 → 스피커 모니터옆.
+    dw_mm = max(1, int(desk_width_mm)) if desk_width_mm else 1400
+    dd_mm = max(1, int(desk_depth_mm)) if desk_depth_mm else int(dw_mm * 0.5)
+
+    prod_by_cat: dict = {}
+    for p in products:
+        c = normalize_category(p.category)
+        if c in _CATEGORY_DIMS_MM and c not in prod_by_cat:
+            prod_by_cat[c] = p
+
+    def _w(cat, p):
+        return getattr(p, "width_mm", None) or _CATEGORY_DIMS_MM[cat][0]
+    def _rw(cat, p):
+        return min(0.95, _w(cat, p) / dw_mm)
+
+    tgt: dict = {}
+    if "MONITOR" in prod_by_cat:
+        tgt["MONITOR"] = (0.50, _CAT_RY_RANGE["MONITOR"][0] + 0.02)
+    mon_rx = tgt.get("MONITOR", (0.50, 0.0))[0]
+    if "DESK_SHELF" in prod_by_cat:
+        _r = _CAT_RY_RANGE.get("DESK_SHELF", (0.15, 0.32))
+        tgt["DESK_SHELF"] = (mon_rx, _r[0] + 0.02)
+    kb_ry = _CAT_RY_RANGE["KEYBOARD"][1] - 0.03
+    if "KEYBOARD" in prod_by_cat:
+        tgt["KEYBOARD"] = (mon_rx, kb_ry)
+        kb_rw = _rw("KEYBOARD", prod_by_cat["KEYBOARD"])
+    else:
+        kb_rw = 0.30
+    if "MOUSE" in prod_by_cat:
+        m_rw = _rw("MOUSE", prod_by_cat["MOUSE"])
+        mouse_rx = min(0.95, mon_rx + kb_rw / 2 + m_rw / 2 + 0.015)
+        tgt["MOUSE"] = (mouse_rx, kb_ry)
+    else:
+        m_rw, mouse_rx = 0.05, mon_rx + kb_rw / 2
+    if "MOUSEPAD" in prod_by_cat:
+        left  = mon_rx - kb_rw / 2
+        right = mouse_rx + m_rw / 2
+        tgt["MOUSEPAD"] = ((left + right) / 2, kb_ry)
+    if "SPEAKER" in prod_by_cat:
+        _r = _CAT_RY_RANGE.get("SPEAKER", (0.18, 0.45))
+        tgt["SPEAKER"] = (max(0.08, mon_rx - 0.30), _r[0] + 0.05)
+    for c in prod_by_cat:
+        if c not in tgt:
+            pref = _PREFERRED_POS.get(c, {"rx": 0.50, "ry": 0.40})
+            tgt[c] = (pref["rx"], pref["ry"])
+
+    rel_state: dict = {"monitor_rx": mon_rx}
+    placements: list = []
+    for cat in sorted(prod_by_cat, key=lambda c: _PLACEMENT_ORDER.get(c, 999)):
+        p      = prod_by_cat[cat]
+        rx, ry = tgt[cat]
+        w_mm   = _w(cat, p)
+        d_mm   = getattr(p, "depth_mm", None) or _CATEGORY_DIMS_MM[cat][1]
+        bbox   = _front_bbox_from_corners(cat, rx, ry, w_mm, d_mm, desk_corners, dw_mm, dd_mm, rel_state)
+        if bbox is None:
+            continue
+        rel_state[f"{cat.lower()}_rx"] = rx
+        placements.append({
+            "product": p, "region": bbox,
+            "placement_source": "relational_layout",
+            "selected_reason": "relational", "fallback_reason": None,
+            "anchor_rx": round(rx, 3), "anchor_ry": round(ry, 3),
+            "score": None, "score_meta": None, "available_region_id": None,
+            "candidate_count": None, "overlap_reject_count": None,
+            "low_score_reject_count": None,
+        })
+    return placements

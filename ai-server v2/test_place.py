@@ -58,15 +58,12 @@ KEYBOARD_SIZES = [
 ]
 
 
-# ── 유틸리티 ────────────────────────────────────────────────────
-
+# 유틸리티
 def to_b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("utf-8")
 
-
 def save_b64(b64_str: str, path: Path) -> None:
     path.write_bytes(base64.b64decode(b64_str))
-
 
 def poll(job_id: str, label: str, interval: float = 2.0) -> dict:
     print(f"  [{label}] 처리 중", end="", flush=True)
@@ -88,7 +85,6 @@ def poll(job_id: str, label: str, interval: float = 2.0) -> dict:
         print(".", end="", flush=True)
         time.sleep(interval)
 
-
 def infer_keyboard_size(title: str, category: str = "") -> tuple[float, float, float] | None:
     """타이틀/카테고리에서 키보드 배열 감지 → (width_mm, depth_mm, height_mm) 반환.
     키보드로 판단되지 않으면 None 반환."""
@@ -100,7 +96,6 @@ def infer_keyboard_size(title: str, category: str = "") -> tuple[float, float, f
             return float(w), float(d), float(h)
     # 키보드로 판단되지만 배열 불명 → TKL 기본값
     return 360.0, 130.0, 35.0
-
 
 def make_product_mask(segment_mask_b64: str,
                       width_mm: float | None,
@@ -118,42 +113,34 @@ def make_product_mask(segment_mask_b64: str,
     """
     mask_img = Image.open(BytesIO(base64.b64decode(segment_mask_b64))).convert("L")
     arr = np.array(mask_img)
-
     ys, xs = np.where(arr > 128)
     if len(xs) == 0 or width_mm is None or depth_mm is None:
         return segment_mask_b64, "전체 마스크 (크기 미지정)"
-
     x1, x2 = int(xs.min()), int(xs.max())
     y1, y2 = int(ys.min()), int(ys.max())
     pad_px_w = x2 - x1
     pad_px_h = y2 - y1
-
     px_per_mm_x = pad_px_w / mousepad_width_mm
     px_per_mm_y = pad_px_h / mousepad_depth_mm
-
     prod_px_w = min(int(width_mm * px_per_mm_x), pad_px_w)
     # 탑면: 원근 압축된 깊이 / 앞면: 수직 높이 (수평 스케일 기준)
     top_h  = int(depth_mm  * px_per_mm_y)
     face_h = int((height_mm or 0) * px_per_mm_x)
     prod_px_h = min(top_h + face_h, pad_px_h)
-
     # 마우스패드 앞 테두리(y2)에 앵커링, 가로 중앙 배치
     cx  = (x1 + x2) // 2
     ry2 = y2
     ry1 = max(y1, ry2 - prod_px_h)
     rx1 = max(x1, cx - prod_px_w // 2)
     rx2 = min(x2, rx1 + prod_px_w)
-
     new_arr = np.zeros_like(arr)
     new_arr[ry1:ry2, rx1:rx2] = 255
-
     buf = BytesIO()
     Image.fromarray(new_arr, mode="L").save(buf, format="PNG")
     h_str = f"+{int(height_mm)}mm높이" if height_mm else ""
     label = (f"{int(width_mm)}×{int(depth_mm)}{h_str}mm "
              f"→ {prod_px_w}×{prod_px_h}px (탑{top_h}+앞{face_h})")
     return base64.b64encode(buf.getvalue()).decode("utf-8"), label
-
 
 def load_products(csv_path: Path, img_dir: Path, limit: int,
                   ids: list[str] | None = None) -> list[dict]:
@@ -193,7 +180,6 @@ def load_products(csv_path: Path, img_dir: Path, limit: int,
                 break
     return products
 
-
 def print_product_info(p: dict) -> None:
     size_str = ""
     if p["width_mm"] and p["depth_mm"]:
@@ -201,8 +187,7 @@ def print_product_info(p: dict) -> None:
         size_str = f"  ({p['width_mm']:.0f}×{p['depth_mm']:.0f}{h}mm)"
     print(f"  [#{p['id']}] {p['title']}{size_str}")
 
-
-# ── Step 1: 물체 제거 ────────────────────────────────────────────
+# Step 1: 물체 제거
 
 def step1_remove(bg_b64: str, prompt: str | None = None) -> str:
     if prompt:

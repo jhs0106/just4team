@@ -20,8 +20,6 @@
                             <span class="visually-hidden">Loading...</span>
                         </div>
                         <h4 id="progressTitle" class="mb-2">AI가 책상을 디자인하는 중입니다</h4>
-                        <p id="progressDetail" class="text-muted mb-1">job_id: <span id="jobIdLabel">-</span></p>
-                        <p id="progressStatus" class="text-muted mb-0">상태: 시작 대기 중...</p>
                         <p id="progressElapsed" class="text-muted small mt-2">경과: 0초</p>
                     </div>
 
@@ -62,7 +60,7 @@
                     <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
                     <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
                 </svg>
-                Try Another Style
+                다른 스타일 만들러 가기
             </a>
         </div>
     </div>

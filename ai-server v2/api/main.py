@@ -337,6 +337,8 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
         # 빈 책상 모드용 클릭 좌표 전달 (SAM2 prompt로 사용)
         gen_req.desk_click_x = req.desk_click_x
         gen_req.desk_click_y = req.desk_click_y
+        # 사용자 4점(책상 윗면 모서리) — corner-driven homography 배치용
+        gen_req.desk_corners = req.desk_corners
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, f"setup → GenerateRequest 변환 실패: {e}")
 
@@ -366,15 +368,54 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
 
     asyncio.get_event_loop().run_in_executor(
         executor,
-        _run_nanobanana_generate,
+        _run_cv_then_refine,
         job_id,
-        req,
-        setup,
+        gen_req,
         _products_meta,
         space_constraints,
     )
 
     return job_store[job_id]
+
+
+def _run_cv_then_refine(
+        job_id: str,
+        gen_req: GenerateRequest,
+        products_meta: list,
+        space_constraints: dict,
+):
+    # Tier 3: CV 합성(제거+배치+그림자, SD 미사용) → OpenAI harmonize로 마감.
+    # 우리 CV 결과로 레이아웃을 잡고, OpenAI는 사실감만 입힘.
+    try:
+        # 1. CV 합성본 생성 (cv_composite 모드 강제 — SD 안 거침)
+        gen_req.generation_mode = "cv_composite"
+        _run_generate(job_id, gen_req)
+
+        if job_store[job_id].status != JobStatus.done or not job_store[job_id].result_image:
+            return  # CV 합성 실패 — _run_generate가 이미 error 설정함
+
+        composite_b64 = job_store[job_id].result_image
+
+        # 2. OpenAI로 합성본 다듬기 (레이아웃/제품/방 보존)
+        job_store[job_id].status = JobStatus.running
+        from .nanobanana_processor import get_nanobanana_processor
+        processor = get_nanobanana_processor()
+        refined = processor.harmonize(composite_b64)
+
+        job_store[job_id].result_image = refined["result_image_base64"]
+        job_store[job_id].products = products_meta
+        job_store[job_id].status = JobStatus.done
+        job_store[job_id].debug = {
+            "generator": "cv_composite+openai_harmonize",
+            "prompt": refined.get("prompt"),
+            "space_constraints": space_constraints,
+        }
+    except Exception as e:
+        job_store[job_id].status = JobStatus.failed
+        job_store[job_id].error = str(e)
+        log.error("job_id=%s\n%s", job_id, traceback.format_exc())
+
+
 def _run_nanobanana_generate(
         job_id: str,
         req: RecommendAndGenerateRequest,
@@ -958,6 +999,24 @@ def _run_generate(job_id: str, req: GenerateRequest):
 
         print(f"[Generate] placement_items={len(placement_items)}")
 
+        # 사용자가 4점(desk_corners) 찍은 경우: corner-driven planar homography로 배치 교체.
+        # (heuristic top-view 배치 결과를 실제 책상 평면 기반으로 덮어씀)
+        if getattr(req, "desk_corners", None):
+            try:
+                _cw, _ch = current.size
+                _corners_px = [[float(_x) * _cw, float(_y) * _ch] for _x, _y in req.desk_corners]
+                from .placement import compute_relational_layout
+                _corner_items = compute_relational_layout(
+                    products, _corners_px, req.desk_width_mm, req.desk_depth_mm,
+                )
+                if _corner_items:
+                    placement_items = _corner_items
+                    print(f"[Placement] corner-driven homography 적용, n={len(placement_items)} corners_px={_corners_px}")
+                else:
+                    print("[Placement] corner-driven 결과 0개 → heuristic 배치 유지")
+            except Exception as _e:
+                print(f"[Placement] corner-driven 실패: {_e} → heuristic 배치 유지")
+
         if not placement_items:
             job_store[job_id].status = JobStatus.failed
             job_store[job_id].error  = (
@@ -1079,7 +1138,11 @@ def _run_generate(job_id: str, req: GenerateRequest):
             return
 
         if gen_mode == "cv_composite":
-            # SD 미사용 모드 — 그림자도 SD가 안 만들어주므로 _add_shadows 직접 호출
+            # SD 미사용 모드 — 그림자도 SD가 안 만들어주므로 _add_shadows 직접 호출.
+            # flat 제품(키보드/마우스/마우스패드)은 책상 원근으로 planar homography 워프 적용
+            # (controlnet 경로와 동일 게이팅·각도). semi_flat/upright는 워프 안 함.
+            from .controlnet_inpaint_processor import _warp_product_to_desk_perspective
+            from .config import _PRODUCT_FORM_TIER, _CAT_TILT_DEG, _DEFAULT_DESK_TILT_DEG
             for item in placement_items:
                 p   = item["product"]
                 cat = normalize_category(p.category)
@@ -1090,11 +1153,15 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if prod_path is None:
                     run_errors.append(f"{cat}: image not found id={p.image_id}")
                     continue
-                prod_img   = Image.open(prod_path)
-                prod_alpha = prepare_product_image_for_composite(prod_img)
-                current    = composite_product_simple(current, prod_img, item["region"], category=cat)
-                current    = _add_shadows(current, item["region"], cat,
-                                          prod_alpha=prod_alpha, debug_dir=_debug_dir / "products")
+                prod_img  = Image.open(prod_path)
+                prod_rgba = prepare_product_image_for_composite(prod_img)
+                if _PRODUCT_FORM_TIER.get(cat, "semi_flat") == "flat":
+                    _tilt = _CAT_TILT_DEG.get(cat, _DEFAULT_DESK_TILT_DEG)
+                    prod_rgba = _warp_product_to_desk_perspective(prod_rgba, _tilt)
+                    print(f"  [cv_composite warp] {cat} depression={_tilt}° → {prod_rgba.size}")
+                current = composite_product_simple(current, prod_rgba, item["region"], category=cat)
+                current = _add_shadows(current, item["region"], cat,
+                                       prod_alpha=prod_rgba, debug_dir=_debug_dir / "products")
                 num_placed += 1
                 print(f"  [cv_composite] {cat} 합성 완료 (num_placed={num_placed})")
 

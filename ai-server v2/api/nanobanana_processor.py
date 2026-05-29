@@ -1,3 +1,4 @@
+# nanobanana -> openai 변경
 import os
 import base64
 import requests
@@ -184,6 +185,49 @@ Important generation rules:
         if not items or not items[0].get("b64_json"):
             raise RuntimeError(
                 f"OpenAI 응답에 이미지 없음 (keys={list(data.keys())}, body={response.text[:500]})"
+            )
+
+        return {
+            "result_image_base64": items[0]["b64_json"],
+            "prompt": prompt,
+            "raw_response": data,
+        }
+
+    def harmonize(self, image_base64: str) -> Dict[str, Any]:
+        # Tier 3: CV 합성본(제거+배치+그림자)을 받아 OpenAI로 사실감만 다듬음.
+        # 레이아웃/제품/방을 보존하라고 강하게 지시 — 재생성/hallucination 억제.
+        prompt = (
+            "This is a rough composite photo of a desk setup: the products have already been "
+            "placed onto the user's actual desk. Turn it into one cohesive, realistic photograph. "
+            "Blend each product naturally into the scene and fix lighting, shadows, reflections, "
+            "and edges so they match the desk and the room. "
+            "STRICT RULES: do NOT move, add, remove, resize, or replace any product. "
+            "Keep every product's identity, shape, color, and position exactly as in the input. "
+            "Keep the desk, walls, and room structure exactly as in the input. "
+            "Only improve photorealism and seamless blending."
+        )
+
+        mime = _guess_mime(image_base64)
+        ext = "jpg" if mime == "image/jpeg" else "png"
+        files = [("image[]", (f"composite.{ext}", _b64_to_bytes(image_base64), mime))]
+        form = {"model": self.model, "prompt": prompt, "size": self.size}
+
+        response = requests.post(
+            self.api_url,
+            headers=self._headers(),
+            data=form,
+            files=files,
+            timeout=self.timeout,
+        )
+
+        if response.status_code >= 400:
+            raise RuntimeError(f"OpenAI image API error {response.status_code}: {response.text}")
+
+        data = response.json()
+        items = data.get("data") or []
+        if not items or not items[0].get("b64_json"):
+            raise RuntimeError(
+                f"OpenAI harmonize 응답에 이미지 없음 (keys={list(data.keys())}, body={response.text[:500]})"
             )
 
         return {

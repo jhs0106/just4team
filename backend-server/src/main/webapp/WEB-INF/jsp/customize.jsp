@@ -163,26 +163,21 @@
                                     <button type="button"
                                             class="btn btn-secondary"
                                             onclick="document.getElementById('fileFront').click()">
-
                                         Upload Image
-
                                     </button>
 
                                 <!-- CAMERA AREA -->
                                 <div class="camera-container mb-3">
-
                                     <video id="cameraFront"
                                            autoplay
                                            playsinline
                                            class="camera-video"
                                            style="display:none;">
                                     </video>
-
                                     <img src="img/front-guide.png"
                                          id="frontGuide"
                                          class="guide-overlay"
                                          style="display:none;">
-
                                 </div>
 
                                 <!-- CANVAS -->
