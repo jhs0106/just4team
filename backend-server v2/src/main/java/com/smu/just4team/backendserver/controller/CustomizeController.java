@@ -46,6 +46,7 @@ public class CustomizeController {
             @RequestParam(value = "deskClickX", required = false) String deskClickXStr,
             @RequestParam(value = "deskClickY", required = false) String deskClickYStr,
             @RequestParam(value = "deskCorners", required = false) String deskCornersStr,
+            @RequestParam(value = "keepPoints", required = false) String keepPointsStr,
 
             @RequestParam(value = "frontFile", required = false) MultipartFile frontFile,
             @RequestParam(value = "topFile",   required = false) MultipartFile topFile,
@@ -117,12 +118,16 @@ public class CustomizeController {
             String deskCornersForCall =
                     (deskCornersStr != null && !deskCornersStr.isBlank()) ? deskCornersStr : null;
 
+            // 6c. 남길 기존 제품 탭 좌표 — own_desk 선택 제거용 (없으면 null)
+            String keepPointsForCall =
+                    (keepPointsStr != null && !keepPointsStr.isBlank()) ? keepPointsStr : null;
+
             // 7. ai-server 호출 → job_id
             String jobId = aiServerClient.submitRecommendAndGenerate(
-                    theme, budgetInt, frontB64, topB64, widthMm, depthMm, mode, clickX, clickY, deskCornersForCall
+                    theme, budgetInt, frontB64, topB64, widthMm, depthMm, mode, clickX, clickY, deskCornersForCall, keepPointsForCall
             );
 
-            return "redirect:/result?jobId=" + jobId;
+            return "redirect:/result?jobId=" + jobId + "&budget=" + budgetInt;
 
         } catch (Exception e) {
             redirectAttributes.addFlashAttribute("error",

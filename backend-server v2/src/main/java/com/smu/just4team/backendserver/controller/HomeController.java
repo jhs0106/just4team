@@ -11,9 +11,10 @@ public class HomeController {
         return "index"; // Esto buscará /WEB-INF/jsp/index.jsp
     }
 
+    // 단일 랜딩으로 통합 — 기존 /home 링크는 메인('/')으로 리다이렉트
     @GetMapping("/home")
     public String home() {
-        return "home"; // Esto buscará /WEB-INF/jsp/home.jsp
+        return "redirect:/";
     }
 
 //    @GetMapping("/customize")

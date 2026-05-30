@@ -81,6 +81,11 @@ class SegmentResult(BaseModel):
     error: Optional[str] = None
 
 
+# ── Detect Objects (남길 제품 선택용 박스 반환) ──────────────
+class DetectObjectsRequest(BaseModel):
+    image_base64: str = Field(..., description="정면 이미지 (base64 또는 data URL) — 검출 대상")
+
+
 # ── Generate ─────────────────────────────────────────────
 class ProductItem(BaseModel):
     category: str           = Field(..., description="제품 카테고리 (KEYBOARD, MOUSE, MONITOR 등)")
@@ -110,6 +115,7 @@ class GenerateRequest(BaseModel):
     desk_click_x:          Optional[float]   = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add)에서 사용자가 클릭한 책상 윗면 x 좌표 (front-view 기준, 0~1 정규화)")
     desk_click_y:          Optional[float]   = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add)에서 사용자가 클릭한 책상 윗면 y 좌표 (front-view 기준, 0~1 정규화)")
     desk_corners:          Optional[List[List[float]]] = Field(None, description="사용자가 클릭한 책상 윗면 4모서리 TL,TR,BR,BL (front-view, 0~1 정규화). 제공 시 corner-driven homography 배치 사용")
+    keep_points:           Optional[List[List[float]]] = Field(None, description="남길 기존 제품 탭 좌표 (front-view, 0~1 정규화, own_desk). 검출 객체와 매칭해 제거 제외")
 
 
 class RecommendedProduct(BaseModel):
@@ -151,3 +157,4 @@ class RecommendAndGenerateRequest(BaseModel):
     desk_click_x:          Optional[float] = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add) 시 SAM2 prompt용 클릭 x (0~1)")
     desk_click_y:          Optional[float] = Field(None, ge=0.0, le=1.0, description="빈 책상 모드(add) 시 SAM2 prompt용 클릭 y (0~1)")
     desk_corners:          Optional[List[List[float]]] = Field(None, description="책상 윗면 4모서리 TL,TR,BR,BL (front-view, 0~1 정규화)")
+    keep_points:           Optional[List[List[float]]] = Field(None, description="남길 기존 제품 탭 좌표 (front-view, 0~1 정규화, own_desk). 검출 객체와 매칭해 제거 제외")

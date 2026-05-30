@@ -11,9 +11,11 @@ public class ResultController {
     @GetMapping("/result")
     public String showResultPage(
             @RequestParam(value = "jobId", required = false) String jobId,
+            @RequestParam(value = "budget", required = false) Integer budget,
             Model model
     ) {
         model.addAttribute("jobId", jobId);
+        model.addAttribute("budget", budget);
         return "result";
     }
 }

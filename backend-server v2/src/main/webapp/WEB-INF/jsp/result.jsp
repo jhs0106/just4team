@@ -7,8 +7,8 @@
 <main>
     <div class="container py-5">
         <div class="text-center mb-5">
-            <h2 class="fw-bold">Your Styled Desk</h2>
-            <p class="text-muted">Here's your AI-generated workspace with recommended products</p>
+            <h2 class="fw-bold">완성된 책상</h2>
+            <p class="text-muted">AI가 추천 제품으로 완성한 책상입니다</p>
         </div>
 
         <div class="row justify-content-center mb-5">
@@ -20,7 +20,6 @@
                             <span class="visually-hidden">Loading...</span>
                         </div>
                         <h4 id="progressTitle" class="mb-2">AI가 책상을 디자인하는 중입니다</h4>
-                        <p id="progressDetail" class="text-muted mb-1">job_id: <span id="jobIdLabel">-</span></p>
                         <p id="progressStatus" class="text-muted mb-0">상태: 시작 대기 중...</p>
                         <p id="progressElapsed" class="text-muted small mt-2">경과: 0초</p>
                     </div>
@@ -31,7 +30,7 @@
                         <div class="card-body text-center py-4 bg-white">
                             <span class="badge bg-primary px-3 py-2 rounded-pill">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-wand-sparkles-icon lucide-wand-sparkles"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></svg>
-                                AI Generated
+                                AI 생성
                             </span>
                         </div>
                     </div>
@@ -49,9 +48,12 @@
 
         <!-- 추천된 제품 리스트 (완료 시 표시) -->
         <div id="productsBlock" style="display:none;">
-            <div class="mb-4 mt-5">
-                <h4 class="fw-bold">Products in This Setup</h4>
-                <p class="text-muted">생성된 책상에 사용된 제품들 — 클릭하면 구매 페이지로 이동합니다</p>
+            <div class="mb-4 mt-5 d-flex justify-content-between align-items-end flex-wrap gap-2">
+                <div>
+                    <h4 class="fw-bold mb-1">사용된 제품</h4>
+                    <p class="text-muted mb-0">생성된 책상에 사용된 제품들 — 클릭하면 구매 페이지로 이동합니다</p>
+                </div>
+                <div id="productsSummary" class="text-end"></div>
             </div>
             <div id="productsList" class="row g-4"></div>
         </div>
@@ -62,7 +64,7 @@
                     <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
                     <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
                 </svg>
-                Try Another Style
+                다른 스타일로 다시 만들기
             </a>
         </div>
     </div>
@@ -71,7 +73,7 @@
 <script>
     (function () {
         const jobId = "<c:out value='${jobId}' />";
-        const jobIdLabel = document.getElementById("jobIdLabel");
+        const budgetNum = parseInt("<c:out value='${budget}' />", 10) || 0;
         const progressPanel = document.getElementById("progressPanel");
         const resultPanel = document.getElementById("resultPanel");
         const errorPanel = document.getElementById("errorPanel");
@@ -87,7 +89,6 @@
             errorMessage.textContent = "jobId가 없습니다. /customize에서 다시 시작해주세요.";
             return;
         }
-        jobIdLabel.textContent = jobId;
 
         const t0 = Date.now();
         const POLL_MS = 5000;        // 5초마다 폴링
@@ -177,7 +178,9 @@
                 return;
             }
             list.innerHTML = "";
+            let total = 0;
             for (const p of products) {
+                total += Number(p.price) || 0;
                 const catLabel = escapeHtml(CAT_KO[p.category] || p.category || "");
                 const name     = escapeHtml(p.name || "이름 없음");
                 const imgSrc   = p.image_url ? escapeHtml(p.image_url)
@@ -190,7 +193,7 @@
                 card.innerHTML =
                     '<div class="card h-100 product-card">' +
                         '<img src="' + imgSrc + '" alt="' + name + '" class="card-img-top" ' +
-                             'style="height:180px;object-fit:cover" ' +
+                             'style="height:180px;object-fit:contain;background:#fff;padding:12px" ' +
                              'onerror="this.src=\'https://placehold.co/400x400/e2e8f0/64748b?text=No+Image\'">' +
                         '<div class="card-body">' +
                             '<span class="badge bg-light text-secondary mb-2">' + catLabel + '</span>' +
@@ -207,6 +210,14 @@
                     '</div>';
                 list.appendChild(card);
             }
+            const summary = document.getElementById("productsSummary");
+            let summaryHtml = '<div class="fw-bold fs-5 text-primary">합계 ' + fmtPrice(total) + '</div>';
+            if (budgetNum > 0) {
+                const within = total <= budgetNum;
+                summaryHtml += '<div class="small ' + (within ? "text-success" : "text-danger") + '">'
+                             + '예산 ' + fmtPrice(budgetNum) + (within ? " 이내" : " 초과") + '</div>';
+            }
+            summary.innerHTML = summaryHtml;
             productsBlock.style.display = "block";
         }
 

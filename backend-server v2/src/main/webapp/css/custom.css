@@ -67,17 +67,37 @@ body > nav {
     border-radius: 20px;
     overflow: hidden;
 }
-/* 프레임 박스 — 고대비 테두리 + 바깥 영역 디밍(시선 유도) */
-.guide-frame{
+/* TOP-VIEW: 입력한 가로:세로(width:depth) 비율 직사각형.
+   --desk-ar은 카메라 열 때 JS가 입력 치수로 설정(기본 1.7). */
+.guide-rect{
     position: absolute;
-    top: 10%;
-    left: 7%;
-    right: 7%;
-    bottom: 10%;
-    border: 2px solid rgba(255, 255, 255, 0.95);
-    border-radius: 14px;
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45),
-                0 0 0 9999px rgba(0, 0, 0, 0.22);
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 84%;
+    aspect-ratio: var(--desk-ar, 1.7);
+    max-height: 84%;
+    border: 3px dashed rgba(255, 255, 255, 0.97);
+    border-radius: 10px;
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.55);
+}
+/* FRONT-VIEW: 책상 실루엣(상판+다리) 윤곽선 — 한눈에 '책상'으로 읽히도록 */
+.desk-guide-svg{
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+.desk-guide-svg polygon,
+.desk-guide-svg rect,
+.desk-guide-svg line{
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.97);
+    stroke-width: 3;
+    stroke-dasharray: 10 7;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
 }
 /* 뷰별 안내 문구 */
 .guide-text{
