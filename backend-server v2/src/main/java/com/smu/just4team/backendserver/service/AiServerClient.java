@@ -52,7 +52,8 @@ public class AiServerClient {
             String modeNullable,
             Double deskClickXNullable,
             Double deskClickYNullable,
-            String deskCornersJsonNullable
+            String deskCornersJsonNullable,
+            String keepPointsJsonNullable
     ) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("theme",                 theme);
@@ -72,6 +73,12 @@ public class AiServerClient {
             // JSP가 보낸 "[[x,y],...]" (0~1 정규화 4점) → desk_corners 배열로 전달
             try {
                 body.put("desk_corners", mapper.readValue(deskCornersJsonNullable, java.util.List.class));
+            } catch (Exception ignore) {}
+        }
+        if (keepPointsJsonNullable != null && !keepPointsJsonNullable.isBlank()) {
+            // 남길 기존 제품 탭 좌표 "[[x,y],...]" → keep_points (own_desk 선택 제거용)
+            try {
+                body.put("keep_points", mapper.readValue(keepPointsJsonNullable, java.util.List.class));
             } catch (Exception ignore) {}
         }
 
@@ -104,6 +111,23 @@ public class AiServerClient {
         ResponseEntity<String> resp = restTemplate.getForEntity(url, String.class);
         if (!resp.getStatusCode().is2xxSuccessful() || resp.getBody() == null) {
             throw new IllegalStateException("ai-server jobs fetch failed: " + resp.getStatusCode());
+        }
+        return resp.getBody();
+    }
+
+    // POST /detect-objects → 정면 사진 검출 박스 raw JSON 반환 (남길 제품 클릭 선택용).
+    public String detectObjects(String imageBase64) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("image_base64", imageBase64);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, Object>> req = new HttpEntity<>(body, headers);
+
+        String url = baseUrl + "/detect-objects";
+        ResponseEntity<String> resp = restTemplate.exchange(url, HttpMethod.POST, req, String.class);
+        if (!resp.getStatusCode().is2xxSuccessful() || resp.getBody() == null) {
+            throw new IllegalStateException("ai-server detect failed: " + resp.getStatusCode());
         }
         return resp.getBody();
     }

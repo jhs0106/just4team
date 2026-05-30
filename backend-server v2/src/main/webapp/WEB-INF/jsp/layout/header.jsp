@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ko">
 <head>
 
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>데스크테리어 - AI Desk Styling</title>
+    <title>데스크테리어 - AI 책상 꾸미기</title>
 <!-- Google Fonts -->
     <link rel="preconnect"
           href="https://fonts.googleapis.com">
@@ -39,13 +39,10 @@
                 <span class="navbar-toggler-icon"></span>
             </button>
             <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav ms-auto">
-                    <li class="nav-item"><a href="/#about" class="nav-link active">About</a></li>
-                    <li class="nav-item"><a href="/#services" class="nav-link">Services</a></li>
-                    <li class="nav-item"><a href="/#portfolio" class="nav-link">reviews</a></li>
-                    <li class="nav-item"><a href="/#contact" class="nav-link">contact</a></li>
-                    <li class="nav-item"><a href="/home" class="nav-link">TRY</a></li>
-                    </li>
+                <ul class="navbar-nav ms-auto align-items-lg-center">
+                    <li class="nav-item"><a href="/#how" class="nav-link">이용 방법</a></li>
+                    <li class="nav-item"><a href="/#styles" class="nav-link">스타일</a></li>
+                    <li class="nav-item"><a href="${pageContext.request.contextPath}/customize" class="nav-link">시작하기</a></li>
                 </ul>
                 <%@ page contentType="text/html; charset=UTF-8" pageEncoding="UTF-8" %>
                 <% request.setCharacterEncoding("UTF-8"); %>

@@ -57,6 +57,7 @@ from .models import (
     ProductPlaceRequest, ProductPlaceResult,
     SegmentRequest, SegmentResult,
     GenerateRequest, GenerateResult, RecommendAndGenerateRequest,
+    DetectObjectsRequest,
 )
 from .object_removal_processor import get_object_removal_processor
 from .lama_processor import get_lama_processor
@@ -173,6 +174,39 @@ def _run_object_removal(job_id: str, req: ObjectRemovalRequest):
         job_store[job_id].status = JobStatus.failed
         job_store[job_id].error  = str(e)
         log.error("job_id=%s\n%s", job_id, traceback.format_exc())
+
+
+# ── Detect Objects (동기: 남길 제품 선택용 박스 반환) ─────────
+@app.post("/detect-objects")
+async def detect_objects(req: DetectObjectsRequest):
+    # 정면 사진의 검출 박스를 즉시 반환 (LaMa 미실행). own_desk '남길 제품' 클릭 선택용.
+    return await asyncio.get_event_loop().run_in_executor(executor, _run_detect_objects, req)
+
+
+def _run_detect_objects(req: DetectObjectsRequest) -> dict:
+    # 생성 시 제거 검출과 동일 파라미터 — 보여준 박스와 실제 제거 대상이 일치하도록.
+    b64 = req.image_base64
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[1]
+    image = b64_to_image(b64)
+    W, H = image.size
+    remover = get_object_removal_processor()
+    detection = remover.detect_with_prompt(
+        image=image, prompt=_REMOVAL_PROMPT, max_area_ratio=0.40,
+        box_threshold=0.20, dilation_size=35,
+    )
+    objects = []
+    for det in detection.get("detections", []):
+        x1, y1, x2, y2 = det.box_xyxy
+        objects.append({
+            "x1": round(max(0.0, x1 / W), 5),
+            "y1": round(max(0.0, y1 / H), 5),
+            "x2": round(min(1.0, x2 / W), 5),
+            "y2": round(min(1.0, y2 / H), 5),
+            "label": det.label,
+            "score": round(float(det.score), 3),
+        })
+    return {"num_objects": len(objects), "objects": objects}
 
 
 # ── Step 2: Product Placement ───────────────────────────
@@ -339,6 +373,8 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
         gen_req.desk_click_y = req.desk_click_y
         # 사용자 4점(책상 윗면 모서리) — corner-driven homography 배치용
         gen_req.desk_corners = req.desk_corners
+        # 남길 기존 제품 탭 좌표 — own_desk 선택 제거용 (검출 객체와 매칭해 제거 제외)
+        gen_req.keep_points = req.keep_points
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, f"setup → GenerateRequest 변환 실패: {e}")
 
@@ -575,6 +611,29 @@ def _otsu_band_fallback(mask_np: np.ndarray, y_start: int, y_end: int) -> tuple 
     return (int(xs.min()), y_top, int(xs.max()), y_bottom)
 
 
+def _obj_matches_keep(mask_pil, det, keep_pts, W, H) -> bool:
+    # keep 탭 좌표(0~1)가 객체 bbox(있으면) 또는 마스크 안에 들어가면 True → 제거 제외(보존)
+    _arr = None
+    for kp in keep_pts:
+        try:
+            kx, ky = float(kp[0]), float(kp[1])
+        except Exception:
+            continue
+        px, py = kx * W, ky * H
+        box = getattr(det, "box_xyxy", None) if det is not None else None
+        if box:
+            x1, y1, x2, y2 = box
+            if x1 <= px <= x2 and y1 <= py <= y2:
+                return True
+        else:
+            if _arr is None:
+                _arr = np.array(mask_pil.convert("L"))
+            ix, iy = int(px), int(py)
+            if 0 <= iy < _arr.shape[0] and 0 <= ix < _arr.shape[1] and _arr[iy, ix] > 127:
+                return True
+    return False
+
+
 def _run_generate(job_id: str, req: GenerateRequest):
     job_store[job_id].status = JobStatus.running
     try:
@@ -614,6 +673,20 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _ov_draw.rectangle([_bx1, _by1, _bx2, _by2], outline=(255, 0, 0), width=3)
             _ov_draw.text((_bx1 + 4, _by1 + 4), f"{_det.label}:{_det.score:.2f}", fill=(255, 0, 0))
         _ov.save(_debug_dir / "front_detection_overlay.png")
+
+        # 선택 제거: keep_points(남길 제품 탭)와 매칭된 객체는 제거 대상에서 제외
+        _keep_pts = getattr(req, "keep_points", None)
+        if _keep_pts and front_instances:
+            _kept_n = 0
+            _to_remove = []
+            for _i, _mp in enumerate(front_instances):
+                _det = front_detections[_i] if _i < len(front_detections) else None
+                if _obj_matches_keep(_mp, _det, _keep_pts, img_w, img_h):
+                    _kept_n += 1
+                else:
+                    _to_remove.append(_mp)
+            print(f"[Removal] keep_points={len(_keep_pts)} → 보존 {_kept_n}개, 제거 {len(_to_remove)}개")
+            front_instances = _to_remove
 
         _combined_np = np.zeros((img_h, img_w), dtype=np.uint8)
         for _mp in front_instances:

@@ -210,7 +210,9 @@ Important generation rules:
         mime = _guess_mime(image_base64)
         ext = "jpg" if mime == "image/jpeg" else "png"
         files = [("image[]", (f"composite.{ext}", _b64_to_bytes(image_base64), mime))]
-        form = {"model": self.model, "prompt": prompt, "size": self.size}
+        # input_fidelity=high: gpt-image-1이 입력 합성본(배치된 실제 제품)을 더 충실히 보존
+        # → 제품 원형/로고/위치 유지력↑ (모달리티 에러 시 이 키 제거)
+        form = {"model": self.model, "prompt": prompt, "size": self.size, "input_fidelity": "high"}
 
         response = requests.post(
             self.api_url,
