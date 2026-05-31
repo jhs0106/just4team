@@ -71,7 +71,11 @@ SELECT COUNT(*) FROM products;
 | embedding_txt | vector(1024) | Jina CLIP v2 텍스트 임베딩 |
 | metadata | JSONB | 파싱된 사이즈 정보 (모니터 인치, 키보드 배열 등) |
 
-> `metadata` 예시: `{"inch": 27, "source": "title"}` (MONITOR), `{"layout": "TKL", "source": "title"}` (KEYBOARD)
+> `metadata` 예시:
+> - MONITOR: `{"inch": 27, "width_mm": 614, "depth_mm": 180, "source": "title"}`
+> - KEYBOARD: `{"layout": "TKL", "width_mm": 360, "depth_mm": 130, "source": "title"}`
+>
+> `width_mm` / `depth_mm`는 가용공간 필터(`space_constraints`) 적용 시 사용됩니다. 없는 경우 해당 상품은 크기 제약 없이 통과합니다.
 
 ---
 

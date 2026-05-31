@@ -15,7 +15,7 @@ Docker DB 실행: docker compose up -d
     ↓
 DB 복원: docker exec -i desk-postgres psql -U postgres postgres < dump.sql
     ↓
-python main.py recommend
+python main.py
 ```
 
 ### 실행 체크리스트
@@ -26,7 +26,7 @@ python main.py recommend
 [ ] .env 파일 작성 (.env.example 참고)
 [ ] docker compose up -d
 [ ] docker exec -i desk-postgres psql -U postgres postgres < dump.sql
-[ ] python main.py recommend
+[ ] python main.py
 ```
 
 ---
@@ -46,7 +46,7 @@ npy 3종 다운로드 → data/embeddings/ 배치
     ↓
 python scripts/import_embeddings.py (DB 적재)
     ↓
-python main.py recommend
+python main.py
     ↓
 docker exec desk-postgres pg_dump -U postgres postgres > dump.sql (팀원 공유용)
 ```
@@ -120,11 +120,23 @@ python scripts/update_metadata.py
 
 ## Step 6. 추천 실행
 
+### CLI 방식
+
 ```bash
-python main.py recommend
+python main.py
 ```
 
-테마(white/black/gaming/wood)와 예산을 입력하면 TOP 3 데스크 셋업 번들이 출력됩니다.
+테마(white/black/gaming/wood)와 예산을 입력하면 TOP 1 데스크 셋업 번들이 출력됩니다.
+
+### API 서버 방식 (ai-server 연동)
+
+```bash
+uvicorn deskterior.api.server:app --host 0.0.0.0 --port 8001
+```
+
+ai-server가 `POST http://localhost:8001/recommend`로 호출합니다.  
+요청 body에 `theme`, `budget`, 선택적으로 `image_base64`, `space_constraints`를 포함합니다.  
+자세한 API 명세는 `RECOMMENDATION_LOGIC.md`의 API 서버 섹션을 참고하세요.
 
 ---
 
@@ -142,11 +154,11 @@ docker exec desk-postgres pg_dump -U postgres postgres > dump.sql
 
 | 파일 | 역할 |
 |---|---|
-| `deskterior/pipeline/collector.py` | 네이버 쇼핑 API 수집기 |
 | `deskterior/database/manager.py` | PostgreSQL 연결, UPSERT, 임베딩 업데이트 |
 | `deskterior/retrieval/searcher.py` | Jina CLIP v2 임베딩 + pgvector 검색 |
 | `deskterior/recommender/engine.py` | Beam Search + ThemeEvidence 추천 알고리즘 |
 | `deskterior/recommender/config.py` | 테마 프리셋, 카테고리, threshold 설정 |
+| `deskterior/api/server.py` | FastAPI 추천 API 서버 (ai-server 연동용) |
 | `scripts/import_embeddings.py` | npy → DB 적재 |
 | `scripts/export_for_csv.py` | DB → CSV 내보내기 |
 | `scripts/update_metadata.py` | 사이즈 메타데이터 파싱 업데이트 |

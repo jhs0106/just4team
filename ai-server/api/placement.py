@@ -1083,7 +1083,9 @@ def compute_size_constraints_from_space(space_info: dict) -> dict[str, list[int]
         max_w_mm = 0
         max_d_mm = 0
         for region in available_regions:
-            x1, y1, x2, y2 = region["bbox"]
+            bp = region["bbox_px"]
+            x1, y1 = bp["x"], bp["y"]
+            x2, y2 = x1 + bp["width"], y1 + bp["height"]
             inter_y1 = max(y1, y_start)
             inter_y2 = min(y2, y_end)
             if inter_y2 <= inter_y1:

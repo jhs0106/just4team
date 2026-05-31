@@ -147,7 +147,6 @@ def recommend(req: RecommendRequest) -> dict:
         _size_cap = (req.space_constraints or {}).get(category)
         products = retrieve_candidates(
             req.theme, category,
-            user_image_embedding=user_image_emb,
             max_width_mm=_size_cap[0] if _size_cap else None,
             max_depth_mm=_size_cap[1] if _size_cap else None,
         )
@@ -167,7 +166,6 @@ def recommend(req: RecommendRequest) -> dict:
                 image_sim      = clamp(sp.product.image_sim),
                 text_sim       = clamp(sp.product.text_sim),
                 theme_evidence = sp.theme_evidence,
-                value_score    = sp.value_score,
             )
         scored_list.sort(key=lambda sp: sp.item_score, reverse=True)
 
