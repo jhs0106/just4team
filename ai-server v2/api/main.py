@@ -754,7 +754,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
         # pipeline_mode: controlnet (기본, per-product SD generation) |
         #                cv_composite (SD 미사용) | placement_only (배치만) |
         #                harmonize (실험, 폐기 — 환경에 hallucinated 객체 생성 문제)
-        _pipeline_mode = getattr(req, "generation_mode", "controlnet")
+        _pipeline_mode = getattr(req, "generation_mode", "cv_composite")
         # 'harmonize' alias는 사용자가 명시 요청 시에만, 기본은 controlnet으로
         print(f"[Generate] pipeline_mode={_pipeline_mode}")
 
@@ -1143,7 +1143,10 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _score = _item.get("score")
             _rid   = _item.get("available_region_id")
             _src   = "av" if _item.get("placement_source") == "available_space_scoring" else "fb"
-            _label = _cat
+            _w     = getattr(_item["product"], "width_mm", None)
+            _d     = getattr(_item["product"], "depth_mm", None)
+            _z     = _PLACEMENT_ORDER.get(_cat, 999)
+            _label = f"{_cat} {_w}x{_d} z{_z}"   # 카테고리·실치수·그리기순서 한눈에
             if _score is not None:
                 _label += f" s={_score:.2f}"
             if _rid is not None:
@@ -1258,10 +1261,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                     continue
                 prod_img  = Image.open(prod_path)
                 prod_rgba = prepare_product_image_for_composite(prod_img)
-                if _PRODUCT_FORM_TIER.get(cat, "semi_flat") == "flat":
-                    _tilt = _CAT_TILT_DEG.get(cat, _DEFAULT_DESK_TILT_DEG)
-                    prod_rgba = _warp_product_to_desk_perspective(prod_rgba, _tilt)
-                    print(f"  [cv_composite warp] {cat} depression={_tilt}° → {prod_rgba.size}")
+                # 2.5D 원근 워프 제거 — 제품 원본을 스티커처럼 그대로 평면 합성.
                 current = composite_product_simple(current, prod_rgba, item["region"], category=cat)
                 current = _add_shadows(current, item["region"], cat,
                                        prod_alpha=prod_rgba, debug_dir=_debug_dir / "products")
