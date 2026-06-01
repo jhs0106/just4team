@@ -1,0 +1,50 @@
+# ───────── 비밀/인증 ─────────
+# 인증서·키 컨테이너 (절대 커밋 금지). 키스토어는 각자 로컬에서 재생성.
+*.p12
+*.pfx
+*.pem
+*.key
+*.crt
+*.cer
+*.jks
+keystore.*
+truststore.*
+
+# 환경변수 — 각 모듈의 .env는 거기 .gitignore에서도 차단됨.
+.env
+.env.local
+.env.*.local
+*.env
+
+# ───────── 런타임 산출물 ─────────
+# 생성 결과·디버그 이미지·로그 (재현 가능, 용량 큼)
+outputs/
+logs/
+*.log
+
+# ───────── Python ─────────
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# ───────── Java / Gradle / IDE ─────────
+build/
+.gradle/
+bin/
+target/
+*.class
+.idea/
+.vscode/
+*.iml
+
+# ───────── OS / 임시 ─────────
+.DS_Store
+Thumbs.db
+*.swp
+*~

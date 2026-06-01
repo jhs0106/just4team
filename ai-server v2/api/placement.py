@@ -28,6 +28,87 @@ def _build_occupied_mask_from_detection(detection: dict, img_w: int, img_h: int)
     return occupied
 
 
+def _build_kept_mask_tv(
+    detection:    dict,
+    keep_points,                     # front-view 정규화 [[fx,fy],...] — 사용자가 '남길 제품' 탭
+    desk_corners,                    # front-view 정규화 [TL,TR,BR,BL] (좌측뒤→우측뒤→우측앞→좌측앞)
+    desk_bbox_tv: tuple,             # (tv_dx1,tv_dy1,tv_dx2,tv_dy2) — top-view 책상 bbox
+    tv_w:         int,
+    tv_h:         int,
+) -> np.ndarray | None:
+    # 사용자가 front-view에서 선택한 '남길 제품' 좌표를 top-view로 환산하여,
+    # 그 위치를 포함하는 top-view 검출 객체 마스크들의 합집합(=보존 객체)을 반환.
+    #
+    # 환산 경로 (픽셀 크기 불필요 — front 정규화 공간에서 직접 homography):
+    #   front 정규화 (fx,fy)
+    #     ──[desk_corners → 단위정사각 homography]──▶ 책상평면 정규화 (rx,ry)  (rx:0=좌,1=우 / ry:0=뒤,1=앞)
+    #     ──[top-view desk_bbox 선형 매핑]──────────▶ top-view 픽셀 (tx,ty)
+    #   → (tx,ty)를 포함하는 individual_mask 채택. 정확히 안 맞으면 최근접 마스크(허용반경 내).
+    #
+    # 전제: top-view가 정준 방향(뒤=상단, 좌=좌측)으로 촬영됨 — 코드 전반의 ry 규약과 동일.
+    # desk_corners가 없으면 정확한 환산 불가 → None 반환(호출측은 기존 동작 유지).
+    if not keep_points or not desk_corners or len(desk_corners) != 4:
+        return None
+
+    masks = detection.get("individual_masks", [])
+    if not masks:
+        return None
+
+    corners_norm = np.asarray(desk_corners, dtype=np.float32)          # 4x2 (front 정규화)
+    plane_norm   = np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
+    try:
+        M = cv2.getPerspectiveTransform(corners_norm, plane_norm)      # front정규화 → 책상평면정규화
+    except cv2.error:
+        return None
+
+    tv_dx1, tv_dy1, tv_dx2, tv_dy2 = desk_bbox_tv
+    tv_dw = max(1, tv_dx2 - tv_dx1)
+    tv_dh = max(1, tv_dy2 - tv_dy1)
+
+    # individual_masks를 numpy + centroid 사전계산
+    mask_arrs = [np.array(m.convert("L")) > 127 for m in masks]
+    centroids = []
+    for arr in mask_arrs:
+        ys, xs = np.where(arr)
+        centroids.append((xs.mean(), ys.mean()) if len(xs) else (None, None))
+
+    tol = 0.06 * float(np.hypot(tv_dw, tv_dh))     # 최근접 매칭 허용 반경 (책상 대각의 6%)
+    kept = np.zeros((tv_h, tv_w), dtype=np.uint8)
+    matched_any = False
+
+    pts = np.asarray([[float(p[0]), float(p[1])] for p in keep_points], dtype=np.float32).reshape(-1, 1, 2)
+    plane_pts = cv2.perspectiveTransform(pts, M).reshape(-1, 2)        # (rx,ry)들
+
+    for (rx, ry) in plane_pts:
+        tx = int(round(tv_dx1 + float(np.clip(rx, 0.0, 1.0)) * tv_dw))
+        ty = int(round(tv_dy1 + float(np.clip(ry, 0.0, 1.0)) * tv_dh))
+        tx = max(0, min(tv_w - 1, tx))
+        ty = max(0, min(tv_h - 1, ty))
+
+        hit = False
+        for i, arr in enumerate(mask_arrs):
+            if arr[ty, tx]:
+                kept = cv2.bitwise_or(kept, arr.astype(np.uint8) * 255)
+                matched_any = True
+                hit = True
+        if hit:
+            continue
+
+        # 정확히 안 맞으면 centroid 최근접 마스크 (허용 반경 내)
+        best_i, best_d = -1, tol
+        for i, (cx, cy) in enumerate(centroids):
+            if cx is None:
+                continue
+            d = float(np.hypot(cx - tx, cy - ty))
+            if d < best_d:
+                best_d, best_i = d, i
+        if best_i >= 0:
+            kept = cv2.bitwise_or(kept, mask_arrs[best_i].astype(np.uint8) * 255)
+            matched_any = True
+
+    return kept if matched_any else None
+
+
 def _match_products_to_detections(products, detections) -> list:
     available = list(detections)
     matched   = []
@@ -113,67 +194,61 @@ def _front_bbox_for_anchor(
     ry_min, ry_max = _CAT_RY_RANGE.get(cat, (0.10, 0.85))
     ry_clamped     = max(ry_min, min(ry_max, ry))
 
-    # 2. 픽셀 크기 계산 — 제품 width_mm/depth_mm를 책상 가로 px_per_mm로 그대로 변환
+    # 2. 픽셀 크기 계산 — 제품 width_mm/depth_mm를 책상 가로 px_per_mm로 그대로 변환.
     # desk_width_mm은 main.py에서 None 체크 후 도착 → 여기 도달 시 항상 정수.
-    # 안전판으로만 1mm 최소값 (0 division 방지).
+    # fv_ph는 카테고리 form_tier에 따라 다르게 계산:
+    #   - flat (KEYBOARD/MOUSE/MOUSEPAD): d_mm 환산 (책상 위 두께가 정면뷰 높이)
+    #   - upright/semi_flat (MONITOR/SPEAKER/DESK_LAMP 등): _FRONT_HEIGHT_RATIO × fv_pw
+    #     (제품 자체 height는 모델에 없으므로 width 비율로 추정)
     ps = 0.60 + 0.40 * ry_clamped
     _desk_w_mm_safe = max(1, int(desk_width_mm)) if desk_width_mm else 1
     _px_per_mm = fv_dw / _desk_w_mm_safe
-    fv_pw = max(40, min(int(w_mm * _px_per_mm * ps), int(fv_dw * 0.65)))
-    if d_mm:
-        fv_ph = max(20, int(int(d_mm) * _px_per_mm * ps))
+    fv_pw = int(w_mm * _px_per_mm * ps)
+
+    form_tier = _PRODUCT_FORM_TIER.get(cat, "upright")
+    if form_tier == "flat" and d_mm:
+        # 책상에 누워있는 제품: depth가 정면뷰 height 역할
+        fv_ph = max(8, int(int(d_mm) * _px_per_mm * ps))
     else:
-        # depth_mm 정보가 없으면 정사각 가정
-        fv_ph = max(20, int(fv_pw * 0.5))
+        # upright/semi_flat: width × _FRONT_HEIGHT_RATIO로 추정
+        _hr = _FRONT_HEIGHT_RATIO.get(cat, 0.6)
+        fv_ph = max(8, int(fv_pw * _hr))
 
-    min_w, min_h = _MIN_FRONT_SIZE.get(cat, (40, 20))
-    fv_pw = max(fv_pw, min_w)
-    fv_ph = max(fv_ph, min_h)
+    # 3. Sanity bound — mm 환산이 비정상이거나 누락된 경우만 안전 범위로 보정.
+    # cap이 mm 환산을 덮어쓰지 않도록, 책상 가로 비율의 상하한만 잡음.
+    #   상한: 책상보다 큰 제품 금지 (cat별 차등)
+    #   하한: 시각 인지 가능한 최소 크기 (cat별 차등)
+    _UPPER_W_RATIO = {
+        "MONITOR":   0.85, "DESK_SHELF":   0.80, "MOUSEPAD":    0.80,
+        "KEYBOARD":  0.70, "LAPTOP_STAND": 0.55, "LIGHTING":    0.75,
+        "SPEAKER":   0.30, "DESK_LAMP":    0.30, "MOUSE":       0.20,
+        "DECO":      0.20, "CLOCK":        0.20,
+    }
+    _LOWER_W_RATIO = {
+        "MONITOR":  0.22, "KEYBOARD":  0.18, "MOUSEPAD":  0.25,
+        "DESK_SHELF": 0.20, "LIGHTING": 0.25,
+        "SPEAKER":  0.05, "DESK_LAMP": 0.05, "MOUSE":     0.04,
+        "DECO":     0.04, "CLOCK":     0.04, "LAPTOP_STAND": 0.15,
+    }
+    upper_w = int(fv_dw * _UPPER_W_RATIO.get(cat, 0.50))
+    lower_w = int(fv_dw * _LOWER_W_RATIO.get(cat, 0.08))
+    fv_pw = max(lower_w, min(fv_pw, upper_w))
 
-    # 3. 카테고리별 px 크기 보정 (mm 기반 계산이 너무 작거나 클 때 cap)
+    # fv_ph도 픽셀 단위 최소값 보장 (안 보일 정도로 작아지지 않게)
+    min_w_px, min_h_px = _MIN_FRONT_SIZE.get(cat, (40, 20))
+    fv_pw = max(fv_pw, min_w_px)
+    fv_ph = max(fv_ph, min_h_px)
+
+    # 4. 카테고리간 관계 제약 (rx 정렬) — 사이즈는 위에서 결정, 여기선 위치만.
     _rx_adj = rx
-    if cat == "MONITOR":
-        fv_pw = max(min(int(fv_dw * 0.48), 420), 240)
-        fv_ph = int(fv_pw * 0.60)
-    elif cat == "KEYBOARD":
-        # w_mm 기반 자연 크기. 옛 hardcoded 0.38 강제 → 작은 키보드(Apple Magic 등)가
-        # 비대해지고 horizontal stretch까지 발동해서 세로로 짜부러져 보임.
-        if w_mm and desk_width_mm:
-            _natural_pw = int(w_mm * fv_dw / desk_width_mm)
-            fv_pw = max(140, min(_natural_pw, int(fv_dw * 0.50)))
-        else:
-            fv_pw = max(min(int(fv_dw * 0.30), 280), 180)
-        # fv_ph는 위 perspective 계산 결과 유지 (옛 magic 0.28 제거).
-        if "monitor_rx" in relation_state:
-            _rx_adj = relation_state["monitor_rx"]  # 키보드는 모니터 가로축 정렬
-    elif cat == "DESK_SHELF":
-        fv_pw = max(min(int(fv_dw * 0.40), 320), 150)
-        fv_ph = max(int(fv_pw * 0.20), 30)
-        if "monitor_rx" in relation_state:
-            _rx_adj = relation_state["monitor_rx"]
+    if cat == "KEYBOARD" and "monitor_rx" in relation_state:
+        _rx_adj = relation_state["monitor_rx"]
+    elif cat == "DESK_SHELF" and "monitor_rx" in relation_state:
+        _rx_adj = relation_state["monitor_rx"]
+    elif cat == "LIGHTING" and "monitor_rx" in relation_state:
+        _rx_adj = relation_state["monitor_rx"]
     elif cat == "DESK_LAMP":
-        fv_pw = max(fv_pw, 90)
-        fv_ph = max(fv_ph, 130)
-        # 책상 중앙 회피 (모니터 가림 방지) — rx만 약간 조정
         _rx_adj = max(rx, 0.12) if rx < 0.5 else min(rx, 0.88)
-    elif cat == "SPEAKER":
-        fv_pw = max(fv_pw, 60)
-        fv_ph = max(fv_ph, 60)
-    elif cat == "DECO":
-        fv_pw = max(fv_pw, 45)
-        fv_ph = max(fv_ph, 45)
-    elif cat == "MOUSE":
-        fv_pw = max(fv_pw, 60)
-        # fv_ph는 perspective 계산 결과 유지 (옛 magic 0.75 제거).
-    elif cat == "MOUSEPAD":
-        # fv_ph는 perspective 계산 결과 유지 (옛 magic 0.25 제거).
-        pass
-    elif cat == "LIGHTING":
-        # 모니터 위 가로 라이트바 — 모니터 가로폭과 비슷하게, 매우 얇음
-        if "monitor_rx" in relation_state:
-            _rx_adj = relation_state["monitor_rx"]
-        fv_pw = max(min(int(fv_dw * 0.45), 380), 200)
-        fv_ph = max(int(fv_pw * _FRONT_HEIGHT_RATIO.get("LIGHTING", 0.08)), 14)
 
     # 4. x 좌표 (rx 또는 카테고리 의존성 사용)
     _kb_x2 = relation_state.get("keyboard_front_x2") if cat == "MOUSE" else None
@@ -478,6 +553,8 @@ def calc_placements_from_available_space(
     remover=None,
     debug_dir: Path | None = None,
     front_desk_bbox_override: tuple | None = None,  # (x1,y1,x2,y2) — SAM2 클릭 mask에서 추출한 책상 윗면 bbox
+    keep_points=None,                # front-view 정규화 '남길 제품' 탭 좌표
+    desk_corners=None,               # front-view 정규화 책상 4모서리 (front→top 환산용)
 ) -> list[dict]:
     import json as _dj
     from .space_analysis import (
@@ -509,9 +586,27 @@ def calc_placements_from_available_space(
     desk_width_cm  = (desk_width_mm  / 10) if desk_width_mm  else 120.0
     desk_depth_cm  = (desk_depth_mm  / 10) if desk_depth_mm  else desk_width_cm * 0.55
 
-    # RemoveMode.add → occupied 영역 그대로 유지 (제거 안 함)
+    # remove_mask 결정 (keep 환산을 위해 desk_bbox_tv 먼저 계산):
+    #   add        → None (기존 물체 모두 유지)
+    #   own_desk 등 → occupied 전체 제거. 단 '남길 제품' 선택 시 그 객체 보존 (occupied − kept).
     from .models import RemoveMode
-    remove_mask = None if mode == RemoveMode.add else occupied_np
+    _ys0, _xs0 = np.where(desk_mask_np > 0)
+    _desk_bbox_tv_early = (
+        (int(_xs0.min()), int(_ys0.min()), int(_xs0.max()), int(_ys0.max()))
+        if len(_xs0) else None
+    )
+    if mode == RemoveMode.add:
+        remove_mask = None
+    else:
+        remove_mask = occupied_np
+        if _desk_bbox_tv_early is not None:
+            kept_mask = _build_kept_mask_tv(
+                top_det, keep_points, desk_corners, _desk_bbox_tv_early, tv_w, tv_h,
+            )
+            if kept_mask is not None:
+                remove_mask = cv2.bitwise_and(occupied_np, cv2.bitwise_not(kept_mask))
+                print(f"[AvailSpace] keep_points 반영 → 보존 {int(np.count_nonzero(kept_mask))}px "
+                      f"(배치 가용 공간에서 제외)")
 
     space_info        = analyze_space(
         occupied_mask=occupied_np,
@@ -827,6 +922,8 @@ def analyze_top_view_only(
     desk_depth_mm: int,
     mode=None,
     remover=None,
+    keep_points=None,                # front-view 정규화 '남길 제품' 탭 좌표
+    desk_corners=None,               # front-view 정규화 책상 4모서리 (front→top 환산용)
 ) -> dict | None:
     # calc_placements_from_available_space의 분석 단계만 추출.
     # 추천 단계에 size 제약 전달용. (placement 호출 시점에 다시 분석되므로 결과는 일회성)
@@ -856,9 +953,32 @@ def analyze_top_view_only(
     else:
         desk_mask_np = keep_largest_component(desk_mask_np)
 
+    # desk_bbox_tv를 remove_mask 결정 전에 먼저 계산 (keep 환산에 필요)
+    ys, xs = np.where(desk_mask_np > 0)
+    if len(xs) == 0:
+        return None
+    tv_dx1, tv_dy1 = int(xs.min()), int(ys.min())
+    tv_dx2, tv_dy2 = int(xs.max()), int(ys.max())
+    desk_bbox_tv = (tv_dx1, tv_dy1, tv_dx2, tv_dy2)
+
     desk_width_cm = desk_width_mm / 10
     desk_depth_cm = desk_depth_mm / 10
-    remove_mask = None if mode == RemoveMode.add else occupied_np
+
+    # remove_mask 결정:
+    #   add        → None (기존 물체 모두 유지)
+    #   own_desk 등 → 기본 occupied 전체 제거. 단 '남길 제품'이 선택되면 그 객체는 보존
+    #                 (remove_mask = occupied − kept) → 가용 공간이 남긴 제품만큼 줄어듦.
+    if mode == RemoveMode.add:
+        remove_mask = None
+    else:
+        remove_mask = occupied_np
+        kept_mask = _build_kept_mask_tv(
+            top_det, keep_points, desk_corners, desk_bbox_tv, tv_w, tv_h,
+        )
+        if kept_mask is not None:
+            remove_mask = cv2.bitwise_and(occupied_np, cv2.bitwise_not(kept_mask))
+            _kept_px = int(np.count_nonzero(kept_mask))
+            print(f"[AnalyzeTopView] keep_points 반영 → 보존 마스크 {_kept_px}px (가용 공간에서 제외)")
 
     space_info = analyze_space(
         occupied_mask=occupied_np,
@@ -867,13 +987,7 @@ def analyze_top_view_only(
         desk_mask=desk_mask_np,
         remove_mask=remove_mask,
     )
-
-    ys, xs = np.where(desk_mask_np > 0)
-    if len(xs) == 0:
-        return None
-    tv_dx1, tv_dy1 = int(xs.min()), int(ys.min())
-    tv_dx2, tv_dy2 = int(xs.max()), int(ys.max())
-    space_info["desk_bbox_tv"] = (tv_dx1, tv_dy1, tv_dx2, tv_dy2)
+    space_info["desk_bbox_tv"] = desk_bbox_tv
     return space_info
 
 

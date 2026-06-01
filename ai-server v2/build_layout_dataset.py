@@ -16,57 +16,69 @@ DEBUG_DIR      = Path("data/debug/layout")
 
 DESK_PROMPT = "desk. table. wooden desk."
 OBJ_PROMPT  = (
-    "monitor. computer monitor. display screen. "
-    "keyboard. mechanical keyboard. computer keyboard. "
-    "mouse. computer mouse. wireless mouse. "
+    "monitor. computer monitor. display screen. lcd screen. led monitor. computer display. screen. "
+    "keyboard. mechanical keyboard. computer keyboard. wireless keyboard. "
+    "mouse. computer mouse. wireless mouse. gaming mouse. "
     "mouse pad. mousepad. desk mat. extended mouse pad. large desk mat. "
-    "speaker. desktop speaker. computer speaker. "
+    "speaker. desktop speaker. computer speaker. bookshelf speaker. soundbar. "
     "desk lamp. table lamp. lamp. "
-    "desk shelf. monitor riser."
+    "desk shelf. monitor riser. monitor stand."
 )
 
-_DINO_TO_CAT = {
-    "monitor":             "MONITOR",
-    "computer monitor":    "MONITOR",
-    "display screen":      "MONITOR",
-    "keyboard":            "KEYBOARD",
-    "mechanical keyboard": "KEYBOARD",
-    "computer keyboard":   "KEYBOARD",
-    "mouse":               "MOUSE",
-    "computer mouse":      "MOUSE",
-    "wireless mouse":      "MOUSE",
-    "mouse pad":           "MOUSEPAD",
-    "mousepad":            "MOUSEPAD",
-    "desk mat":            "MOUSEPAD",
-    "extended mouse pad":  "MOUSEPAD",
-    "large desk mat":      "MOUSEPAD",
-    "speaker":             "SPEAKER",
-    "desktop speaker":     "SPEAKER",
-    "computer speaker":    "SPEAKER",
-    "desk lamp":           "DESK_LAMP",
-    "table lamp":          "DESK_LAMP",
-    "lamp":                "DESK_LAMP",
-    "desk shelf":          "DESK_SHELF",
-    "monitor riser":       "DESK_SHELF",
-}
+# DINO 라벨을 카테고리로 매핑. substring 매칭으로 동작 (예: "led monitor" 라벨 → MONITOR).
+# 매핑 순서 중요 — 더 구체적인 키를 위에 두기 (mouse pad가 mouse보다 먼저).
+_DINO_TO_CAT_RULES = [
+    ("monitor riser",   "DESK_SHELF"),
+    ("monitor stand",   "DESK_SHELF"),
+    ("desk shelf",      "DESK_SHELF"),
+    ("mouse pad",       "MOUSEPAD"),
+    ("mousepad",        "MOUSEPAD"),
+    ("desk mat",        "MOUSEPAD"),
+    ("desk lamp",       "DESK_LAMP"),
+    ("table lamp",      "DESK_LAMP"),
+    ("soundbar",        "SPEAKER"),
+    ("speaker",         "SPEAKER"),
+    ("keyboard",        "KEYBOARD"),
+    ("monitor",         "MONITOR"),
+    ("display",         "MONITOR"),
+    ("lcd",             "MONITOR"),
+    ("led monitor",     "MONITOR"),
+    ("screen",          "MONITOR"),
+    ("mouse",           "MOUSE"),
+    ("lamp",            "DESK_LAMP"),
+]
 
-# 카테고리별 aspect ratio (w/h) 허용 범위
+
+def _map_dino_label(label: str) -> str | None:
+    lab = (label or "").lower().strip()
+    for key, cat in _DINO_TO_CAT_RULES:
+        if key in lab:
+            return cat
+    return None
+
+
+# 카테고리별 aspect ratio (w/h) 허용 범위.
+# MONITOR: DINO가 받침대까지 묶어 박스를 그리면 h가 커져 ar < 1.1 → 폐기되던 문제.
+#          (0.8, 4.0)으로 완화 — 받침대 포함 모니터도 통과.
+# KEYBOARD: (2.5, 8.0) → (1.8, 8.0). 컴팩트/TKL 키보드도 포함.
 _CAT_ASPECT_VALID = {
-    "MONITOR":   (1.1, 3.5),
-    "KEYBOARD":  (2.5, 8.0),
-    "MOUSE":     (0.5, 2.0),
-    "MOUSEPAD":  (1.5, 6.0),
-    "SPEAKER":   (0.3, 2.5),
-    "DESK_LAMP": (0.15, 1.8),
+    "MONITOR":   (0.8, 4.0),
+    "KEYBOARD":  (1.8, 8.0),
+    "MOUSE":     (0.5, 2.5),
+    "MOUSEPAD":  (1.3, 6.0),
+    "SPEAKER":   (0.3, 5.0),
+    "DESK_LAMP": (0.15, 2.0),
     "DESK_SHELF":(1.5, 6.0),
 }
 
-# 카테고리별 desk bbox 대비 최소 면적 비율
+# 카테고리별 desk bbox 대비 최소 면적 비율.
+# MONITOR: 0.020 → 0.006 — 모니터는 책상 위로 솟아 있어 desk_bbox 내부 면적이 작게 잡힘.
+#          기존 임계값이 모니터를 대량 누락시킨 주된 원인.
 _CAT_MIN_AREA_RATIO = {
-    "MONITOR":   0.020,
+    "MONITOR":   0.006,
     "KEYBOARD":  0.010,
     "MOUSE":     0.002,
-    "MOUSEPAD":  0.030,
+    "MOUSEPAD":  0.020,
     "SPEAKER":   0.003,
     "DESK_LAMP": 0.002,
     "DESK_SHELF":0.010,
@@ -133,7 +145,7 @@ def detect_objects(pil_img, scale, desk_bbox):
     filter_stats = {}
 
     for d in dets:
-        cat = _DINO_TO_CAT.get(d.label.lower().strip())
+        cat = _map_dino_label(d.label)
         if cat is None:
             continue
         inv = 1.0 / scale
@@ -145,7 +157,13 @@ def detect_objects(pil_img, scale, desk_bbox):
         rw = (ox2 - ox1) / dw
         rh = (oy2 - oy1) / dh
 
-        if not (-0.15 <= rx <= 1.15 and -0.15 <= ry <= 1.15):
+        # MONITOR는 책상 위로 솟아 있어 ry < 0인 경우가 정상.
+        # 카테고리별 허용 범위 — MONITOR/DESK_SHELF/DESK_LAMP/SPEAKER는 ry < -0.30까지 허용.
+        if cat in ("MONITOR", "DESK_SHELF", "DESK_LAMP", "SPEAKER"):
+            ry_min = -0.50
+        else:
+            ry_min = -0.15
+        if not (-0.15 <= rx <= 1.15 and ry_min <= ry <= 1.15):
             filter_stats[cat] = filter_stats.get(cat, 0) + 1
             continue
 

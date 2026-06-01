@@ -103,9 +103,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 브라우저는 ai-server를 직접 호출하지 않음 (Spring을 거침) → cross-origin 허용 0.
+# 운영 origin이 생기면 ["https://your-domain"] 식으로 명시.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -289,20 +291,39 @@ _RECOMMENDATION_API_URL = os.getenv("RECOMMENDATION_API_URL", "http://127.0.0.1:
 async def recommend_and_generate(req: RecommendAndGenerateRequest):
     from .adapters.recommendation_bridge import setup_to_generate_request
 
-    # 1. top-view 분석으로 카테고리별 max size 사전 계산 — 가용 공간에 맞는 제품만 추천되게
+    # 0. 필수 입력 검증 — 함수 진입 즉시.
+    # 과거엔 추천 서버 호출 이후에 검증돼 (a) 입력 누락 시에도 추천 서버 자원 낭비,
+    # (b) 일부만 누락되면 space_constraints가 silent skip돼 "제약 없는 추천"으로 흘러가는 사고 위험이 있었음.
+    # top_view: 모드 무관 항상 필수. default 폴백 X — 다른 책상 분석으로 잘못된 결과 방지.
+    if not req.top_view_image_base64:
+        raise HTTPException(
+            400,
+            "top_view 사진이 필요합니다. 모든 모드에서 사용자 책상의 top-view 사진이 필수입니다.",
+        )
+    # desk_width_mm/depth_mm: 필수 (사진만으론 실측 mm 불가)
+    if req.desk_width_mm is None or req.desk_depth_mm is None:
+        raise HTTPException(
+            400,
+            "desk_width_mm과 desk_depth_mm은 필수입니다. (사용자가 입력한 cm × 10)",
+        )
+    _top_view_b64 = req.top_view_image_base64
+    _top_view_source = "user_provided"
+
+    # 1. top-view 분석으로 카테고리별 max size 사전 계산 — 가용 공간에 맞는 제품만 추천되게.
+    # 입력은 위 0번에서 보장됨 → 더는 silent skip 분기 없음. 진짜 계산 실패만 fallback 처리.
     space_constraints: dict = {}
-    if req.top_view_image_base64 and req.desk_width_mm and req.desk_depth_mm:
-        try:
-            from .placement import analyze_top_view_only, compute_size_constraints_from_space
-            tv_img = b64_to_image(req.top_view_image_base64)
-            _space_info = analyze_top_view_only(
-                tv_img, req.desk_width_mm, req.desk_depth_mm, mode=req.mode,
-            )
-            if _space_info:
-                space_constraints = compute_size_constraints_from_space(_space_info)
-                print(f"[Recommend] space_constraints={space_constraints}")
-        except Exception as e:
-            print(f"[Recommend] space_constraints 계산 실패: {e} — 제약 없이 추천 진행")
+    try:
+        from .placement import analyze_top_view_only, compute_size_constraints_from_space
+        tv_img = b64_to_image(_top_view_b64)
+        _space_info = analyze_top_view_only(
+            tv_img, req.desk_width_mm, req.desk_depth_mm, mode=req.mode,
+            keep_points=req.keep_points, desk_corners=req.desk_corners,
+        )
+        if _space_info:
+            space_constraints = compute_size_constraints_from_space(_space_info)
+            print(f"[Recommend] space_constraints={space_constraints}")
+    except Exception as e:
+        print(f"[Recommend] space_constraints 계산 실패: {e} — 제약 없이 추천 진행")
 
     # 2. 추천 서버 호출 — 정면 사진 + 가용 공간 제약 전달
     try:
@@ -334,24 +355,8 @@ async def recommend_and_generate(req: RecommendAndGenerateRequest):
     if not setup:
         raise HTTPException(502, "추천 서버 응답에 setup 없음")
 
-    # 2a. top_view 처리: 모드 무관 항상 필수.
-    # 사용자가 안 주면 즉시 400 에러 (default 폴백 X — 다른 책상 분석으로 인한 잘못된 결과 방지)
-    _top_view_b64 = req.top_view_image_base64
-    if not _top_view_b64:
-        raise HTTPException(
-            400,
-            "top_view 사진이 필요합니다. 모든 모드에서 사용자 책상의 top-view 사진이 필수입니다.",
-        )
-    _top_view_source = "user_provided"
-
-    # desk_width_mm/depth_mm도 필수 (사진만으론 실측 mm 불가)
-    if req.desk_width_mm is None or req.desk_depth_mm is None:
-        raise HTTPException(
-            400,
-            "desk_width_mm과 desk_depth_mm은 필수입니다. (사용자가 입력한 cm × 10)",
-        )
-
-    # 2b. setup → GenerateRequest 변환 (style_mapper가 theme 자동 인식)
+    # 2. setup → GenerateRequest 변환 (style_mapper가 theme 자동 인식)
+    #    top_view·dims 검증은 함수 진입 시 0번 단계에서 완료. _top_view_b64/_top_view_source는 위에서 설정됨.
     try:
         gen_req = setup_to_generate_request(
             setup                = setup,
@@ -477,17 +482,38 @@ def _run_nanobanana_generate(
 
             product_id = item.get("id")
 
+            # 제품 실측 mm — metadata JSONB에서 추출 (recommendation_bridge._extract_size와 동일 로직)
+            _meta = item.get("metadata") or {}
+            if isinstance(_meta, str):
+                try:
+                    import json as _json_local
+                    _meta = _json_local.loads(_meta)
+                except Exception:
+                    _meta = {}
+            _w_mm = _meta.get("width_mm")
+            _d_mm = _meta.get("depth_mm")
+            try:
+                _w_mm = int(_w_mm) if _w_mm not in (None, "") else None
+            except (TypeError, ValueError):
+                _w_mm = None
+            try:
+                _d_mm = int(_d_mm) if _d_mm not in (None, "") else None
+            except (TypeError, ValueError):
+                _d_mm = None
+
             products_for_generation.append({
-                "id": int(product_id) if product_id else None,
-                "image_id": int(product_id) if product_id else None,
-                "category": ai_cat,
+                "id":                      int(product_id) if product_id else None,
+                "image_id":                int(product_id) if product_id else None,
+                "category":                ai_cat,
                 "recommendation_category": rec_cat,
-                "name": str(item.get("title") or ai_cat),
-                "price": int(item["lprice"]) if item.get("lprice") else None,
-                "image_url": item.get("image_url"),
-                "product_url": item.get("product_url") or item.get("link"),
-                "brand": item.get("brand"),
-                "mall_name": item.get("mallName"),
+                "name":                    str(item.get("title") or ai_cat),
+                "price":                   int(item["lprice"]) if item.get("lprice") else None,
+                "image_url":               item.get("image") or item.get("image_url"),
+                "product_url":             item.get("link") or item.get("product_url"),
+                "brand":                   item.get("brand"),
+                "mall_name":               item.get("mallName"),
+                "width_mm":                _w_mm,
+                "depth_mm":                _d_mm,
             })
 
         mode_value = req.mode.value if hasattr(req.mode, "value") else str(req.mode)
@@ -498,6 +524,8 @@ def _run_nanobanana_generate(
             mode=mode_value,
             products=products_for_generation,
             space_constraints=space_constraints,
+            desk_width_mm=req.desk_width_mm,
+            desk_depth_mm=req.desk_depth_mm,
         )
 
         job_store[job_id].result_image = generation["result_image_base64"]
@@ -637,8 +665,8 @@ def _obj_matches_keep(mask_pil, det, keep_pts, W, H) -> bool:
 def _run_generate(job_id: str, req: GenerateRequest):
     job_store[job_id].status = JobStatus.running
     try:
-        from datetime import datetime
-        _debug_dir = Path("outputs/debug") / datetime.now().strftime("%Y%m%d_%H%M%S")
+        from datetime import datetime, timezone, timedelta
+        _debug_dir = Path("outputs/debug") / datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d_%H%M%S")
         _debug_dir.mkdir(parents=True, exist_ok=True)
         print(f"[Generate] mode={req.mode}")
 
@@ -785,7 +813,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 msg = f"{cat}: image_id=None"
                 run_errors.append(msg); print(f"  [_run_cn SKIP] {msg}")
                 _record("skipped_no_image", "skipped", error=msg); return
-            prod_path = find_product_image(p.image_id)
+            prod_path = find_product_image(p.image_id, getattr(p, "image_url", None))
             if prod_path is None:
                 msg = f"{cat}: product image not found for image_id={p.image_id}"
                 run_errors.append(msg); print(f"  [_run_cn SKIP] {msg}")
@@ -968,6 +996,8 @@ def _run_generate(job_id: str, req: GenerateRequest):
             remover=remover,
             debug_dir=_debug_dir,
             front_desk_bbox_override=_front_desk_bbox_override,
+            keep_points=getattr(req, "keep_points", None),
+            desk_corners=getattr(req, "desk_corners", None),
         )
 
         # tabletop bbox invalid 처리는 빈 책상 모드(RemoveMode.add) 한정.
@@ -1132,7 +1162,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
             _cv_cat = normalize_category(_cv_p.category)
             if _cv_p.image_id is None:
                 continue
-            _cv_path = find_product_image(_cv_p.image_id)
+            _cv_path = find_product_image(_cv_p.image_id, getattr(_cv_p, "image_url", None))
             if _cv_path is None:
                 continue
             try:
@@ -1222,7 +1252,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                 if p.image_id is None:
                     run_errors.append(f"{cat}: image_id=None")
                     continue
-                prod_path = find_product_image(p.image_id)
+                prod_path = find_product_image(p.image_id, getattr(p, "image_url", None))
                 if prod_path is None:
                     run_errors.append(f"{cat}: image not found id={p.image_id}")
                     continue
@@ -1254,7 +1284,7 @@ def _run_generate(job_id: str, req: GenerateRequest):
                      if normalize_category(it["product"].category) == "SPEAKER"]
         if len(_sp_items) >= 2:
             _sp0_prod = _sp_items[0][1]["product"]
-            _sp0_path = find_product_image(_sp0_prod.image_id) if _sp0_prod.image_id else None
+            _sp0_path = find_product_image(_sp0_prod.image_id, getattr(_sp0_prod, "image_url", None)) if _sp0_prod.image_id else None
             if _sp0_path:
                 _sp0_alpha = prepare_product_image_for_composite(Image.open(_sp0_path))
                 _sp0_ar    = _sp0_alpha.width / max(_sp0_alpha.height, 1)

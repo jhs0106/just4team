@@ -25,14 +25,23 @@ _CATEGORY_ALIASES = {
     "MONITOR LIGHT": "LIGHTING",
 }
 
+# DB에 width_mm/depth_mm 없는 제품의 폴백 평균값 (width_mm, depth_mm).
+# 시장 평균 크기 기준 — 데스크매트/대형 모니터 등 변종은 DB에서 실측 값을 받아 사용.
+#   KEYBOARD:   풀사이즈 키보드 (TKL은 더 작음)
+#   MOUSE:      일반 마우스
+#   MOUSEPAD:   일반 마우스패드 (게이밍 데스크매트는 DB의 width_mm으로 처리)
+#   MONITOR:    27인치 16:9 (받침대 포함 depth)
+#   SPEAKER:    데스크탑 스피커 (받침대 포함)
+#   DESK_LAMP:  램프 받침대 (높이는 _FRONT_HEIGHT_RATIO=1.70으로 별도 계산)
+#   DESK_SHELF: 모니터 받침대
 _CATEGORY_DIMS_MM = {
     "KEYBOARD":     (440, 130),
     "MOUSE":        (70,  120),
-    "MOUSEPAD":     (900, 400),
-    "MONITOR":      (600, 200),
-    "SPEAKER":      (90,  120),
-    "DESK_LAMP":    (80,  400),
-    "DESK_SHELF":   (600, 200),
+    "MOUSEPAD":     (320, 250),
+    "MONITOR":      (600, 230),
+    "SPEAKER":      (120, 150),
+    "DESK_LAMP":    (180, 180),
+    "DESK_SHELF":   (600, 250),
     "LAPTOP_STAND": (280, 250),
     "DECO":         (80,  80),
     "CLOCK":        (100, 100),

@@ -105,12 +105,23 @@ def setup_to_generate_request(
                 continue
 
         width_mm, depth_mm = _extract_size(item)
+        # recommendation에서 받은 가격·브랜드·URL 정보 보존.
+        # ProductItem에 담아두면 result.products로 다시 빠져나가 JSP에서 사용 가능.
+        _price = item.get("lprice") or item.get("price")
+        try:
+            price_int = int(_price) if _price not in (None, "") else None
+        except (TypeError, ValueError):
+            price_int = None
         products.append(ProductItem(
-            category=ai_cat,
-            name=str(item.get("title") or ai_cat),
-            image_id=pid,
-            width_mm=width_mm,
-            depth_mm=depth_mm,
+            category    = ai_cat,
+            name        = str(item.get("title") or ai_cat),
+            image_id    = pid,
+            width_mm    = width_mm,
+            depth_mm    = depth_mm,
+            price       = price_int,
+            brand       = item.get("brand") or None,
+            image_url   = item.get("image") or item.get("image_url") or None,
+            product_url = item.get("link") or item.get("product_url") or None,
         ))
 
     if missing_ids:

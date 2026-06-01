@@ -25,8 +25,13 @@ def main():
     print(f"  카테고리 분포(positive): {Counter(c for c, l in zip(cats, y) if l==1)}")
 
     from sklearn.model_selection import train_test_split
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X, y, test_size=0.15, random_state=42, stratify=y
+    # indices도 함께 split해서 validation row가 원본 cats[i]의 어떤 인덱스인지 추적.
+    # 이전엔 `cats[i] for i in range(len(cats)) if i >= len(X_tr)`로 추출했으나,
+    # train_test_split이 shuffle하기 때문에 단순 위치 기반 추출은 잘못된 매핑.
+    # → 카테고리별 AUC가 의미 없는 숫자로 출력되던 원인.
+    indices = np.arange(len(X))
+    X_tr, X_val, y_tr, y_val, _idx_tr, idx_val = train_test_split(
+        X, y, indices, test_size=0.15, random_state=42, stratify=y
     )
 
     try:
@@ -74,15 +79,21 @@ def main():
         target_names=["negative", "positive"],
     ))
 
-    # 카테고리별 AUC
-    val_cats = [cats[i] for i in range(len(cats)) if i >= len(X_tr)]
+    # 카테고리별 AUC (validation set 전용, train_test_split의 실제 indices 사용)
+    val_cats = [cats[i] for i in idx_val]
     print("[eval] 카테고리별 AUC:")
     for cat in sorted(set(val_cats)):
-        idx = [i for i, c in enumerate(val_cats) if c == cat]
-        if len(idx) < 5:
+        sel = [i for i, c in enumerate(val_cats) if c == cat]
+        if len(sel) < 5:
+            print(f"  {cat:15s}: skipped (n={len(sel)} < 5)")
             continue
-        cat_auc = roc_auc_score(y_val[idx], y_prob[idx])
-        print(f"  {cat:15s}: AUC={cat_auc:.4f}  n={len(idx)}")
+        # positive·negative 둘 다 있어야 AUC 계산 가능
+        y_sel = y_val[sel]
+        if len(set(y_sel.tolist())) < 2:
+            print(f"  {cat:15s}: skipped (single class in val, n={len(sel)})")
+            continue
+        cat_auc = roc_auc_score(y_sel, y_prob[sel])
+        print(f"  {cat:15s}: AUC={cat_auc:.4f}  n={len(sel)}")
 
     if hasattr(model, "feature_importances_"):
         fi = sorted(zip(feature_names, model.feature_importances_), key=lambda x: -x[1])

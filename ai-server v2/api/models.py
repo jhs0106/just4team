@@ -88,12 +88,18 @@ class DetectObjectsRequest(BaseModel):
 
 # ── Generate ─────────────────────────────────────────────
 class ProductItem(BaseModel):
-    category: str           = Field(..., description="제품 카테고리 (KEYBOARD, MOUSE, MONITOR 등)")
-    name: str               = Field(..., description="제품명")
-    image_id: Optional[int] = Field(None, description="processed_images/{id}.png 파일 번호")
-    width_mm: Optional[int] = Field(None, description="제품 실제 가로 치수 (mm)")
-    depth_mm: Optional[int] = Field(None, description="제품 실제 세로 치수 (mm)")
-    view_type: Optional[str] = Field(
+    category:    str           = Field(..., description="제품 카테고리 (KEYBOARD, MOUSE, MONITOR 등)")
+    name:        str           = Field(..., description="제품명")
+    image_id:    Optional[int] = Field(None, description="processed_images/{id}.png 파일 번호")
+    width_mm:    Optional[int] = Field(None, description="제품 실제 가로 치수 (mm)")
+    depth_mm:    Optional[int] = Field(None, description="제품 실제 세로 치수 (mm)")
+    # 메타 정보 (이미지 생성에 직접 영향 없지만 디버그/검증/결과 응답에 사용).
+    # recommendation에서 받은 값을 보존하여 result.products에 다시 채워줌.
+    price:       Optional[int] = Field(None, description="제품 가격 (원) — 예산 검증·디버그·결과 응답용")
+    brand:       Optional[str] = Field(None, description="브랜드")
+    image_url:   Optional[str] = Field(None, description="원본 이미지 URL — 로컬 PNG 누락 시 폴백 다운로드용")
+    product_url: Optional[str] = Field(None, description="제품 상세 페이지 URL — 결과 화면 링크용")
+    view_type:   Optional[str] = Field(
         None,
         description="제품 이미지 시점: 'front_view'|'top_view'|'side_view'|'product_cutout'. "
                     "upright 제품인데 top_view면 IP-Adapter scale 자동 하향.",

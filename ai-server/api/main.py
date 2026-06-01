@@ -102,9 +102,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 브라우저는 ai-server를 직접 호출하지 않음 (Spring을 거침) → cross-origin 허용 0.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[],
     allow_methods=["*"],
     allow_headers=["*"],
 )

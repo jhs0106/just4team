@@ -37,20 +37,34 @@ class NanoBananaProcessor:
         # multipart/form-data라 Content-Type은 requests가 boundary 포함해 자동 설정 → 인증만.
         return {"Authorization": f"Bearer {self.api_key}"}
 
-    def _read_product_image_base64(self, image_id: Any) -> Optional[str]:
+    def _read_product_image_base64(self, image_id: Any, image_url: Optional[str] = None) -> Optional[str]:
         if image_id is None:
             return None
 
         candidates = [
             Path("data/test/processed_images") / f"{image_id}.png",
             Path("ai-server/data/test/processed_images") / f"{image_id}.png",
-            ]
+            Path("data/test/processed_images") / f"{image_id}.fallback.png",
+        ]
 
         for path in candidates:
             if path.exists():
                 with open(path, "rb") as f:
                     return base64.b64encode(f.read()).decode("utf-8")
 
+        # 로컬에 없으면 image_url에서 다운로드 (배경 제거 안 됨, OpenAI는 raw도 사용 가능)
+        if image_url:
+            try:
+                resp = requests.get(image_url, timeout=10)
+                if resp.status_code == 200 and len(resp.content) >= 1024:
+                    cache_dir = Path("data/test/processed_images")
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    cache_path = cache_dir / f"{image_id}.fallback.png"
+                    cache_path.write_bytes(resp.content)
+                    print(f"[_read_product_image_base64] 폴백 다운로드 → {cache_path}")
+                    return base64.b64encode(resp.content).decode("utf-8")
+            except Exception as e:
+                print(f"[_read_product_image_base64] 폴백 예외 image_id={image_id}: {e}")
         return None
 
     def build_prompt(
@@ -59,76 +73,90 @@ class NanoBananaProcessor:
             mode: str,
             products: List[Dict[str, Any]],
             space_constraints: Optional[Dict[str, Any]] = None,
+            desk_width_mm: Optional[int] = None,
+            desk_depth_mm: Optional[int] = None,
     ) -> str:
         product_lines = []
 
         for idx, product in enumerate(products, start=1):
-            name = product.get("name") or "recommended product"
+            name     = product.get("name") or "recommended product"
             category = product.get("category") or ""
-            brand = product.get("brand") or ""
-            price = product.get("price") or ""
+            brand    = product.get("brand")
+            w_mm     = product.get("width_mm")
+            d_mm     = product.get("depth_mm")
 
-            line = f"{idx}. {name}"
-            if category:
-                line += f" / category: {category}"
+            line = f"{idx}. [{category}] {name}" if category else f"{idx}. {name}"
             if brand:
-                line += f" / brand: {brand}"
-            if price:
-                line += f" / price: {price}"
-
+                line += f" (brand: {brand})"
+            if w_mm and d_mm:
+                line += f" — actual size {w_mm}mm × {d_mm}mm"
+            elif w_mm:
+                line += f" — actual width {w_mm}mm"
             product_lines.append(line)
 
         product_text = "\n".join(product_lines) if product_lines else "No product information."
+
+        # 책상 실측 사이즈 — 제품 간 상대 스케일을 OpenAI가 맞출 수 있도록 명시.
+        desk_lines = []
+        if desk_width_mm:
+            desk_lines.append(f"width: {desk_width_mm}mm ({desk_width_mm/10:.0f}cm)")
+        if desk_depth_mm:
+            desk_lines.append(f"depth: {desk_depth_mm}mm ({desk_depth_mm/10:.0f}cm)")
+        desk_text = " / ".join(desk_lines) if desk_lines else "size not provided"
 
         space_text = "No explicit available-space constraints."
         if space_constraints:
             space_text = str(space_constraints)
 
         return f"""
-You are a professional deskterior designer.
+You are a professional deskterior designer. Compose a realistic photograph by adding the recommended products to the user's actual desk photo.
 
-Create a realistic deskterior simulation using the user's original desk photo and the recommended products.
+Style theme: {theme}
+Desk mode: {mode}
+User desk actual size: {desk_text}
 
-Deskterior style theme:
-{theme}
-
-User desk mode:
-{mode}
-
-Recommended products:
+Recommended products (place ALL of them; sizes are real-world measurements):
 {product_text}
 
-Available-space information:
+Available space on desk:
 {space_text}
 
-Important generation rules:
-- Preserve the original desk, camera angle, perspective, and room structure.
-- Keep the image looking like a real photograph.
-- Use the recommended products as the main items to add.
-- Place the products naturally on the desk.
-- Do not overcrowd the desk.
-- Keep product scale realistic.
-- Do not place products floating in the air.
-- Do not completely change the user's room or desk.
-- If there is not enough space for all products, prioritize the most suitable products.
-- The final result should look like a realistic deskterior photo based on the user's actual desk.
+Composition rules:
+- Preserve the original desk, walls, room, camera angle, and perspective exactly.
+- Use the provided product reference images for shape, material, and color identity.
+- Scale each product to match its actual width/depth in mm relative to the desk size given above.
+  (Example: a 440mm keyboard on a 1200mm desk should occupy ~37% of desk width.)
+- Place products on the desk surface — never floating, never overlapping incorrectly.
+- Respect typical deskterior layout: monitor at back center, keyboard in front of monitor, mouse to the right of keyboard.
+
+Photorealism rules:
+- Match the room's lighting direction, color temperature, and shadow style for every product.
+- Monitor screens should show neutral desktop wallpaper or be powered off — do NOT render marketing text, spec numbers, or product-photo screens.
+- RGB lighting on peripherals should be subtle and ambient, not the saturated glow from product catalog photos.
+- Add realistic contact shadows where products meet the desk; no cutout halos or hard composite edges.
+
+Do NOT:
+- Change the desk shape, room, wallpaper, or camera angle.
+- Skip products or substitute different products.
+- Add watermarks, text overlays, brand logos that aren't on the actual product, or any extra furniture.
 """.strip()
 
     def build_products_payload(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         payload_products = []
 
         for product in products:
-            image_id = product.get("image_id") or product.get("id")
+            image_id  = product.get("image_id") or product.get("id")
+            image_url = product.get("image_url")
 
             payload_products.append({
-                "id": image_id,
-                "name": product.get("name"),
-                "category": product.get("category"),
-                "price": product.get("price"),
-                "brand": product.get("brand"),
-                "image_url": product.get("image_url"),
-                "product_url": product.get("product_url"),
-                "image_base64": self._read_product_image_base64(image_id),
+                "id":           image_id,
+                "name":         product.get("name"),
+                "category":     product.get("category"),
+                "price":        product.get("price"),
+                "brand":        product.get("brand"),
+                "image_url":    image_url,
+                "product_url":  product.get("product_url"),
+                "image_base64": self._read_product_image_base64(image_id, image_url),
             })
 
         return payload_products
@@ -140,12 +168,16 @@ Important generation rules:
             mode: str,
             products: List[Dict[str, Any]],
             space_constraints: Optional[Dict[str, Any]] = None,
+            desk_width_mm: Optional[int] = None,
+            desk_depth_mm: Optional[int] = None,
     ) -> Dict[str, Any]:
         prompt = self.build_prompt(
             theme=theme,
             mode=mode,
             products=products,
             space_constraints=space_constraints,
+            desk_width_mm=desk_width_mm,
+            desk_depth_mm=desk_depth_mm,
         )
 
         # OpenAI gpt-image-1 이미지 편집: 멀티파트로 [책상 사진] + [제품 이미지들] 업로드.
@@ -156,9 +188,9 @@ Important generation rules:
             ("image[]", (f"desk.{desk_ext}", _b64_to_bytes(image_base64), desk_mime)),
         ]
         for p in products:
-            img_b64 = self._read_product_image_base64(p.get("image_id") or p.get("id"))
+            pid     = p.get("image_id") or p.get("id")
+            img_b64 = self._read_product_image_base64(pid, p.get("image_url"))
             if img_b64:
-                pid = p.get("image_id") or p.get("id")
                 files.append(("image[]", (f"product_{pid}.png", _b64_to_bytes(img_b64), "image/png")))
 
         form = {
@@ -193,25 +225,31 @@ Important generation rules:
         }
 
     def harmonize(self, image_base64: str) -> Dict[str, Any]:
-        # Tier 3: CV 합성본(제거+배치+그림자)을 받아 OpenAI로 사실감만 다듬음.
-        # 레이아웃/제품/방을 보존하라고 강하게 지시 — 재생성/hallucination 억제.
+        # Tier 3: CV 합성본(제거+배치+그림자)을 받아 OpenAI로 사실감 다듬음.
+        # 위치·정체성·실루엣은 보존하되, 광고용 화면 콘텐츠·과도한 RGB·합성 티는 자연화 허용.
+        # 이전 "exactly as in input" + input_fidelity=high는 cv 합성판이 그대로 출력되는 원인이라 완화.
         prompt = (
-            "This is a rough composite photo of a desk setup: the products have already been "
-            "placed onto the user's actual desk. Turn it into one cohesive, realistic photograph. "
-            "Blend each product naturally into the scene and fix lighting, shadows, reflections, "
-            "and edges so they match the desk and the room. "
-            "STRICT RULES: do NOT move, add, remove, resize, or replace any product. "
-            "Keep every product's identity, shape, color, and position exactly as in the input. "
-            "Keep the desk, walls, and room structure exactly as in the input. "
-            "Only improve photorealism and seamless blending."
+            "This is a rough composite of a desk setup — products have already been placed on the user's desk. "
+            "Re-render it as one cohesive, realistic photograph taken in this room. "
+            "PRESERVE for each product: its position on the desk, overall silhouette/shape, category identity, "
+            "approximate size, and dominant material/color. Do NOT move products to different desk regions, "
+            "swap products for different categories, add new products, or remove any product. "
+            "NATURALIZE these details: monitor screens should show neutral desktop wallpaper or be turned off "
+            "(remove any advertisement text, spec numbers, marketing graphics on screens); "
+            "RGB lighting on keyboards/speakers/mousepads should be subtle and match the room ambience "
+            "(no neon product-photo glow); product cutout edges, harsh shadows, and copy-paste seams must "
+            "blend into the desk surface with realistic contact shadows and reflections; "
+            "match the room's actual lighting direction, color temperature, and ambient occlusion. "
+            "Keep the desk geometry, walls, and room structure intact. "
+            "Output must look like a single photograph, not a collage."
         )
 
         mime = _guess_mime(image_base64)
         ext = "jpg" if mime == "image/jpeg" else "png"
         files = [("image[]", (f"composite.{ext}", _b64_to_bytes(image_base64), mime))]
-        # input_fidelity=high: gpt-image-1이 입력 합성본(배치된 실제 제품)을 더 충실히 보존
-        # → 제품 원형/로고/위치 유지력↑ (모달리티 에러 시 이 키 제거)
-        form = {"model": self.model, "prompt": prompt, "size": self.size, "input_fidelity": "high"}
+        # input_fidelity 미설정(=auto). high는 입력 픽셀을 거의 그대로 보존해 cv 합성티가 남음 →
+        # 화면 콘텐츠/RGB 자연화·블렌딩이 작동하지 않아서 제거.
+        form = {"model": self.model, "prompt": prompt, "size": self.size}
 
         response = requests.post(
             self.api_url,
