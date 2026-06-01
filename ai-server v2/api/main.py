@@ -438,10 +438,21 @@ def _run_cv_then_refine(
         composite_b64 = job_store[job_id].result_image
 
         # 2. OpenAI로 합성본 다듬기 (레이아웃/제품/방 보존)
+        #    합성본(레이아웃) + 각 제품 원본 이미지(외형 참조)를 함께 전달 →
+        #    가려진 제품도 원본 보고 정확히 재현.
         job_store[job_id].status = JobStatus.running
         from .nanobanana_processor import get_nanobanana_processor
         processor = get_nanobanana_processor()
-        refined = processor.harmonize(composite_b64)
+        _ref_products = [
+            {
+                "image_id":  getattr(_p, "image_id", None),
+                "image_url": getattr(_p, "image_url", None),
+                "category":  getattr(_p, "category", ""),
+                "name":      getattr(_p, "name", ""),
+            }
+            for _p in (gen_req.products or [])
+        ]
+        refined = processor.harmonize(composite_b64, products=_ref_products)
 
         job_store[job_id].result_image = refined["result_image_base64"]
         job_store[job_id].products = products_meta

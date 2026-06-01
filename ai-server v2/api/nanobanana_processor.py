@@ -224,10 +224,44 @@ Do NOT:
             "raw_response": data,
         }
 
-    def harmonize(self, image_base64: str) -> Dict[str, Any]:
+    def harmonize(self, image_base64: str, products: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         # Tier 3: CV 합성본(제거+배치+그림자)을 받아 OpenAI로 사실감 다듬음.
+        # 멀티 입력: [1번] 합성본 = 레이아웃/위치 참조, [2번~] 각 제품 원본 = 외형 참조.
+        #   → 합성본에서 마우스가 마우스패드를 가려도 제품 원본을 보고 정확히 재현 가능.
         # 위치·정체성·실루엣은 보존하되, 광고용 화면 콘텐츠·과도한 RGB·합성 티는 자연화 허용.
         # 이전 "exactly as in input" + input_fidelity=high는 cv 합성판이 그대로 출력되는 원인이라 완화.
+
+        # 제품 참조 이미지 수집 (순서 유지 — 프롬프트 번호와 일치)
+        ref_files = []
+        ref_lines = []
+        for _p in (products or []):
+            _pid     = _p.get("image_id") or _p.get("id")
+            _img_b64 = self._read_product_image_base64(_pid, _p.get("image_url"))
+            if not _img_b64:
+                continue
+            _idx  = len(ref_files) + 1
+            _cat  = (_p.get("category") or "").strip()
+            _name = (_p.get("name") or _cat or "product").strip()
+            ref_files.append(("image[]", (f"ref_{_idx}_{_pid}.png", _b64_to_bytes(_img_b64), "image/png")))
+            ref_lines.append(f"  Reference image {_idx}: {_cat} — \"{_name}\"")
+
+        if ref_lines:
+            ref_block = (
+                "\n\nIMAGE ROLES:\n"
+                "- The FIRST image is the rough scene: it defines the LAYOUT — where each product sits, its "
+                "position, footprint, and how items overlap.\n"
+                "- The following images are clean close-up references of the SAME products already in the scene, "
+                "in this order:\n"
+                + "\n".join(ref_lines) +
+                "\nUse each reference image ONLY to reproduce that product's true shape, proportions, color, and "
+                "details at the position shown in the first image. This is critical where products overlap or are "
+                "partially occluded in the first image (e.g. a mouse on top of a mousepad): rebuild each product "
+                "faithfully from its reference instead of guessing. Do NOT add extra copies of any product, and "
+                "do NOT introduce products that are not in the first image."
+            )
+        else:
+            ref_block = ""
+
         prompt = (
             "This is a rough composite of a desk setup — products have already been placed on the user's desk. "
             "Re-render it as one cohesive, realistic photograph taken in this room. "
@@ -245,11 +279,13 @@ Do NOT:
             "match the room's actual lighting direction, color temperature, and ambient occlusion. "
             "Keep the desk geometry, walls, and room structure intact. "
             "Output must look like a single photograph, not a collage."
+            + ref_block
         )
 
         mime = _guess_mime(image_base64)
         ext = "jpg" if mime == "image/jpeg" else "png"
         files = [("image[]", (f"composite.{ext}", _b64_to_bytes(image_base64), mime))]
+        files.extend(ref_files)   # 합성본 다음에 제품 참조 이미지들
         # input_fidelity 미설정(=auto). high는 입력 픽셀을 거의 그대로 보존해 cv 합성티가 남음 →
         # 화면 콘텐츠/RGB 자연화·블렌딩이 작동하지 않아서 제거.
         form = {"model": self.model, "prompt": prompt, "size": self.size}
