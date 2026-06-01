@@ -1138,10 +1138,16 @@ def compute_relational_layout(products, desk_corners, desk_width_mm, desk_depth_
         tgt["MOUSE"] = (mouse_rx, kb_ry)
     else:
         m_rw, mouse_rx = 0.05, mon_rx + kb_rw / 2
+    # 일반 마우스패드: 마우스 밑에만 (마우스 위치 기준). 키보드 안 덮음.
+    #   z-order MOUSEPAD(40) → KEYBOARD(15) 뒤지만, 위치가 마우스쪽이라 키보드와 안 겹침.
     if "MOUSEPAD" in prod_by_cat:
+        mp_rx = mouse_rx if "MOUSE" in prod_by_cat else min(0.95, mon_rx + kb_rw / 2 + 0.05)
+        tgt["MOUSEPAD"] = (mp_rx, kb_ry)
+    # 장패드: 키보드+마우스를 아우르는 중앙 (z-order DESKMAT=13 → 키보드/마우스 '밑'에 깔림).
+    if "DESKMAT" in prod_by_cat:
         left  = mon_rx - kb_rw / 2
-        right = mouse_rx + m_rw / 2
-        tgt["MOUSEPAD"] = ((left + right) / 2, kb_ry)
+        right = (mouse_rx + m_rw / 2) if "MOUSE" in prod_by_cat else (mon_rx + kb_rw / 2)
+        tgt["DESKMAT"] = ((left + right) / 2, kb_ry)
     if "SPEAKER" in prod_by_cat:
         _r = _CAT_RY_RANGE.get("SPEAKER", (0.18, 0.45))
         tgt["SPEAKER"] = (max(0.08, mon_rx - 0.30), _r[0] + 0.05)
