@@ -219,14 +219,14 @@ def _front_bbox_for_anchor(
     #   상한: 책상보다 큰 제품 금지 (cat별 차등)
     #   하한: 시각 인지 가능한 최소 크기 (cat별 차등)
     _UPPER_W_RATIO = {
-        "MONITOR":   0.85, "DESK_SHELF":   0.80, "MOUSEPAD":    0.80,
-        "KEYBOARD":  0.70, "LAPTOP_STAND": 0.55, "LIGHTING":    0.75,
-        "SPEAKER":   0.30, "DESK_LAMP":    0.30, "MOUSE":       0.20,
-        "DECO":      0.20, "CLOCK":        0.20,
+        "MONITOR":   0.85, "DESK_SHELF":   0.80, "DESKMAT":     0.85,
+        "MOUSEPAD":  0.35, "KEYBOARD":     0.70, "LAPTOP_STAND": 0.55,
+        "LIGHTING":  0.75, "SPEAKER":      0.30, "DESK_LAMP":   0.30,
+        "MOUSE":     0.20, "DECO":         0.20, "CLOCK":       0.20,
     }
     _LOWER_W_RATIO = {
-        "MONITOR":  0.22, "KEYBOARD":  0.18, "MOUSEPAD":  0.25,
-        "DESK_SHELF": 0.20, "LIGHTING": 0.25,
+        "MONITOR":  0.22, "KEYBOARD":  0.18, "DESKMAT":   0.40,
+        "MOUSEPAD": 0.10, "DESK_SHELF": 0.20, "LIGHTING": 0.25,
         "SPEAKER":  0.05, "DESK_LAMP": 0.05, "MOUSE":     0.04,
         "DECO":     0.04, "CLOCK":     0.04, "LAPTOP_STAND": 0.15,
     }
@@ -240,12 +240,9 @@ def _front_bbox_for_anchor(
     fv_ph = max(fv_ph, min_h_px)
 
     # 4. 카테고리간 관계 제약 (rx 정렬) — 사이즈는 위에서 결정, 여기선 위치만.
+    #    DESKMAT은 셋업 중심(monitor_rx)에 정렬해 키보드+마우스를 자연스럽게 덮음.
     _rx_adj = rx
-    if cat == "KEYBOARD" and "monitor_rx" in relation_state:
-        _rx_adj = relation_state["monitor_rx"]
-    elif cat == "DESK_SHELF" and "monitor_rx" in relation_state:
-        _rx_adj = relation_state["monitor_rx"]
-    elif cat == "LIGHTING" and "monitor_rx" in relation_state:
+    if cat in ("KEYBOARD", "DESK_SHELF", "LIGHTING", "DESKMAT") and "monitor_rx" in relation_state:
         _rx_adj = relation_state["monitor_rx"]
     elif cat == "DESK_LAMP":
         _rx_adj = max(rx, 0.12) if rx < 0.5 else min(rx, 0.88)
@@ -434,9 +431,13 @@ def score_region_for_product(
     elif cat == "MOUSE":
         pref_rx = min(1.0, relation_state.get("keyboard_rx", 0.50) + 0.20)
         pref_ry = relation_state.get("keyboard_ry", _pref["ry"])
+    elif cat == "DESKMAT":
+        # 장패드는 z-순서상 KEYBOARD보다 먼저 계산됨 → keyboard_rx 못 봄.
+        # 대신 monitor_rx(=키보드 정렬 기준)로 셋업 중심에 정렬해 키보드+마우스를 아우름.
+        pref_rx = relation_state.get("monitor_rx", _pref["rx"])
+        pref_ry = _pref["ry"]
     elif cat == "MOUSEPAD":
-        # MOUSEPAD가 placement 순서상 MOUSE보다 먼저 배치되니 MOUSE 위치를 직접 참조 못 함
-        # → KEYBOARD 위치 기반으로 동일하게 계산.
+        # 일반 마우스패드: 키보드 우측(마우스 영역)에만.
         pref_rx = min(1.0, relation_state.get("keyboard_rx", 0.50) + 0.20)
         pref_ry = relation_state.get("keyboard_ry", _pref["ry"])
     elif cat == "SPEAKER":

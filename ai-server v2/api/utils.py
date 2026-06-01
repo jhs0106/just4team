@@ -88,6 +88,34 @@ def normalize_category(category: str) -> str:
     return _CATEGORY_ALIASES.get(key, _CATEGORY_ALIASES.get(key_space, key))
 
 
+# 장패드 판별용 제품명 키워드 (치수 정보가 없을 때 폴백)
+_DESKMAT_NAME_KEYWORDS = (
+    "장패드", "deskmat", "desk mat", "desk pad", "deskpad",
+    "데스크매트", "데스크 매트", "대형마우스패드", "대형 마우스패드",
+)
+
+
+def _reclassify_pad_category(p):
+    # MOUSEPAD로 분류된 제품을 실제 치수(우선) → 제품명(폴백)으로
+    # DESKMAT(장패드)/MOUSEPAD(일반)로 재분류. 그 외 카테고리는 그대로 반환.
+    cat = normalize_category(p.category)
+    if cat != "MOUSEPAD":
+        return p
+
+    w = getattr(p, "width_mm", None)
+    d = getattr(p, "depth_mm", None)
+    if w is not None and d is not None:
+        is_deskmat = (w >= 700 and d >= 300)          # 1차: 치수 기준 (가로70·세로30cm 이상)
+    else:
+        name = (getattr(p, "name", "") or "").lower()  # 2차: 제품명 키워드 폴백
+        is_deskmat = any(k in name for k in _DESKMAT_NAME_KEYWORDS)
+
+    if is_deskmat:
+        print(f"[PadClassify] '{getattr(p, 'name', '')}' (w={w},d={d}) → DESKMAT")
+        return p.model_copy(update={"category": "DESKMAT"})
+    return p
+
+
 def find_product_image(image_id: int, image_url: str | None = None) -> Path | None:
     # 로컬 processed_images/{id}.png가 1순위 (배경 제거된 alpha PNG).
     # 없고 image_url이 주어지면 raw 이미지를 다운로드해 캐시 후 경로 반환.
@@ -195,5 +223,6 @@ def enrich_products_from_db(products: list) -> list:
                 updates["product_url"] = meta["product_url"]
         if updates:
             p = p.model_copy(update=updates)
+        p = _reclassify_pad_category(p)   # width/depth 채워진 뒤 장패드/일반 재분류
         enriched.append(p)
     return enriched

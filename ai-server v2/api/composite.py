@@ -338,14 +338,14 @@ def _calc_regions(
             continue
         base_pw, _ = product_pixel_size(p)
 
-        if cat in ("KEYBOARD", "MOUSE", "MOUSEPAD"):
+        if cat in ("KEYBOARD", "MOUSE", "MOUSEPAD", "DESKMAT"):
             ps = perspective_scale(front_y)
             pw = int(base_pw * ps)
             ph = int(pw * _FRONT_HEIGHT_RATIO.get(cat, 0.80))
             if cat == "KEYBOARD":
                 x1 = cx - pw // 2;              x2 = x1 + pw
                 y2 = front_y;                    y1 = y2 - ph
-            elif cat == "MOUSEPAD":
+            elif cat in ("MOUSEPAD", "DESKMAT"):
                 x1 = cx - pw // 2;              x2 = x1 + pw
                 y2 = front_y + int(DH * 0.05);  y1 = y2 - ph
             else:

@@ -4,6 +4,12 @@ _CATEGORY_ALIASES = {
     "MOUSEPAD":      "MOUSEPAD",
     "MOUSE_PAD":     "MOUSEPAD",
     "MOUSE PAD":     "MOUSEPAD",
+    "DESKMAT":       "DESKMAT",
+    "DESK_MAT":      "DESKMAT",
+    "DESK MAT":      "DESKMAT",
+    "DESKPAD":       "DESKMAT",
+    "DESK_PAD":      "DESKMAT",
+    "DESK PAD":      "DESKMAT",
     "MONITOR":       "MONITOR",
     "SPEAKER":       "SPEAKER",
     "LAMP":          "DESK_LAMP",
@@ -37,7 +43,9 @@ _CATEGORY_ALIASES = {
 _CATEGORY_DIMS_MM = {
     "KEYBOARD":     (440, 130),
     "MOUSE":        (70,  120),
-    "MOUSEPAD":     (320, 250),
+    "MOUSEPAD":     (250, 210),    # 일반 마우스패드 (소형)
+    "DESKMAT":      (700, 300),    # 장패드(데스크매트) 폴백 — 분류 기준선(700×300)과 동일.
+                                   #   치수 모를 때 과대 추정 방지: "최소한 이 크기"로 보수적 가정.
     "MONITOR":      (600, 230),
     "SPEAKER":      (120, 150),
     "DESK_LAMP":    (180, 180),
@@ -51,6 +59,7 @@ _CATEGORY_DIMS_MM = {
 _PLACEMENT_ORDER = {
     "MONITOR":      10,
     "LIGHTING":     12,
+    "DESKMAT":      13,    # KEYBOARD(15)·MOUSE(50)보다 먼저 그려짐 = 둘의 '밑'에 깔림
     "KEYBOARD":     15,
     "DESK_SHELF":   20,
     "MOUSEPAD":     40,
@@ -80,6 +89,7 @@ _PREFERRED_POS = {
     # ry 0.72는 책상 밖(다리 사이)으로 떨어짐. 0.55는 책상 윗면 중앙-앞쪽이라 안정적.
     "KEYBOARD":     {"rx": 0.50, "ry": 0.55},
     "MOUSEPAD":     {"rx": 0.50, "ry": 0.55},
+    "DESKMAT":      {"rx": 0.50, "ry": 0.55},   # 셋업 중심·앞쪽 (monitor_rx로 재정렬됨)
     "MOUSE":        {"rx": 0.70, "ry": 0.55},
     "SPEAKER":      {"rx": 0.25, "ry": 0.25},
     "DESK_LAMP":    {"rx": 0.12, "ry": 0.30},
@@ -131,6 +141,7 @@ _CAT_RY_RANGE: dict[str, tuple[float, float]] = {
     "KEYBOARD":     (0.35, 0.70),
     "MOUSE":        (0.35, 0.70),
     "MOUSEPAD":     (0.35, 0.70),
+    "DESKMAT":      (0.35, 0.70),
 }
 
 _CONTACT_Y_OFFSET = {
@@ -145,6 +156,10 @@ _OVERLAP_TOLERANCE: dict = {
     frozenset({"KEYBOARD",   "MOUSEPAD"}):   0.50,
     frozenset({"MOUSE",      "MOUSEPAD"}):   0.60,
     frozenset({"MONITOR",    "LIGHTING"}):   0.40,
+    # 장패드는 키보드·마우스 밑에 깔리므로 겹침을 거의 무제한 허용 (후보 reject 방지)
+    frozenset({"KEYBOARD",   "DESKMAT"}):    0.99,
+    frozenset({"MOUSE",      "DESKMAT"}):    0.99,
+    frozenset({"MOUSEPAD",   "DESKMAT"}):    0.99,
 }
 _DEFAULT_OVERLAP_THR = 0.10
 
@@ -153,6 +168,7 @@ _FRONT_HEIGHT_RATIO = {
     "KEYBOARD":     0.22,
     "MOUSE":        0.75,
     "MOUSEPAD":     0.25,
+    "DESKMAT":      0.30,
     "SPEAKER":      1.10,
     "DESK_LAMP":    1.70,
     "DESK_SHELF":   0.20,
@@ -165,7 +181,8 @@ _FRONT_HEIGHT_RATIO = {
 _DESK_W_RATIO = {
     "KEYBOARD":     0.33,
     "MOUSE":        0.07,
-    "MOUSEPAD":     0.55,
+    "MOUSEPAD":     0.18,    # 일반 마우스패드(소형) 폴백 비율
+    "DESKMAT":      0.55,    # 장패드(대형) 폴백 비율
     "MONITOR":      0.55,
     "SPEAKER":      0.09,
     "DESK_LAMP":    0.06,
@@ -200,12 +217,12 @@ _RANKER_CAT_ID = {
     "MONITOR": 0, "KEYBOARD": 1, "MOUSE": 2, "MOUSEPAD": 3,
     "SPEAKER": 4, "DESK_LAMP": 5, "DESK_SHELF": 6,
     "LAPTOP_STAND": 7, "DECO": 8, "CLOCK": 9,
-    "LIGHTING": 10,
+    "LIGHTING": 10, "DESKMAT": 11,
 }
-# LIGHTING은 학습 샘플 없음 → ranker skip, rule_score만 사용
-_RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD", "LIGHTING"}
+# 학습 샘플 없는 카테고리 → ranker skip, rule_score만 사용 (DESKMAT은 신규 분류라 샘플 없음)
+_RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD", "LIGHTING", "DESKMAT"}
 
-_FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD"}
+_FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD", "DESKMAT"}
 _BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK", "LIGHTING"}
 
 # 제품 입체감 분류 (3-tier).
@@ -215,6 +232,7 @@ _BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", 
 _PRODUCT_FORM_TIER = {
     "KEYBOARD":     "flat",
     "MOUSEPAD":     "flat",
+    "DESKMAT":      "flat",        # 장패드도 책상에 완전히 누움
     "MOUSE":        "flat",        # semi_flat → flat (2026-05-25): warp으로 perspective 매칭
     "LAPTOP_STAND": "semi_flat",
     "MONITOR":      "upright",
@@ -243,6 +261,7 @@ _DEFAULT_DESK_TILT_DEG = 30.0
 #   LAPTOP_STAND: semi-flat (warp 없음, 이 값 무시됨)
 _CAT_TILT_DEG = {
     "MOUSEPAD":     20.0,
+    "DESKMAT":      20.0,    # 장패드도 가장 납작
     "KEYBOARD":     30.0,
     "MOUSE":        45.0,
     "LAPTOP_STAND": 50.0,
@@ -259,6 +278,7 @@ _CAT_DEPTH_SHADING = {
     "MOUSE":        0.12,   # 곡면 마우스, 중간 음영
     "KEYBOARD":     0.10,   # 평면, 약한 음영
     "MOUSEPAD":     0.05,   # 거의 평면
+    "DESKMAT":      0.05,   # 거의 평면
     "LAPTOP_STAND": 0.15,
     "CLOCK":        0.12,
     "DECO":         0.12,
