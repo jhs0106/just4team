@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field
 
 from deskterior.recommender.config import (
     THEME_PRESETS, MANDATORY_CATEGORIES, OPTIONAL_CATEGORIES,
-    get_optional_categories,
     THEME_CATEGORY_QUERIES,
     CANDIDATE_LIMIT, BEAM_SIZE_DEFAULT, TOP_M_DEFAULT, TOP_K_DEFAULT,
 )
@@ -142,25 +141,15 @@ def recommend(req: RecommendRequest) -> dict:
         raise HTTPException(500, f"DB 연결 실패: {e}")
 
     # 4. 카테고리별 후보 검색 — space_constraints가 있으면 size 필터 적용
-    #    선택 카테고리는 테마 우선순위(get_optional_categories)로 도출 — 테마마다 다름.
-    all_categories = MANDATORY_CATEGORIES + get_optional_categories(req.theme)
+    all_categories = MANDATORY_CATEGORIES + OPTIONAL_CATEGORIES
     raw_by_category: dict[str, list[ScoredProduct]] = {}
     for category in all_categories:
         _size_cap = (req.space_constraints or {}).get(category)
         products = retrieve_candidates(
             req.theme, category,
-            user_image_embedding=user_image_emb,
             max_width_mm=_size_cap[0] if _size_cap else None,
             max_depth_mm=_size_cap[1] if _size_cap else None,
         )
-        # size 제약으로 후보가 비면 그 카테고리만 제약 없이 재검색 (best-effort).
-        # 필수 카테고리가 제약 때문에 0개가 되어 전체 추천이 404 나는 것을 방지.
-        if not products and _size_cap:
-            print(f"[size filter] {category}: 제약 {_size_cap}로 후보 0개 → 제약 없이 재검색")
-            products = retrieve_candidates(
-                req.theme, category,
-                user_image_embedding=user_image_emb,
-            )
         scored: list[ScoredProduct] = []
         for p in products:
             te = compute_theme_evidence(p, req.theme)
@@ -177,7 +166,6 @@ def recommend(req: RecommendRequest) -> dict:
                 image_sim      = clamp(sp.product.image_sim),
                 text_sim       = clamp(sp.product.text_sim),
                 theme_evidence = sp.theme_evidence,
-                value_score    = sp.value_score,
             )
         scored_list.sort(key=lambda sp: sp.item_score, reverse=True)
 

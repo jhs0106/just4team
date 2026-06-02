@@ -10,15 +10,20 @@ TOP_M_DEFAULT = 10
 TOP_K_DEFAULT = 1
 ALLOW_THEME_GATE_FALLBACK = True
 
-# 사용자 책상 사진 임베딩과 카테고리 텍스트 쿼리 임베딩의 가중 평균 비율.
-# query = (1 - W) * text_emb + W * user_image_emb 후 L2 정규화.
-# 0.0 = 사진 무시(테마 텍스트만), 1.0 = 사진만(테마 무시).
-# 0.4 = 테마 의도(0.6) 우선하되 사용자 책상 분위기 반영.
-USER_IMAGE_BLEND_WEIGHT = 0.4
-
-# 필수 = PC 셋업 기능 핵심 3종 (예산 내 반드시 포함, 없으면 추천 실패).
-#   나머지 꾸밈 제품은 테마 데이터(optional_priority)에서 도출 → 파일 하단 get_optional_categories.
 MANDATORY_CATEGORIES = ["MONITOR", "KEYBOARD", "MOUSE"]
+
+OPTIONAL_CATEGORIES = ["MOUSEPAD", "SPEAKER", "DESK_LAMP", "HEADSET"]
+
+# 카테고리별 절대 최소 가격 — 예산과 무관한 노이즈 제거용
+ABS_MIN_PRICE = {
+    "MONITOR":   70_000,
+    "KEYBOARD":  15_000,
+    "MOUSE":      8_000,
+    "MOUSEPAD":  10_000,
+    "SPEAKER":   15_000,
+    "DESK_LAMP": 12_000,
+    "HEADSET":   15_000,
+}
 
 CATEGORY_LABELS = {
     "MONITOR":   "모니터",
@@ -64,9 +69,9 @@ THEME_PRESETS = {
             "min_avg_theme_evidence": 0.58,
         },
         "optional_priority": {
-            "MOUSEPAD": 0.90,
-            "DESK_LAMP": 0.80,
-            "SPEAKER":   0.55,
+            "MOUSEPAD":  0.80,
+            "SPEAKER":   0.60,
+            "DESK_LAMP": 0.75,
             "HEADSET":   0.40,
         },
     },
@@ -87,10 +92,10 @@ THEME_PRESETS = {
             "min_avg_theme_evidence": 0.60,
         },
         "optional_priority": {
-            "MOUSEPAD": 0.85,
-            "SPEAKER":   0.75,
-            "DESK_LAMP": 0.65,
-            "HEADSET":   0.55,
+            "MOUSEPAD":  0.80,
+            "SPEAKER":   0.70,
+            "DESK_LAMP": 0.60,
+            "HEADSET":   0.50,
         },
     },
 
@@ -110,10 +115,10 @@ THEME_PRESETS = {
             "min_avg_theme_evidence": 0.65,
         },
         "optional_priority": {
-            "MOUSEPAD": 0.95,
-            "HEADSET":   0.90,
+            "MOUSEPAD":  0.90,
             "SPEAKER":   0.70,
-            "DESK_LAMP": 0.45,
+            "DESK_LAMP": 0.80,
+            "HEADSET":   0.90,
         },
     },
 
@@ -132,41 +137,13 @@ THEME_PRESETS = {
             "min_avg_theme_evidence": 0.53,
         },
         "optional_priority": {
-            "DESK_LAMP": 0.90,
-            "MOUSEPAD":  0.80,
+            "MOUSEPAD":  0.50,
             "SPEAKER":   0.70,
-            "HEADSET":   0.25,
+            "DESK_LAMP": 0.90,
+            "HEADSET":   0.30,
         },
     },
 }
-
-
-# ============================================================
-# 카테고리 능력 게이트 & 테마 우선순위 도출
-# ============================================================
-
-# AI 서버가 실제로 이미지에 렌더링할 수 있는 카테고리 (다운스트림 능력 게이트).
-# 추천이 '렌더링 불가 제품'에 예산을 쓰지 않도록 차단 — 제품 선호가 아니라 기술 제약.
-# AI서버에 placement/composite 지원을 추가하면 여기에 등록 (예: HEADSET 지원 시 추가).
-RENDERABLE_CATEGORIES = {
-    "MONITOR", "KEYBOARD", "MOUSE", "MOUSEPAD", "SPEAKER", "DESK_LAMP",
-}
-
-
-def get_optional_categories(theme: str) -> list[str]:
-    # 선택(꾸밈) 카테고리를 테마의 optional_priority 가중치 내림차순으로 도출.
-    # 손으로 박은 리스트 대신 테마 데이터로 구동 — 테마마다 우선순위가 다름
-    # (gaming=헤드셋 우선, wood=조명 우선). 필수·렌더링 불가 카테고리는 제외.
-    prio = (THEME_PRESETS.get(theme) or {}).get("optional_priority", {})
-    cats = [c for c in prio
-            if c not in MANDATORY_CATEGORIES and c in RENDERABLE_CATEGORIES]
-    cats.sort(key=lambda c: prio[c], reverse=True)
-    return cats
-
-
-# 멤버십 판정용 정적 집합 (점수 계산에서 "이 제품이 선택 카테고리인가" 체크).
-# 렌더링 가능한 비필수 카테고리의 합집합 — 역시 손으로 박지 않고 도출.
-OPTIONAL_CATEGORIES = sorted(RENDERABLE_CATEGORIES - set(MANDATORY_CATEGORIES))
 
 # ============================================================
 # THEME-CATEGORY SEARCH QUERIES
@@ -215,31 +192,14 @@ THEME_CATEGORY_QUERIES = {
 # OPTIONAL GAIN THRESHOLDS — 테마별 선택 상품 추가 기준
 # ============================================================
 
+# 카테고리별 OptionalGain 임계값.
+# MOUSEPAD는 입력 장치군과 직접 연결되는 보완재라 threshold를 낮게.
+# SPEAKER/DESK_LAMP/HEADSET은 테마·예산에 따라 선택적으로 추가.
 OPTIONAL_GAIN_THRESHOLD = {
-    "white": {
-        "MOUSEPAD":  0.30,
-        "DESK_LAMP": 0.34,
-        "SPEAKER":   0.38,
-        "HEADSET":   0.42,
-    },
-    "black": {
-        "MOUSEPAD":  0.30,
-        "SPEAKER":   0.34,
-        "DESK_LAMP": 0.36,
-        "HEADSET":   0.38,
-    },
-    "gaming": {
-        "MOUSEPAD":  0.28,
-        "HEADSET":   0.30,
-        "SPEAKER":   0.36,
-        "DESK_LAMP": 0.42,
-    },
-    "wood": {
-        "DESK_LAMP": 0.28,
-        "MOUSEPAD":  0.30,
-        "SPEAKER":   0.32,
-        "HEADSET":   0.45,
-    },
+    "MOUSEPAD":  0.45,
+    "SPEAKER":   0.50,
+    "DESK_LAMP": 0.55,
+    "HEADSET":   0.55,
 }
 
 # ============================================================
@@ -250,10 +210,10 @@ ROLE_PAIR_WEIGHTS: dict[frozenset, float] = {
     frozenset(("KEYBOARD", "MOUSE")):     1.00,
     frozenset(("KEYBOARD", "MOUSEPAD")):  0.95,
     frozenset(("MOUSE",    "MOUSEPAD")):  0.95,
-    frozenset(("MONITOR",  "SPEAKER")):   0.60,
-    frozenset(("MONITOR",  "DESK_LAMP")): 0.50,
-    frozenset(("KEYBOARD", "HEADSET")):   0.55,
-    frozenset(("MOUSE",    "HEADSET")):   0.55,
+    frozenset(("MONITOR",  "SPEAKER")):   0.70,
+    frozenset(("MONITOR",  "DESK_LAMP")): 0.60,
+    frozenset(("KEYBOARD", "HEADSET")):   0.50,
+    frozenset(("MOUSE",    "HEADSET")):   0.50,
 }
 
 # ============================================================

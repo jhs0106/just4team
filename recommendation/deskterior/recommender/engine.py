@@ -2,7 +2,7 @@ import json
 import logging
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -24,10 +24,9 @@ from deskterior.recommender.config import (
     CATEGORY_LABELS,
     MANDATORY_CATEGORIES,
     OPTIONAL_CATEGORIES,
-    get_optional_categories,
     ROLE_PAIR_WEIGHTS,
     OPTIONAL_GAIN_THRESHOLD,
-    USER_IMAGE_BLEND_WEIGHT,
+    ABS_MIN_PRICE,
 )
 from deskterior.retrieval.searcher import embed_text_query
 from deskterior.core.config import DB_CONFIG
@@ -66,6 +65,9 @@ class ScoredProduct:
     theme_evidence: float = 0.0
     value_score: float = 0.0
     item_score: float = 0.0
+    optional_gain: float = 0.0
+    budget_gain: float = 0.0
+    role_compat: float = 0.0
 
 
 @dataclass
@@ -80,6 +82,7 @@ class Bundle:
     mandatory_coverage: float = 0.0
     optional_usefulness: float = 0.0
     value_efficiency: float = 0.0
+    budget_utilization: float = 0.0
 
 
 @dataclass
@@ -190,33 +193,23 @@ def search_products_by_vector(
 
 def _apply_exclude_filter(products: list[Product], category: str) -> list[Product]:
     exclude_kws = CATEGORY_EXCLUDE_KEYWORDS.get(category, [])
-    if not exclude_kws:
-        return products
+    min_price   = ABS_MIN_PRICE.get(category, 0)
     return [
         p for p in products
-        if not any(kw.lower() in p.name.lower() for kw in exclude_kws)
+        if p.price >= min_price
+        and not any(kw.lower() in p.name.lower() for kw in exclude_kws)
     ]
 
 
 def retrieve_candidates(
     theme: str,
     category: str,
-    user_image_embedding: list[float] | None = None,
     limit: int = CANDIDATE_LIMIT,
     max_width_mm: int | None = None,
     max_depth_mm: int | None = None,
 ) -> list[Product]:
-    # 카테고리 텍스트 쿼리 임베딩 + (옵션) 사용자 책상 정면 사진 임베딩 가중 평균
     query_text = THEME_CATEGORY_QUERIES[theme][category]
-    text_emb = np.array(embed_text_query(query_text), dtype=np.float32)
-
-    if user_image_embedding is not None:
-        img_emb = np.array(user_image_embedding, dtype=np.float32)
-        blended = (1.0 - USER_IMAGE_BLEND_WEIGHT) * text_emb + USER_IMAGE_BLEND_WEIGHT * img_emb
-        norm = float(np.linalg.norm(blended))
-        query_embedding = (blended / norm).tolist() if norm > 1e-9 else text_emb.tolist()
-    else:
-        query_embedding = text_emb.tolist()
+    query_embedding = embed_text_query(query_text)
 
     return search_products_by_vector(
         category, query_embedding, limit,
@@ -232,7 +225,7 @@ def choose_from_menu(title: str, options: list[str], labels: list[str] | None = 
     print(f"\n{title}")
     print("-" * len(title))
     display_labels = labels if labels else options
-    for i, (opt, lbl) in enumerate(zip(options, display_labels), 1):
+    for i, (_, lbl) in enumerate(zip(options, display_labels), 1):
         print(f"  {i}. {lbl}")
     while True:
         try:
@@ -328,15 +321,20 @@ def compute_item_score(
     image_sim:      float,
     text_sim:       float,
     theme_evidence: float,
-    value_score:    float,
 ) -> float:
-    """ItemScore = 0.30*ImageSim + 0.25*TextSim + 0.35*ThemeEvidence + 0.10*ValueScore"""
+    """ItemScore = 0.35*ImageSim + 0.25*TextSim + 0.40*ThemeEvidence"""
     return clamp(
-        0.30 * image_sim
+        0.35 * image_sim
         + 0.25 * text_sim
-        + 0.35 * theme_evidence
-        + 0.10 * value_score
+        + 0.40 * theme_evidence
     )
+
+
+def compute_budget_usage_score(total_price: int, budget: int) -> float:
+    """BudgetUsageScore = min((Cost/Budget)/0.85, 1.0) — 85% 사용 시 만점."""
+    if budget <= 0:
+        return 0.0
+    return min((total_price / budget) / 0.85, 1.0)
 
 
 def normalize_value_scores(scored_by_category: dict[str, list[ScoredProduct]]) -> None:
@@ -428,11 +426,12 @@ def compute_value_efficiency_bundle(bundle: Bundle) -> float:
     return sum(sp.value_score for sp in bundle.items) / len(bundle.items)
 
 
-def compute_setup_score(bundle: Bundle, theme: str) -> Bundle:
+def compute_setup_score(bundle: Bundle, theme: str, budget: int) -> Bundle:
     """
     SetupScore = 0.35*SetupThemeEvidence + 0.20*AvgItemScore
                + 0.20*RoleAwareCompatibility + 0.15*MandatoryCoverage
                + 0.05*OptionalUsefulness + 0.05*ValueEfficiency
+    FinalScore = SetupScore × (0.70 + 0.30 × BudgetUtilization)
     """
     if not bundle.items:
         bundle.setup_score = 0.0
@@ -445,6 +444,7 @@ def compute_setup_score(bundle: Bundle, theme: str) -> Bundle:
     bundle.mandatory_coverage       = compute_mandatory_coverage(bundle)
     bundle.optional_usefulness      = compute_optional_usefulness(bundle, theme)
     bundle.value_efficiency         = compute_value_efficiency_bundle(bundle)
+    bundle.budget_utilization       = compute_budget_usage_score(bundle.total_price, budget)
 
     bundle.setup_score = clamp(
         0.35 * bundle.setup_theme_evidence
@@ -454,7 +454,7 @@ def compute_setup_score(bundle: Bundle, theme: str) -> Bundle:
         + 0.05 * bundle.optional_usefulness
         + 0.05 * bundle.value_efficiency
     )
-    bundle.final_score = bundle.setup_score
+    bundle.final_score = bundle.setup_score * (0.70 + 0.30 * bundle.budget_utilization)
     return bundle
 
 
@@ -467,11 +467,14 @@ def compute_optional_gain(
     candidate: ScoredProduct,
     theme:     str,
     category:  str,
-) -> float:
+    budget:    int,
+) -> tuple[float, float, float]:
     """
-    OptionalGain = 0.35*ItemScore + 0.35*ThemeEvidence
-                 + 0.20*RoleCompatibility + 0.10*ThemeOptionalPriority
+    OptionalGain = 0.30*ItemScore + 0.25*ThemeEvidence
+                 + 0.20*RoleCompatibility + 0.10*Priority + 0.15*BudgetGain
                  - conflict penalty
+    Returns (gain, budget_gain, role_compat).
+    BudgetGain = BudgetUsageScore(S∪{i}) - BudgetUsageScore(S)
     """
     if bundle.items:
         weighted_sum = 0.0
@@ -486,13 +489,18 @@ def compute_optional_gain(
     else:
         role_compat = 0.5
 
+    bus_before  = compute_budget_usage_score(bundle.total_price, budget)
+    bus_after   = compute_budget_usage_score(bundle.total_price + candidate.product.price, budget)
+    budget_gain = max(0.0, bus_after - bus_before)
+
     priority = THEME_PRESETS[theme]["optional_priority"].get(category, 0.5)
 
     gain = (
-        0.35 * candidate.item_score
-        + 0.35 * candidate.theme_evidence
+        0.30 * candidate.item_score
+        + 0.25 * candidate.theme_evidence
         + 0.20 * role_compat
         + 0.10 * priority
+        + 0.15 * budget_gain
     )
 
     neg_kws = THEME_PRESETS[theme]["negative_keywords"]
@@ -500,7 +508,7 @@ def compute_optional_gain(
     if any(kw.lower() in name for kw in neg_kws):
         gain -= 0.15
 
-    return clamp(gain)
+    return clamp(gain), budget_gain, role_compat
 
 
 # ============================================================
@@ -558,12 +566,11 @@ def passes_theme_gate(bundle: Bundle, theme: str) -> bool:
 # OPTIMIZATION
 # ============================================================
 
-def _compute_quick_score(items: list[ScoredProduct]) -> float:
+def _compute_quick_score(items: list[ScoredProduct], budget: int) -> float:
     """Beam 가지치기용 빠른 점수.
 
-    필수 상품의 평균을 base로 삼고, optional은 bonus로 더한다.
-    평균을 전체 아이템 수로 나누면 optional 추가 시 점수가 오히려 낮아지는
-    문제가 생기므로, 필수 슬롯 수로만 나눈다.
+    quality(0.85) + BudgetUsageScore(0.15) 합산.
+    비싼 조합이 초반 빔에서 탈락하지 않도록 예산 사용률을 약하게 반영한다.
     """
     if not items:
         return 0.0
@@ -572,8 +579,77 @@ def _compute_quick_score(items: list[ScoredProduct]) -> float:
 
     base           = sum(sp.item_score for sp in mandatory_items) / max(len(mandatory_items), 1)
     optional_bonus = sum(sp.item_score * sp.theme_evidence for sp in optional_items) * 0.30
+    quality        = base + optional_bonus
 
-    return base + optional_bonus
+    total_price = sum(sp.product.price for sp in items)
+    bus         = compute_budget_usage_score(total_price, budget)
+
+    return 0.85 * quality + 0.15 * bus
+
+
+def _prune_beams(beams: list[_BeamState], budget: int, beam_size: int) -> list[_BeamState]:
+    """quick_score 상위 80% + 예산 구간별 다양성 20% 유지 (price-bucket beam)."""
+    if len(beams) <= beam_size:
+        return beams
+
+    sorted_b   = sorted(beams, key=lambda s: s.quick_score, reverse=True)
+    main_count = max(1, int(beam_size * 0.80))
+    selected   = list(sorted_b[:main_count])
+    selected_ids = {id(s) for s in selected}
+
+    # 예산 구간별로 최고 빔 1개씩 추가 보존
+    buckets = [
+        (0.50, 0.70),
+        (0.70, 0.85),
+        (0.85, 2.00),
+    ]
+    for lo, hi in buckets:
+        if len(selected) >= beam_size:
+            break
+        for s in sorted_b:
+            ratio = s.total_price / budget if budget > 0 else 0
+            if lo <= ratio < hi and id(s) not in selected_ids:
+                selected.append(s)
+                selected_ids.add(id(s))
+                break
+
+    return selected[:beam_size]
+
+
+def _select_tiered_candidates(
+    candidates: list[ScoredProduct], top_m: int
+) -> list[ScoredProduct]:
+    """item_score 상위만 쓰지 않고 가격대별(저/중/고) 후보를 균형 있게 선택.
+
+    저가 40% / 중간 30% / 고가 30% 비율로 각 구간에서 item_score 높은 것을 뽑은 뒤
+    top_m을 못 채우면 전체 item_score 순으로 보충한다.
+    """
+    if len(candidates) <= top_m:
+        return candidates
+
+    by_price = sorted(candidates, key=lambda sp: sp.product.price)
+    n = len(by_price)
+    t1, t2 = n // 3, 2 * (n // 3)
+
+    cheap = sorted(by_price[:t1],   key=lambda sp: sp.item_score, reverse=True)
+    mid   = sorted(by_price[t1:t2], key=lambda sp: sp.item_score, reverse=True)
+    exp   = sorted(by_price[t2:],   key=lambda sp: sp.item_score, reverse=True)
+
+    n_cheap = max(1, int(top_m * 0.40))
+    n_exp   = max(1, int(top_m * 0.30))
+    n_mid   = top_m - n_cheap - n_exp
+
+    selected     = cheap[:n_cheap] + mid[:n_mid] + exp[:n_exp]
+    selected_ids = {id(sp) for sp in selected}
+
+    for sp in candidates:
+        if len(selected) >= top_m:
+            break
+        if id(sp) not in selected_ids:
+            selected.append(sp)
+            selected_ids.add(id(sp))
+
+    return selected[:top_m]
 
 
 def _has_all_mandatory(state: _BeamState) -> bool:
@@ -581,7 +657,7 @@ def _has_all_mandatory(state: _BeamState) -> bool:
 
 
 def pareto_filter_bundles(bundles: list[Bundle]) -> list[Bundle]:
-    """더 비싸면서 점수가 낮거나 같은 조합을 제거한다."""
+    """더 비싸면서 final_score가 낮거나 같은 조합을 제거한다."""
     dominated: set[int] = set()
     for i, a in enumerate(bundles):
         for j, b in enumerate(bundles):
@@ -589,8 +665,8 @@ def pareto_filter_bundles(bundles: list[Bundle]) -> list[Bundle]:
                 continue
             if (
                 a.total_price <= b.total_price
-                and a.setup_score >= b.setup_score
-                and (a.total_price < b.total_price or a.setup_score > b.setup_score)
+                and a.final_score >= b.final_score
+                and (a.total_price < b.total_price or a.final_score > b.final_score)
             ):
                 dominated.add(j)
     return [b for i, b in enumerate(bundles) if i not in dominated]
@@ -633,6 +709,7 @@ def recommend_setup(
     beam_size: int = BEAM_SIZE_DEFAULT,
     top_m:     int = TOP_M_DEFAULT,
     top_k:     int = TOP_K_DEFAULT,
+    debug:     bool = False,
 ) -> list[Bundle]:
     """
     2단계 Beam Search 번들 추천.
@@ -644,7 +721,9 @@ def recommend_setup(
 
     for category in MANDATORY_CATEGORIES:
         new_beams: list[_BeamState] = []
-        candidates = candidates_by_category.get(category, [])[:top_m]
+        candidates = _select_tiered_candidates(
+            candidates_by_category.get(category, []), top_m
+        )
 
         for state in beams:
             for cand in candidates:
@@ -655,28 +734,31 @@ def recommend_setup(
                     items=state.items + [cand],
                     total_price=new_price,
                     covered_categories=state.covered_categories | {category},
-                    quick_score=_compute_quick_score(state.items + [cand]),
+                    quick_score=_compute_quick_score(state.items + [cand], budget),
                 )
                 new_beams.append(new_state)
 
         if not new_beams:
-            logger.warning(f"필수 카테고리 {category} — 예산 내 후보 없음. 빈 결과 반환.")
+            logger.warning(f"필수 카테고리 {category} - 예산 내 후보 없음. 빈 결과 반환.")
             return []
 
-        new_beams.sort(key=lambda s: s.quick_score, reverse=True)
-        beams = new_beams[:beam_size]
+        beams = _prune_beams(new_beams, budget, beam_size)
+        if debug:
+            logger.debug(f"[Phase1] {category}: {len(new_beams)} states → top {len(beams)}")
 
     # 필수 슬롯 누락 조합 탈락 (defensive)
     beams = [b for b in beams if _has_all_mandatory(b)]
     if not beams:
         return []
 
-    # ── Phase 2: 선택 상품 추가 (테마 우선순위 순서) ──────────────────────────
-    # 테마별 optional_priority 가중치 내림차순 → 예산이 남는 만큼 위에서부터 추가.
-    for category in get_optional_categories(theme):
+    # ── Phase 2: 선택 상품 추가 ───────────────────────────────────────────
+    for category in OPTIONAL_CATEGORIES:
         new_beams = list(beams)  # skip 옵션 유지
-        threshold  = OPTIONAL_GAIN_THRESHOLD.get(theme, {}).get(category, 0.35)
-        candidates = candidates_by_category.get(category, [])[:top_m]
+        threshold  = OPTIONAL_GAIN_THRESHOLD[category]
+        candidates = _select_tiered_candidates(
+            candidates_by_category.get(category, []), top_m
+        )
+        added = 0
 
         for state in beams:
             temp_bundle = state.to_bundle()
@@ -684,21 +766,30 @@ def recommend_setup(
                 new_price = state.total_price + cand.product.price
                 if new_price > budget:
                     continue
-                gain = compute_optional_gain(temp_bundle, cand, theme, category)
+                gain, budget_gain, role_compat = compute_optional_gain(
+                    temp_bundle, cand, theme, category, budget,
+                )
                 if gain >= threshold:
+                    updated_cand = replace(
+                        cand,
+                        optional_gain=gain,
+                        budget_gain=budget_gain,
+                        role_compat=role_compat,
+                    )
                     new_state = _BeamState(
-                        items=state.items + [cand],
+                        items=state.items + [updated_cand],
                         total_price=new_price,
                         covered_categories=state.covered_categories | {category},
-                        quick_score=_compute_quick_score(state.items + [cand]),
+                        quick_score=_compute_quick_score(state.items + [updated_cand], budget),
                     )
                     new_beams.append(new_state)
+                    added += 1
 
-        new_beams.sort(key=lambda s: s.quick_score, reverse=True)
-        beams = new_beams[:beam_size]
+        beams = _prune_beams(new_beams, budget, beam_size)
+        if debug:
+            logger.debug(f"[Phase2] {category}: +{added} states, threshold={threshold:.2f}")
 
     # ── Setup Score 계산 + 중복 제거 ────────────────────────────────────────
-    # quick_score와 setup_score는 다를 수 있으므로 전체 beam에 대해 계산한다.
     final_bundles:     list[Bundle]        = []
     seen_signatures:   set[frozenset[str]] = set()
 
@@ -708,7 +799,7 @@ def recommend_setup(
         if sig in seen_signatures:
             continue
         seen_signatures.add(sig)
-        compute_setup_score(bundle, theme)
+        compute_setup_score(bundle, theme, budget)
         final_bundles.append(bundle)
 
     if not final_bundles:
@@ -720,8 +811,10 @@ def recommend_setup(
         if ALLOW_THEME_GATE_FALLBACK:
             # 테마 불명확 조합도 허용하되 0.75 패널티 부여
             for b in final_bundles:
-                b.final_score = b.setup_score * 0.75
+                b.final_score *= 0.75
             gated = final_bundles
+            if debug:
+                logger.debug("[ThemeGate] fallback 적용 (0.75 패널티)")
         else:
             return []
 
@@ -782,8 +875,41 @@ def generate_explanation(bundle: Bundle, theme: str) -> list[str]:
         labels = [CATEGORY_LABELS.get(sp.product.category, sp.product.category) for sp in optional_items]
         reasons.append(f"선택 상품({', '.join(labels)})이 테마를 강화합니다.")
 
-    reasons.append("예산을 억지로 소진하지 않고 테마에 맞는 상품 조합을 선택했습니다.")
+    # 예산 활용도
+    utilization = bundle.budget_utilization
+    if utilization >= 0.80:
+        reasons.append(
+            f"예산을 효율적으로 활용했습니다. (예산 사용률: {utilization*100:.0f}%)"
+        )
+    else:
+        reasons.append(
+            f"예산 내에서 테마에 맞는 최적 조합을 선택했습니다. (예산 사용률: {utilization*100:.0f}%)"
+        )
+
     return reasons
+
+
+def generate_product_explanation(sp: ScoredProduct, theme: str) -> str:
+    """상품 하나에 대한 한 줄 선택 이유."""
+    p    = sp.product
+    name = p.name.lower()
+
+    positive_kws = THEME_PRESETS[theme]["positive_keywords"]
+    matched = [kw for kw in positive_kws if kw.lower() in name]
+
+    parts: list[str] = []
+    if matched:
+        parts.append(f"테마 키워드 매칭: {', '.join(matched)}")
+    if sp.theme_evidence >= 0.5:
+        parts.append(f"테마 적합도 {sp.theme_evidence:.2f}")
+    if sp.item_score >= 0.55:
+        parts.append(f"종합 점수 {sp.item_score:.2f}")
+    if sp.optional_gain > 0.0:
+        parts.append(f"옵션 기여도 {sp.optional_gain:.2f} (예산 기여 {sp.budget_gain:.2f})")
+    if not parts:
+        parts.append("테마·예산 조건 내 최적 선택")
+
+    return " / ".join(parts)
 
 
 def print_recommendation_results(
@@ -794,7 +920,7 @@ def print_recommendation_results(
     theme_label = THEME_PRESETS[theme]["label"]
 
     print("\n" + "=" * 56)
-    print(f"  추천 셋업 TOP {len(bundles)}  —  {theme_label}")
+    print(f"  추천 셋업 TOP {len(bundles)}  -  {theme_label}")
     print("=" * 56)
 
     if not bundles:
@@ -813,24 +939,25 @@ def print_recommendation_results(
         print(f"Setup Score: {bundle.setup_score:.3f}  |  Final Score: {bundle.final_score:.3f}")
 
         print("\n세부 점수:")
-        print(f"  - 테마 인식도(SetupThemeEvidence): {bundle.setup_theme_evidence:.2f}")
-        print(f"  - 평균 상품 점수(AvgItemScore):     {bundle.item_avg_score:.2f}")
-        print(f"  - 역할 호환성(RoleAwareCompat):     {bundle.role_aware_compatibility:.2f}")
-        print(f"  - 필수 커버리지(MandatoryCoverage): {bundle.mandatory_coverage:.2f}")
-        print(f"  - 선택 유용성(OptionalUsefulness):  {bundle.optional_usefulness:.2f}")
-        print(f"  - 가격 효율성(ValueEfficiency):     {bundle.value_efficiency:.2f}")
+        print(f"  - 테마 인식도(SetupThemeEvidence):  {bundle.setup_theme_evidence:.2f}")
+        print(f"  - 평균 상품 점수(AvgItemScore):      {bundle.item_avg_score:.2f}")
+        print(f"  - 역할 호환성(RoleAwareCompat):      {bundle.role_aware_compatibility:.2f}")
+        print(f"  - 필수 커버리지(MandatoryCoverage):  {bundle.mandatory_coverage:.2f}")
+        print(f"  - 선택 유용성(OptionalUsefulness):   {bundle.optional_usefulness:.2f}")
+        print(f"  - 가격 효율성(ValueEfficiency):      {bundle.value_efficiency:.2f}")
+        print(f"  - 예산 활용도(BudgetUtilization):    {bundle.budget_utilization:.2f}")
 
         mandatory_items = [sp for sp in bundle.items if sp.product.category in MANDATORY_CATEGORIES]
         optional_items  = [sp for sp in bundle.items if sp.product.category in OPTIONAL_CATEGORIES]
 
         print("\n필수 상품:")
         for sp in mandatory_items:
-            _print_product_line(sp)
+            _print_product_line(sp, theme)
 
         if optional_items:
             print("\n추가 상품:")
             for sp in optional_items:
-                _print_product_line(sp)
+                _print_product_line(sp, theme)
 
         print("\n추천 이유:")
         for reason in generate_explanation(bundle, theme):
@@ -858,7 +985,7 @@ def _format_size(metadata: dict | None, category: str) -> str:
     return ""
 
 
-def _print_product_line(sp: ScoredProduct) -> None:
+def _print_product_line(sp: ScoredProduct, theme: str) -> None:
     p         = sp.product
     cat_label = CATEGORY_LABELS.get(p.category, p.category)
     url_note  = f"\n      URL: {p.product_url}" if p.product_url else ""
@@ -869,6 +996,8 @@ def _print_product_line(sp: ScoredProduct) -> None:
     size_str  = _format_size(p.metadata, p.category)
     size_note = f"  |  크기: {size_str}" if size_str else ""
 
+    explanation = generate_product_explanation(sp, theme)
+
     print(
         f"  - [{cat_label}] {p.name}\n"
         f"      가격: {p.price:,}원{size_note}  |  "
@@ -876,6 +1005,7 @@ def _print_product_line(sp: ScoredProduct) -> None:
         f"theme_ev={sp.theme_evidence:.2f}  item_score={sp.item_score:.2f}"
         f"{url_note}"
         f"{img_note}"
+        f"\n      선택 이유: {explanation}"
     )
 
 
@@ -928,7 +1058,7 @@ def main() -> None:
     # ── 1. 사용자 입력: 테마 + 예산 ──────────────────────────────────────────
     theme_keys   = list(THEME_PRESETS.keys())
     theme_labels = [
-        f"{THEME_PRESETS[k]['label']}  —  {THEME_PRESETS[k]['description']}"
+        f"{THEME_PRESETS[k]['label']}  -  {THEME_PRESETS[k]['description']}"
         for k in theme_keys
     ]
     theme  = choose_from_menu("테마 선택", theme_keys, theme_labels)
@@ -990,7 +1120,6 @@ def main() -> None:
                 image_sim      = clamp(sp.product.image_sim),
                 text_sim       = clamp(sp.product.text_sim),
                 theme_evidence = sp.theme_evidence,
-                value_score    = sp.value_score,
             )
         scored_list.sort(key=lambda sp: sp.item_score, reverse=True)
 
