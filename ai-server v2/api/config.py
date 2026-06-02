@@ -48,6 +48,7 @@ _CATEGORY_DIMS_MM = {
                                    #   치수 모를 때 과대 추정 방지: "최소한 이 크기"로 보수적 가정.
     "MONITOR":      (600, 230),
     "SPEAKER":      (120, 150),
+    "HEADSET":      (180, 200),    # 헤드셋 (받침대/스탠드 포함 푸터프린트)
     "DESK_LAMP":    (180, 180),
     "DESK_SHELF":   (600, 250),
     "LAPTOP_STAND": (280, 250),
@@ -65,6 +66,7 @@ _PLACEMENT_ORDER = {
     "MOUSEPAD":     40,
     "MOUSE":        50,
     "SPEAKER":      60,
+    "HEADSET":      65,
     "DESK_LAMP":    70,
     "CLOCK":        80,
     "DECO":         90,
@@ -78,6 +80,7 @@ _CV_CAT_MAX_SCALE: dict[str, float] = {
     "MONITOR":    2.5,
     "SPEAKER":    2.5,
     "DESK_LAMP":  2.5,
+    "HEADSET":    2.5,
     "DESK_SHELF": 2.0,
     "LIGHTING":   3.0,
 }
@@ -92,6 +95,7 @@ _PREFERRED_POS = {
     "DESKMAT":      {"rx": 0.50, "ry": 0.55},   # 셋업 중심·앞쪽 (monitor_rx로 재정렬됨)
     "MOUSE":        {"rx": 0.70, "ry": 0.55},
     "SPEAKER":      {"rx": 0.25, "ry": 0.25},
+    "HEADSET":      {"rx": 0.85, "ry": 0.30},   # 우측-뒤 (스피커 왼쪽과 대칭)
     "DESK_LAMP":    {"rx": 0.12, "ry": 0.30},
     "DECO":         {"rx": 0.75, "ry": 0.35},
     "CLOCK":        {"rx": 0.80, "ry": 0.30},
@@ -104,6 +108,7 @@ _MIN_FRONT_SIZE = {
     "KEYBOARD":  (180, 45),
     "MOUSE":     (70, 52),
     "SPEAKER":   (55, 55),
+    "HEADSET":   (60, 70),
     "DESK_LAMP": (80, 120),
     "DECO":      (45, 45),
     "CLOCK":     (55, 40),
@@ -119,6 +124,7 @@ _CAT_ASPECT_VALID: dict[str, tuple[float, float]] = {
     # SPEAKER: DB가 전부 사운드바형(가로로 긴 ar 3~5). (0.3, 2.5)면 사운드바가 CV fallback에
     # 떨어져 SD 안 거침. (0.3, 6.0)으로 완화 — 사운드바도 ControlNet+IP-Adapter 통과.
     "SPEAKER":   (0.3, 6.0),
+    "HEADSET":   (0.4, 2.2),
     "DESK_LAMP": (0.2, 3.0),
     "LIGHTING":  (5.0, 30.0),
 }
@@ -133,6 +139,7 @@ _CAT_RY_RANGE: dict[str, tuple[float, float]] = {
     "LIGHTING":     (0.05, 0.20),   # 모니터 위쪽 (벽 가까이)
     "DESK_LAMP":    (0.20, 0.50),   # 책상 뒤~중간
     "SPEAKER":      (0.18, 0.45),   # 책상 뒤~중간
+    "HEADSET":      (0.18, 0.45),   # 책상 뒤~중간 (측면)
     "LAPTOP_STAND": (0.30, 0.55),   # 책상 중간
     "DECO":         (0.20, 0.55),   # 자유로움
     "CLOCK":        (0.18, 0.45),   # 자유로움
@@ -170,6 +177,7 @@ _FRONT_HEIGHT_RATIO = {
     "MOUSEPAD":     0.25,
     "DESKMAT":      0.30,
     "SPEAKER":      1.10,
+    "HEADSET":      1.05,
     "DESK_LAMP":    1.70,
     "DESK_SHELF":   0.20,
     "LAPTOP_STAND": 0.40,
@@ -185,6 +193,7 @@ _DESK_W_RATIO = {
     "DESKMAT":      0.55,    # 장패드(대형) 폴백 비율
     "MONITOR":      0.55,
     "SPEAKER":      0.09,
+    "HEADSET":      0.12,
     "DESK_LAMP":    0.06,
     "DESK_SHELF":   0.45,
     "LAPTOP_STAND": 0.22,
@@ -217,13 +226,13 @@ _RANKER_CAT_ID = {
     "MONITOR": 0, "KEYBOARD": 1, "MOUSE": 2, "MOUSEPAD": 3,
     "SPEAKER": 4, "DESK_LAMP": 5, "DESK_SHELF": 6,
     "LAPTOP_STAND": 7, "DECO": 8, "CLOCK": 9,
-    "LIGHTING": 10, "DESKMAT": 11,
+    "LIGHTING": 10, "DESKMAT": 11, "HEADSET": 12,
 }
-# 학습 샘플 없는 카테고리 → ranker skip, rule_score만 사용 (DESKMAT은 신규 분류라 샘플 없음)
-_RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD", "LIGHTING", "DESKMAT"}
+# 학습 샘플 없는 카테고리 → ranker skip, rule_score만 사용 (DESKMAT·HEADSET은 신규라 샘플 없음)
+_RANKER_SKIP_CATS = {"MONITOR", "MOUSEPAD", "LIGHTING", "DESKMAT", "HEADSET"}
 
 _FRONT_CATS = {"KEYBOARD", "MOUSE", "MOUSEPAD", "DESKMAT"}
-_BACK_CATS  = {"MONITOR", "SPEAKER", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK", "LIGHTING"}
+_BACK_CATS  = {"MONITOR", "SPEAKER", "HEADSET", "DESK_LAMP", "DESK_SHELF", "LAPTOP_STAND", "DECO", "CLOCK", "LIGHTING"}
 
 # 제품 입체감 분류 (3-tier).
 # flat:      책상 위에 완전히 누워있는 형태. 책상 plane perspective warp 적용.
@@ -237,6 +246,7 @@ _PRODUCT_FORM_TIER = {
     "LAPTOP_STAND": "semi_flat",
     "MONITOR":      "upright",
     "SPEAKER":      "upright",
+    "HEADSET":      "upright",
     "DESK_LAMP":    "upright",
     "DESK_SHELF":   "upright",
     "CLOCK":        "upright",
@@ -273,6 +283,7 @@ _CAT_TILT_DEG = {
 _CAT_DEPTH_SHADING = {
     "MONITOR":      0.18,   # 큰 수직물, 강한 음영
     "SPEAKER":      0.18,
+    "HEADSET":      0.15,
     "DESK_LAMP":    0.15,
     "DESK_SHELF":   0.15,
     "MOUSE":        0.12,   # 곡면 마우스, 중간 음영

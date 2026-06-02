@@ -27,6 +27,7 @@ _CATEGORY_MAP: dict[str, str | None] = {
     "DESK_SHELF":   "DESK_SHELF",
     "LIGHTING":     "LIGHTING",
     "SPEAKER":      "SPEAKER",
+    "HEADSET":      "HEADSET",
     "CLOCK":        "CLOCK",
     "DESK_LAMP":    "DESK_LAMP",
     "DECO":         "DECO",

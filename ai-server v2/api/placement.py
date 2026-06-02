@@ -222,13 +222,15 @@ def _front_bbox_for_anchor(
         "MONITOR":   0.85, "DESK_SHELF":   0.80, "DESKMAT":     0.85,
         "MOUSEPAD":  0.35, "KEYBOARD":     0.70, "LAPTOP_STAND": 0.55,
         "LIGHTING":  0.75, "SPEAKER":      0.30, "DESK_LAMP":   0.30,
-        "MOUSE":     0.20, "DECO":         0.20, "CLOCK":       0.20,
+        "HEADSET":   0.30, "MOUSE":        0.20, "DECO":        0.20,
+        "CLOCK":     0.20,
     }
     _LOWER_W_RATIO = {
         "MONITOR":  0.22, "KEYBOARD":  0.18, "DESKMAT":   0.40,
         "MOUSEPAD": 0.10, "DESK_SHELF": 0.20, "LIGHTING": 0.25,
         "SPEAKER":  0.05, "DESK_LAMP": 0.05, "MOUSE":     0.04,
-        "DECO":     0.04, "CLOCK":     0.04, "LAPTOP_STAND": 0.15,
+        "HEADSET":  0.06, "DECO":      0.04, "CLOCK":     0.04,
+        "LAPTOP_STAND": 0.15,
     }
     upper_w = int(fv_dw * _UPPER_W_RATIO.get(cat, 0.50))
     lower_w = int(fv_dw * _LOWER_W_RATIO.get(cat, 0.08))
@@ -993,8 +995,13 @@ def analyze_top_view_only(
 
 
 def compute_size_constraints_from_space(space_info: dict) -> dict[str, list[int]]:
-    # 각 카테고리의 _CAT_RY_RANGE 안에서 최대 가용 (width_mm, depth_mm) 계산.
+    # flat 카테고리(키보드/마우스/마우스패드/장패드)만 가용 (width_mm, depth_mm) 제약 생성.
     # recommendation에 보내서 후보 검색 시 사이즈 필터로 사용.
+    #
+    # ★ upright 제품(모니터/스피커/헤드셋/조명/셸프) 제외:
+    #   이들은 받침대만 책상에 닿고 본체는 위로 솟음 → 탑뷰 footprint(깊이) 제약이 무의미.
+    #   특히 모니터 ry밴드 깊이(책상 깊이의 17% ≈ 110mm)에 모니터 화면높이(height_mm 300~400)를
+    #   비교해 전량 탈락 → 추천 404가 나던 구조적 버그. flat 제품만 제약해 근본 차단.
     available_regions = space_info.get("available_regions", [])
     cm_per_px = space_info.get("cm_per_px", {"x": 0.1, "y": 0.1})
     desk_bbox_tv = space_info.get("desk_bbox_tv")
@@ -1008,6 +1015,9 @@ def compute_size_constraints_from_space(space_info: dict) -> dict[str, list[int]
 
     constraints: dict[str, list[int]] = {}
     for cat, (ry_min, ry_max) in _CAT_RY_RANGE.items():
+        # flat 제품만 탑뷰 사이즈 제약 (upright는 깊이 개념이 안 맞아 제외)
+        if _PRODUCT_FORM_TIER.get(cat, "upright") != "flat":
+            continue
         y_start = tv_dy1 + int(ry_min * tv_dh)
         y_end = tv_dy1 + int(ry_max * tv_dh)
         max_w_mm = 0
