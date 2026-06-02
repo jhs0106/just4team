@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from deskterior.recommender.config import (
     THEME_PRESETS, MANDATORY_CATEGORIES, OPTIONAL_CATEGORIES,
+    get_optional_categories,
     THEME_CATEGORY_QUERIES,
     CANDIDATE_LIMIT, BEAM_SIZE_DEFAULT, TOP_M_DEFAULT, TOP_K_DEFAULT,
 )
@@ -141,7 +142,8 @@ def recommend(req: RecommendRequest) -> dict:
         raise HTTPException(500, f"DB 연결 실패: {e}")
 
     # 4. 카테고리별 후보 검색 — space_constraints가 있으면 size 필터 적용
-    all_categories = MANDATORY_CATEGORIES + OPTIONAL_CATEGORIES
+    #    선택 카테고리는 테마 우선순위(get_optional_categories)로 도출 — 테마마다 다름.
+    all_categories = MANDATORY_CATEGORIES + get_optional_categories(req.theme)
     raw_by_category: dict[str, list[ScoredProduct]] = {}
     for category in all_categories:
         _size_cap = (req.space_constraints or {}).get(category)

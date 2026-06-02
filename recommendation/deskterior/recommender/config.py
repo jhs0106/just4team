@@ -16,10 +16,9 @@ ALLOW_THEME_GATE_FALLBACK = True
 # 0.4 = 테마 의도(0.6) 우선하되 사용자 책상 분위기 반영.
 USER_IMAGE_BLEND_WEIGHT = 0.4
 
-# 5종 모두 필수 (사용자 명세). DESK_LAMP/HEADSET 제외.
-MANDATORY_CATEGORIES = ["MONITOR", "KEYBOARD", "MOUSE", "MOUSEPAD", "SPEAKER"]
-
-OPTIONAL_CATEGORIES = []
+# 필수 = PC 셋업 기능 핵심 3종 (예산 내 반드시 포함, 없으면 추천 실패).
+#   나머지 꾸밈 제품은 테마 데이터(optional_priority)에서 도출 → 파일 하단 get_optional_categories.
+MANDATORY_CATEGORIES = ["MONITOR", "KEYBOARD", "MOUSE"]
 
 CATEGORY_LABELS = {
     "MONITOR":   "모니터",
@@ -140,6 +139,34 @@ THEME_PRESETS = {
         },
     },
 }
+
+
+# ============================================================
+# 카테고리 능력 게이트 & 테마 우선순위 도출
+# ============================================================
+
+# AI 서버가 실제로 이미지에 렌더링할 수 있는 카테고리 (다운스트림 능력 게이트).
+# 추천이 '렌더링 불가 제품'에 예산을 쓰지 않도록 차단 — 제품 선호가 아니라 기술 제약.
+# AI서버에 placement/composite 지원을 추가하면 여기에 등록 (예: HEADSET 지원 시 추가).
+RENDERABLE_CATEGORIES = {
+    "MONITOR", "KEYBOARD", "MOUSE", "MOUSEPAD", "SPEAKER", "DESK_LAMP",
+}
+
+
+def get_optional_categories(theme: str) -> list[str]:
+    # 선택(꾸밈) 카테고리를 테마의 optional_priority 가중치 내림차순으로 도출.
+    # 손으로 박은 리스트 대신 테마 데이터로 구동 — 테마마다 우선순위가 다름
+    # (gaming=헤드셋 우선, wood=조명 우선). 필수·렌더링 불가 카테고리는 제외.
+    prio = (THEME_PRESETS.get(theme) or {}).get("optional_priority", {})
+    cats = [c for c in prio
+            if c not in MANDATORY_CATEGORIES and c in RENDERABLE_CATEGORIES]
+    cats.sort(key=lambda c: prio[c], reverse=True)
+    return cats
+
+
+# 멤버십 판정용 정적 집합 (점수 계산에서 "이 제품이 선택 카테고리인가" 체크).
+# 렌더링 가능한 비필수 카테고리의 합집합 — 역시 손으로 박지 않고 도출.
+OPTIONAL_CATEGORIES = sorted(RENDERABLE_CATEGORIES - set(MANDATORY_CATEGORIES))
 
 # ============================================================
 # THEME-CATEGORY SEARCH QUERIES

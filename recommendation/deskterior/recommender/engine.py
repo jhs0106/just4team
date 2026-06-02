@@ -24,6 +24,7 @@ from deskterior.recommender.config import (
     CATEGORY_LABELS,
     MANDATORY_CATEGORIES,
     OPTIONAL_CATEGORIES,
+    get_optional_categories,
     ROLE_PAIR_WEIGHTS,
     OPTIONAL_GAIN_THRESHOLD,
     USER_IMAGE_BLEND_WEIGHT,
@@ -670,10 +671,11 @@ def recommend_setup(
     if not beams:
         return []
 
-    # ── Phase 2: 선택 상품 추가 ───────────────────────────────────────────
-    for category in OPTIONAL_CATEGORIES:
+    # ── Phase 2: 선택 상품 추가 (테마 우선순위 순서) ──────────────────────────
+    # 테마별 optional_priority 가중치 내림차순 → 예산이 남는 만큼 위에서부터 추가.
+    for category in get_optional_categories(theme):
         new_beams = list(beams)  # skip 옵션 유지
-        threshold  = OPTIONAL_GAIN_THRESHOLD[theme][category]
+        threshold  = OPTIONAL_GAIN_THRESHOLD.get(theme, {}).get(category, 0.35)
         candidates = candidates_by_category.get(category, [])[:top_m]
 
         for state in beams:
