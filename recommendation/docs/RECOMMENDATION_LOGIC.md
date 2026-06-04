@@ -168,12 +168,15 @@ OptionalGain = 0.30 × ItemScore
              + 0.20 × RoleCompatibility
              + 0.10 × Priority
              + 0.15 × BudgetGain
-             - 부정키워드 패널티(0.15)
+             - conflict penalty(조건부 0.15)
 ```
 
 - **RoleCompatibility**: 기존 담긴 상품과의 카테고리 쌍 가중 평균 테마 일치도
 - **Priority**: 테마별로 정해진 선택 상품 우선순위 (예: gaming 테마에서 HEADSET=0.90)
-- **BudgetGain**: 이 상품 추가 시 BudgetUsageScore 증가분
+- **BudgetGain**: 이 상품 추가 시 BudgetUsageScore 증가분 (`max(0, after-before)`)
+- **conflict penalty**: 상품명에 테마의 negative keyword가 포함되면 0.15 차감
+
+최종 OptionalGain은 `clamp`로 0~1 범위로 제한합니다.
 
 OptionalGain이 임계값 이상일 때만 번들에 추가됩니다.
 
@@ -233,12 +236,15 @@ FinalScore = SetupScore × (0.70 + 0.30 × BudgetUsageScore)
 
 최종 추천 전 테마 부합도 최소 기준을 검사합니다.
 
-| 테마 | 필수 카테고리 최소 매칭 수 | 평균 ThemeEvidence 최소값 |
-|---|---|---|
-| white | 1개 이상 | 0.58 |
-| black | 2개 이상 | 0.60 |
-| gaming | 2개 이상 | 0.65 |
-| wood | 1개 이상 (선택상품 있는 경우) | 0.53 |
+`mandatory evidence count`는 필수 카테고리 상품 중 `theme_evidence > 0.2`인 개수입니다.
+
+- `white`: `mandatory evidence count >= 1` AND `avg_theme_evidence >= 0.58` AND `conflict_count <= 1`
+- `black`: `mandatory evidence count >= 2` AND `avg_theme_evidence >= 0.60` AND `conflict_count <= 1`
+- `gaming`: `mandatory evidence count >= 2` AND `avg_theme_evidence >= 0.65`
+- `wood` (선택상품 있음): `avg_theme_evidence >= 0.53` AND `wood_optional_ok >= 1` AND `conflict_count <= 1`
+- `wood` (선택상품 없음): `avg_theme_evidence >= 0.60` AND `conflict_count <= 1`
+
+여기서 `wood_optional_ok`는 선택 카테고리(`DESK_LAMP`, `MOUSEPAD`, `SPEAKER`) 중 `theme_evidence > 0.2`를 만족하는 상품 수입니다.
 
 기준 미달 번들은 `ALLOW_THEME_GATE_FALLBACK = True`인 경우 FinalScore × 0.75 패널티 후 허용.
 

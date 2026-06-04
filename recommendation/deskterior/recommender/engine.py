@@ -334,7 +334,7 @@ def compute_budget_usage_score(total_price: int, budget: int) -> float:
     """BudgetUsageScore = min((Cost/Budget)/0.85, 1.0) — 85% 사용 시 만점."""
     if budget <= 0:
         return 0.0
-    return min((total_price / budget) / 0.85, 1.0)
+    return min((total_price / budget) / 0.85, 1.0)  
 
 
 def normalize_value_scores(scored_by_category: dict[str, list[ScoredProduct]]) -> None:
